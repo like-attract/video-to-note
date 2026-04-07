@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多平台视频智能总结助手</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        /* 额外样式 */
+        .param-hint {
+            background: #f0f4ff;
+            border-left: 3px solid #667eea;
+            padding: 8px 12px;
+            margin-top: 6px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            color: #4a5568;
+            line-height: 1.4;
+        }
+        .param-hint code {
+            background: #e2e8f0;
+            padding: 2px 4px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.7rem;
+        }
+        .param-hint .step {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 0px 6px;
+            border-radius: 12px;
+            font-size: 0.65rem;
+            margin-right: 6px;
+        }
+        .support-badge {
+            display: inline-block;
+            background: #e8f0fe;
+            padding: 2px 8px;
+            border-radius: 20px;
+            font-size: 0.7rem;
+            margin: 2px;
+        }
+        .support-info {
+            margin-top: 8px;
+            font-size: 0.7rem;
+            color: #666;
+            text-align: center;
+        }
+        .input-area {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .input-area select {
+            width: 120px;
+            padding: 12px;
+            border: 2px solid #e0e4e8;
+            border-radius: 12px;
+            font-size: 0.9rem;
+        }
+        .input-area input[type="text"] {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e0e4e8;
+            border-radius: 12px;
+            font-size: 1rem;
+        }
+        .input-area input[type="file"] {
+            flex: 1;
+            padding: 10px;
+            border: 2px dashed #e0e4e8;
+            border-radius: 12px;
+            background: #f8fafc;
+        }
+        .file-info {
+            margin-top: 8px;
+            font-size: 0.7rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+<div class="app-container">
+    <!-- 侧边栏配置 -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h2>⚙️ 配置中心</h2>
+            <p class="sidebar-subtitle">首次使用需要完成以下配置</p>
+        </div>
+
+        <!-- ========== AI 大模型配置区域 ========== -->
+        <div class="config-section ai-section">
+            <div class="section-title">🤖 AI 大模型配置</div>
+
+            <div class="config-group">
+                <label>选择 AI 大模型</label>
+                <select id="llmModel">
+                    <option value="deepseek">DeepSeek (推荐，性价比高)</option>
+                    <option value="openai">OpenAI GPT-4o-mini</option>
+                    <option value="openai_gpt4">OpenAI GPT-4o</option>
+                    <option value="openai_gpt35">OpenAI GPT-3.5-Turbo</option>
+                    <option value="qwen">通义千问 (阿里云)</option>
+                    <option value="glm">智谱清言 (GLM-4-Flash)</option>
+                    <option value="moonshot">月之暗面 (Kimi)</option>
+                    <option value="custom">自定义 API (OpenAI 兼容)</option>
+                </select>
+                <div class="param-hint">
+                    📌 <strong>说明</strong>：选择用于生成视频总结的 AI 模型。<br>
+                    🔑 <strong>获取方式</strong>：选择模型后，首次使用时系统会提示输入对应的 API Key。<br>
+                    💡 <strong>推荐</strong>：DeepSeek 性价比最高，新用户注册有免费额度。
+                </div>
+            </div>
+
+            <!-- 自定义 API 配置（默认隐藏） -->
+            <div id="customApiConfig" style="display: none;">
+                <div class="config-group">
+                    <label>🔧 自定义 API Base URL</label>
+                    <input type="text" id="customBaseUrl" placeholder="https://api.example.com/v1">
+                </div>
+                <div class="config-group">
+                    <label>📝 自定义模型名称</label>
+                    <input type="text" id="customModelName" placeholder="model-name">
+                </div>
+                <div class="config-group">
+                    <label>🔑 自定义 API Key</label>
+                    <input type="password" id="customApiKey" placeholder="sk-...">
+                </div>
+            </div>
+        </div>
+
+        <!-- ========== B站 Cookie 配置区域 ========== -->
+        <div class="config-section bili-section">
+            <div class="section-title">🍪 B站 Cookie 配置</div>
+            <div class="section-subtitle">仅B站高清视频需要</div>
+
+            <div class="config-group">
+                <label>SESSDATA</label>
+                <input type="password" id="sessdata" placeholder="从浏览器Cookie获取">
+                <div class="param-hint">
+                    <span class="step">核心认证</span> <strong>作用</strong>：B站登录凭证，用于获取1080P+及大会员内容。<br>
+                    <strong>获取步骤</strong>：浏览器F12 → Application → Cookies → 找到 SESSDATA
+                </div>
+            </div>
+
+            <div class="config-group">
+                <label>bili_jct (CSRF Token)</label>
+                <input type="password" id="biliJct" placeholder="从浏览器Cookie获取">
+                <div class="param-hint">
+                    <span class="step">安全令牌</span> 与 SESSDATA 同位置获取
+                </div>
+            </div>
+
+            <div class="config-group">
+                <label>buvid3 (设备标识)</label>
+                <input type="text" id="buvid3" placeholder="从浏览器Cookie获取">
+                <div class="param-hint">
+                    <span class="step">设备指纹</span> 与 SESSDATA 同位置获取
+                </div>
+            </div>
+        </div>
+
+        <!-- ========== 语音识别配置 ========== -->
+        <div class="config-section audio-section">
+            <div class="section-title">🎙️ 语音识别配置</div>
+
+            <div class="config-group">
+                <label>Whisper 模型</label>
+                <select id="whisperModel">
+                    <option value="tiny">tiny（最快，适合短视频）</option>
+                    <option value="base" selected>base（推荐，平衡速度与准确度）</option>
+                    <option value="small">small（较准，稍慢）</option>
+                    <option value="medium">medium（很准，较慢）</option>
+                    <option value="large">large（最准，非常慢）</option>
+                </select>
+                <div class="param-hint">
+                    💡 <strong>建议</strong>：视频 < 30分钟用 base，> 30分钟用 tiny，追求准确用 large。
+                </div>
+            </div>
+
+            <div class="config-group checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="useGpu">
+                    <span class="checkmark"></span>
+                    <span class="label-text">🚀 启用 GPU 加速</span>
+                </label>
+                <div class="param-hint">
+                    ⚠️ 需要 NVIDIA 显卡且安装了 CUDA 版 PyTorch
+                </div>
+            </div>
+        </div>
+
+        <!-- ========== 视频处理配置 ========== -->
+        <div class="config-section video-section">
+            <div class="section-title">📸 视频处理配置</div>
+
+            <div class="config-group">
+                <label>截图间隔（秒）</label>
+                <input type="number" id="screenshotInterval" value="10" min="3" max="60">
+                <div class="param-hint">
+                    💡 建议：10秒适合大多数视频，5秒更详细但截图更多
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar-footer">
+            <button id="saveConfigBtn" class="btn-primary">💾 保存配置</button>
+            <button id="resetConfigBtn" class="btn-secondary">↺ 重置配置</button>
+            <p class="privacy-note">💡 所有配置保存在浏览器中，不会上传到服务器</p>
+        </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+        <header class="main-header">
+            <div class="header-icon">🎬</div>
+            <div class="header-text">
+                <h1>多平台视频智能总结助手</h1>
+                <p>支持 B站、YouTube、抖音、快手、腾讯视频、爱奇艺、优酷 | 支持本地视频上传</p>
+            </div>
+        </header>
+
+        <!-- 输入区 -->
+        <div class="input-card">
+            <div class="input-area">
+                <select id="sourceType">
+                    <option value="url">视频链接</option>
+                    <option value="local">本地文件</option>
+                </select>
+
+                <input type="text" id="videoUrl" placeholder="https://www.bilibili.com/video/BV... 或 YouTube/抖音链接">
+
+                <input type="file" id="localFile" accept="video/*" style="display: none;">
+
+                <button id="submitBtn" class="btn-primary btn-gradient">
+                    <span class="btn-icon">🚀</span>
+                    <span class="btn-text">开始总结</span>
+                </button>
+            </div>
+
+            <div id="fileInfo" class="file-info" style="display: none;"></div>
+
+            <div class="support-info">
+                <span class="support-label">✅ 支持平台：</span>
+                <span class="support-badge">B站</span>
+                <span class="support-badge">YouTube</span>
+                <span class="support-badge">抖音</span>
+                <span class="support-badge">快手</span>
+                <span class="support-badge">腾讯视频</span>
+                <span class="support-badge">爱奇艺</span>
+                <span class="support-badge">优酷</span>
+                <span class="support-badge">本地视频</span>
+            </div>
+        </div>
+
+        <!-- 进度区 -->
+        <div id="progressArea" class="progress-card" style="display: none;">
+            <div class="progress-header">
+                <h3>⏳ 处理进度</h3>
+                <span class="progress-percent" id="progressPercent">0%</span>
+            </div>
+            <div class="progress-steps">
+                <div class="step" data-step="1">
+                    <div class="step-icon">📹</div>
+                    <div class="step-text">获取信息</div>
+                </div>
+                <div class="step" data-step="2">
+                    <div class="step-icon">⬇️</div>
+                    <div class="step-text">下载视频</div>
+                </div>
+                <div class="step" data-step="3">
+                    <div class="step-icon">📸</div>
+                    <div class="step-text">提取截图</div>
+                </div>
+                <div class="step" data-step="4">
+                    <div class="step-icon">🎙️</div>
+                    <div class="step-text">语音识别</div>
+                </div>
+                <div class="step" data-step="5">
+                    <div class="step-icon">🤖</div>
+                    <div class="step-text">AI总结</div>
+                </div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="log-area" id="logArea">
+                <div class="log-entry">等待任务开始...</div>
+            </div>
+        </div>
+
+        <!-- 结果区 -->
+        <div id="resultArea" class="result-card" style="display: none;">
+            <div class="result-header">
+                <div class="result-title">
+                    <span class="result-icon">📄</span>
+                    <h2>总结报告</h2>
+                </div>
+                <div class="result-actions">
+                    <select id="formatSelect">
+                        <option value="markdown">Markdown (.zip)</option>
+                        <option value="html">HTML</option>
+                        <option value="json">JSON</option>
+                        <option value="txt">纯文本</option>
+                    </select>
+                    <button id="downloadMdBtn" class="btn-secondary">
+                        <span>⬇️</span> 下载
+                    </button>
+                </div>
+            </div>
+            <div id="markdownContent" class="markdown-body"></div>
+        </div>
+    </main>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
