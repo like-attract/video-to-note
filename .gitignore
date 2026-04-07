@@ -1,1 +1,15 @@
 /backend/venv/
+# 常见的虚拟环境目录名称
+venv/
+env/
+.env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python 其他常见忽略项
+__pycache__/
+*.py[cod]
+*.so
+.Python
