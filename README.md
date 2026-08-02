@@ -1,5 +1,7 @@
 # VideoToNo
 
+[简体中文](README.md) | [English](README_EN.md)
+
 VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机读取视频链接或媒体文件，优先使用平台提供的字幕；没有可用字幕时，下载最佳音频并通过 `faster-whisper` 转写，最后调用用户选择的大模型生成带时间轴的 Markdown 笔记。
 
 前端页面和 API 由同一个 FastAPI 服务提供，默认地址为 <http://127.0.0.1:8000>。
@@ -185,7 +187,7 @@ VideoToNo/
 |-- .env.example
 |-- pyproject.toml
 |-- start.ps1
-|-- README_CN.md
+|-- README.md
 `-- README_EN.md
 ```
 
