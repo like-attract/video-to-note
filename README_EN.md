@@ -221,4 +221,4 @@ The application downloads the best available audio stream and runs `faster-whisp
 
 ## Project status
 
-This is a local personal-use tool, not a multi-user service. The repository currently has no license file; do not infer licensing terms from historical badges or descriptions.
+This is a local personal-use tool, not a multi-user service. The project is released under the [MIT License](LICENSE).
