@@ -1,15 +1,19 @@
-/backend/venv/
-# 常见的虚拟环境目录名称
-venv/
-env/
-.env/
 .venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Python 其他常见忽略项
+venv/
 __pycache__/
 *.py[cod]
-*.so
-.Python
+.pytest_cache/
+.test-tmp/
+.tmp/
+.runtime/
+pytest-cache-files-*/
+server.stdout.log
+server.stderr.log
+.env
+workspace/
+*.part
+*.ytdl
+Thumbs.db
+.DS_Store
+.idea/
+*.iml

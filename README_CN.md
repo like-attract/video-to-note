@@ -1,514 +1,224 @@
-# 🎬 VideoToNotes - 多平台视频智能总结助手
+# VideoToNo
 
-<div align="center">
+VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机读取视频链接或媒体文件，优先使用平台提供的字幕；没有可用字幕时，下载最佳音频并通过 `faster-whisper` 转写，最后调用用户选择的大模型生成带时间轴的 Markdown 笔记。
 
-**将本地/YouTube/B站等视频一键转换为结构化笔记**
+前端页面和 API 由同一个 FastAPI 服务提供，默认地址为 <http://127.0.0.1:8000>。
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## 功能特点
 
-支持 B站 · YouTube · 抖音 · 快手 · 腾讯视频 · 爱奇艺 · 优酷 · 本地视频
+- 支持视频链接和本地音视频文件。
+- 对链接先尝试读取人工字幕或自动字幕，包括 B 站的 `ai-zh` 中文 AI 字幕轨；失败后使用 `yt-dlp` 的 `bestaudio/best` 音轨和 `faster-whisper` 兜底。
+- 从字幕或 Whisper 分段中保留真实起止时间，不要求大模型猜测时间点。
+- 在调用大模型前检查转录字数和语音覆盖率；源视频被静音、替换或只剩片尾时会停止任务，避免生成误导性笔记。
+- 短转录直接生成笔记；只有长转录才按完整分段切块并整合，避免不必要的多次调用。
+- 截图默认关闭；启用后按指定间隔提取低清预览帧并作为笔记附件，不参与视觉理解。
+- 前端可直接下载 Markdown 笔记；完整转录、任务清单和可选截图保留在本地任务目录。
+- API Key 和 B 站 Cookie 不写入浏览器持久化存储或输出文件，只随当前请求在内存中使用。
 
-</div>
+## 支持范围
 
----
+当前主要面向：
 
-## ✨ 功能特性
+- B 站视频链接；
+- YouTube 视频链接；
+- 其他能够被当前版本 `yt-dlp` 正确解析的 `http`/`https` 视频链接；
+- 本地媒体文件：`.mp3`、`.m4a`、`.wav`、`.flac`、`.aac`、`.mp4`、`.mkv`、`.mov`、`.webm`、`.avi`。
 
-- 🌐 **多平台支持**: 支持 B站、YouTube、抖音、快手、腾讯视频、爱奇艺、优酷等主流视频平台
-- 📁 **本地上传**: 支持直接上传本地视频文件进行处理
-- 🎙️ **语音识别**: 基于 OpenAI Whisper 模型，支持多种精度级别和 GPU 加速
-- 🤖 **AI 总结**: 集成 DeepSeek、OpenAI GPT、通义千问、智谱清言、Kimi 等多个大语言模型
-- 📸 **关键帧提取**: 自动提取视频截图并嵌入到笔记中
-- 📝 **结构化输出**: 生成包含摘要、核心观点、时间节点的 Markdown 格式笔记
-- 🎨 **美观界面**: 现代化的 Web 前端界面，实时显示处理进度
-- 💾 **一键下载**: 支持下载包含笔记和截图的完整 ZIP 包
+平台接口、登录限制和反爬策略会变化。本项目不保证上述每个平台、每个视频或每种清晰度始终可用；是否能够处理，最终取决于视频访问权限、字幕可见性以及 `yt-dlp` 对该链接的解析能力。播放列表会按单个视频处理。
 
----
+## 处理流程
 
-## 🏗️ 项目结构
+1. 读取链接元数据，或接收本地媒体上传。
+2. 对在线视频优先查找中文或英文人工字幕，其次查找自动字幕。
+3. 如果字幕不存在、不可访问或无法解析，下载 `bestaudio/best` 音轨并使用 `faster-whisper` 转写。本地文件直接进入转写流程。
+4. 将字幕或转写结果保存为带真实起止时间的分段记录。
+5. 对较长转录按分段边界切块，生成局部摘要后再生成完整笔记。
+6. 可选地提取定时截图。
+7. 输出 Markdown 笔记、转录文件和可选截图。
 
-```
-VideoToNotes/
-├── backend/                    # 后端服务
-│   ├── main.py                # FastAPI 主入口
-│   ├── video_processor.py     # 视频处理器（下载、信息获取、关键帧提取）
-│   ├── whisper_asr.py         # Whisper 语音识别模块
-│   ├── llm_summarizer.py      # LLM 总结生成器
-│   ├── requirements.txt       # Python 依赖
-│   ├── .env                   # 环境配置文件
-│   └── workspace/             # 临时工作目录（自动生成）
-├── frontend/                  # 前端页面
-│   ├── index.html             # 主页面
-│   ├── style.css              # 样式文件
-│   └── script.js              # 交互逻辑
-└── readme.md                  # 项目说明文档
-```
+## 环境要求
 
----
+- Windows 和 PowerShell；其他系统也可以手动运行 Uvicorn。
+- Python **3.11**。
+- 可访问视频来源、Whisper 模型下载地址和所选大模型 API 的网络环境。
+- 大模型服务的 API Key。
+- 可选：支持 CUDA 的 NVIDIA GPU。未启用或不可用时使用 CPU。
 
-## 🚀 快速开始
+建议始终使用项目根目录下的 `.venv`，避免依赖与系统 Python 混用。
 
-### 前置要求
+## 安装
 
-- **Python**: 3.9 或更高版本
-- **FFmpeg**: 用于音频提取和视频处理
-- **GPU (可选)**: NVIDIA 显卡 + CUDA 驱动（用于 Whisper 加速）
+在项目根目录执行：
 
-### 步骤 1: 安装 FFmpeg
-
-**Windows:**
-```bash
-# 使用 Chocolatey 安装
-choco install ffmpeg
-
-# 或手动下载安装
-# 访问 https://ffmpeg.org/download.html 下载 Windows 版本
-# 解压后将 bin 目录添加到系统 PATH
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r backend\requirements.txt
 ```
 
-**macOS:**
-```bash
-brew install ffmpeg
+如果 PowerShell 阻止激活脚本，可以不激活环境，直接使用：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
-**Linux:**
-```bash
-sudo apt update && sudo apt install ffmpeg
+## 启动
+
+推荐运行项目自带脚本：
+
+```powershell
+.\start.ps1
 ```
 
-### 步骤 2: 克隆项目
+脚本默认在后台启动，自动检查端口和健康状态，并将 PID 与日志写入被 Git 忽略的 `.runtime/`。常用管理命令：
 
-```bash
-git clone https://github.com/your-username/VideoToNotes.git
-cd VideoToNotes
+```powershell
+.\stop.ps1                 # 关闭
+.\restart.ps1              # 重启
+.\start.ps1 -Foreground    # 前台调试，Ctrl+C 关闭
+.\start.ps1 -Port 8010     # 指定其他端口
 ```
 
-### 步骤 3: 创建虚拟环境
+`HOST`、`PORT` 和 `RELOAD` 可以写入项目根目录的 `.env`；后台模式不会启用自动重载，前台模式会读取 `RELOAD=true`。
 
-```bash
-# 进入后端目录
-cd backend
+也可以在已激活的 `.venv` 中手动启动：
 
-# 创建虚拟环境
-python -m venv venv
-
-# 激活虚拟环境
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+```powershell
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-### 步骤 4: 安装依赖
+随后打开 <http://127.0.0.1:8000>。前端静态文件和 `/api/*` 接口都由这个 8000 端口提供，不需要单独启动前端服务。
 
-```bash
-pip install -r requirements.txt
-```
+健康检查地址为 <http://127.0.0.1:8000/api/health>。任务处理期间，前端会显示后端同步的实际处理时长，并在完成、失败或取消时冻结计时。
 
-**如需 GPU 加速（NVIDIA 显卡用户）：**
-```bash
-# 卸载 CPU 版本的 torch
-pip uninstall torch torchaudio
+## 使用方法
 
-# 安装 CUDA 版本的 torch（根据你的 CUDA 版本选择）
-# CUDA 11.8:
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+1. 先选择 Provider，再选择预设模型并填写 API Key。DeepSeek 预设会按 `deepseek-v4-flash` 或 `deepseek-v4-pro` 原样提交；运行日志会显示实际 Provider、Model 和 Base URL。也可以在任意 Provider 下手动填写模型 ID，或配置自定义 OpenAI 兼容地址。
+2. 选择笔记模式。`精简摘要` 和 `详细复原` 对短转录只调用一次；`详细笔记 + 点评分析` 先生成忠实笔记，再用独立调用补充中性的内容点评与分析。三种模式都使用简短提示词，不强制八股式章节。
+3. 选择推理强度。`自动` 会为精简摘要关闭思考、为详细复原使用高档、为点评分析使用最大档；后端会把统一选项映射为各 Provider 实际支持的参数。模型返回空正文时会自动关闭思考重试一次。
+4. 选择 Whisper 模型。默认使用下载较小、启动更稳妥的 `base`；`small` 的中文识别通常更准确，但首次下载、内存和处理时间也更多。
+5. 粘贴视频链接，或切换到本地文件并上传媒体。
+6. `复用转录` 会自动查找同一链接的 `transcript.json`，失败页的“从断点继续”和结果页的“基于转录重新生成”也会显式复用旧任务；选择 `从头处理` 才会重新读取字幕、音频和 Whisper。
+7. B 站公开访问受限时，可临时填写 `SESSDATA`、`bili_jct` 和 `buvid3`。
+8. 点击开始生成，等待任务完成后预览或下载 Markdown。处理中可以取消任务，已生成的中间文件会保留以供后续复用。
 
-# CUDA 12.1:
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
+截图选项默认关闭。启用后，在线链接会额外下载低清视频并定时取帧，因此处理时间、网络流量和磁盘占用都会增加。当前截图仅作为附件插入笔记，不会发送给多模态模型进行画面分析。
 
-### 步骤 5: 配置环境变量
+## 输出内容
 
-复制 `.env` 文件并编辑：
+每个任务的文件保存在 `workspace/<task-id>/`，结果页会显示该目录的绝对路径。前端下载按钮只下载 `notes.md`；目录中还包含：
 
-```bash
-# Windows
-copy .env .env.local
+复用旧转录时仍会创建新的任务 ID，新 `notes.md` 写入新目录；旧任务的转录和笔记不会被覆盖。
 
-# macOS/Linux
-cp .env .env.local
-```
+- `notes.md`：最终结构化视频笔记；
+- `transcript.md`：便于阅读的带时间戳转录；
+- `transcript.json`：包含语言、来源以及每段 `start`、`end`、`text` 的结构化转录；
+- `images/*.jpg`：仅在启用截图时存在。
 
-编辑 `.env` 文件，填入你的 API Key：
+平台字幕的准确性由平台字幕质量决定；Whisper 转写可能误识别人名、数字和专业术语。涉及重要事实时，应回到对应时间段核验原视频。
 
-```env
-# ========== AI 大模型配置（至少配置一个） ==========
+对于较长媒体，如果可识别语音覆盖率和单位时长文字量同时过低，应用会保留转录文件并在调用大模型前停止。常见原因包括源视频被审核占位、音轨静音、版权替换或内容以音乐为主。
 
-# DeepSeek（推荐，性价比高）
-DEEPSEEK_API_KEY=sk-your-deepseek-api-key
-DEEPSEEK_MODEL=deepseek-chat
+## 隐私与安全
 
-# OpenAI GPT（可选）
-# OPENAI_API_KEY=sk-your-openai-api-key
+- API Key 和 B 站 Cookie 只随当前页面提交的请求发送到本机后端，不写入 `localStorage`、任务文件或日志。
+- 后端使用 API Key 调用所选大模型服务，转录文本会被发送给该服务。请根据对应服务的隐私政策决定是否处理敏感内容。
+- 媒体下载、字幕解析、Whisper 转写和文件生成均在本机完成；在线视频本身仍需从来源平台下载。
+- 服务默认只监听 `127.0.0.1`，请不要将它改为 `0.0.0.0` 后暴露到公网。当前项目没有身份认证、租户隔离或面向公网部署所需的防护。
+- Cookie 相当于登录凭据。仅在确有需要时填写，不要分享给他人；使用结束后关闭或刷新页面。
 
-# 通义千问（可选）
-# QWEN_API_KEY=sk-your-qwen-api-key
+## 配置
 
-# 智谱清言（可选）
-# ZHIPU_API_KEY=your-zhipu-api-key
+应用会从项目根目录的 `.env` 读取以下可选设置。可以参考 `.env.example`：
 
-# 月之暗面 Kimi（可选）
-# MOONSHOT_API_KEY=sk-your-moonshot-api-key
-
-# ========== B站 Cookie 配置（仅高清视频需要） ==========
-BILIBILI_SESSDATA=your-sessdata
-BILIBILI_BILI_JCT=your-bili-jct
-BILIBILI_BUVID3=your-buvid3
-
-# ========== 服务配置 ==========
-HOST=0.0.0.0
+```dotenv
+HOST=127.0.0.1
 PORT=8000
+RELOAD=false
+MAX_UPLOAD_MB=500
+# VIDEOTONOTES_WORKSPACE=D:\path\to\workspace
 ```
 
-#### 🔑 获取 API Key
+为了保持个人桌面使用的安全边界，建议保留 `HOST=127.0.0.1`。前端只持久化模型选择、Whisper 设置和截图设置等非敏感偏好。
 
-**DeepSeek（推荐）：**
-1. 访问 [DeepSeek 开放平台](https://platform.deepseek.com/)
-2. 注册账号并完成实名认证
-3. 在"API Keys"页面创建新密钥
-4. 新用户赠送免费额度，性价比极高
+## 测试
 
-**OpenAI：**
-1. 访问 [OpenAI Platform](https://platform.openai.com/)
-2. 注册账号并绑定支付方式
-3. 在"API Keys"页面创建密钥
+安装开发依赖并运行测试：
 
-**其他模型：**
-- 通义千问：[阿里云灵积平台](https://dashscope.aliyun.com/)
-- 智谱清言：[智谱 AI 开放平台](https://open.bigmodel.cn/)
-- 月之暗面：[Kimi 开放平台](https://platform.moonshot.cn/)
-
-#### 🍪 获取 B站 Cookie
-
-1. 浏览器登录 [B站](https://www.bilibili.com/)
-2. 按 `F12` 打开开发者工具
-3. 切换到 **Application**（或"存储"）标签
-4. 左侧选择 **Cookies** → `https://www.bilibili.com`
-5. 找到以下三个值并复制：
-   - `SESSDATA`: 登录凭证
-   - `bili_jct`: CSRF Token
-   - `buvid3`: 设备标识
-
----
-
-## 🎯 使用方法
-
-### 方式一：Web 界面（推荐）
-
-#### 1. 启动后端服务
-
-```bash
-cd backend
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
-
-python main.py
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-服务将在 `http://localhost:8000` 启动。
+还可以在不调用大模型的情况下检查在线视频流程：
 
-#### 2. 打开前端页面
-
-直接在浏览器中打开 `frontend/index.html` 文件，或者使用简单的 HTTP 服务器：
-
-```bash
-# 在项目根目录执行
-cd frontend
-python -m http.server 3000
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL"
+.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL" --download-audio
+.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL" --transcribe --model base
 ```
 
-然后访问 `http://localhost:3000`
+后两条命令会产生实际网络流量；转写命令在首次使用时还会下载 Whisper 模型。
 
-#### 3. 使用流程
+## 目录结构
 
-1. **配置 AI 模型**：在左侧配置中心选择 AI 模型并输入 API Key
-2. **配置 B站 Cookie**（可选）：如需下载 B站高清视频，填写 Cookie 信息
-3. **调整参数**：根据需要选择 Whisper 模型、截图间隔等
-4. **输入视频链接或上传本地文件**：
-   - 选择"视频链接"模式，粘贴视频 URL
-   - 或选择"本地文件"模式，上传视频文件
-5. **点击"开始总结"**：等待处理完成
-6. **查看和下载**：在线预览生成的笔记，或下载完整的 ZIP 包
-
-### 方式二：API 调用
-
-#### 启动服务后，可以通过 API 进行调用：
-
-**1. 上传本地视频：**
-```bash
-curl -X POST "http://localhost:8000/api/upload" \
-  -F "file=@/path/to/video.mp4"
+```text
+VideoToNo/
+|-- backend/
+|   |-- main.py               # FastAPI 路由、任务和输出打包
+|   |-- video_processor.py    # yt-dlp、字幕选择、音频和截图处理
+|   |-- whisper_asr.py        # faster-whisper 转写
+|   |-- transcript.py         # 字幕解析、时间戳和分块
+|   |-- llm_summarizer.py     # 分块摘要与最终笔记
+|   |-- requirements.txt
+|   `-- requirements-dev.txt
+|-- frontend/
+|   |-- index.html
+|   |-- script.js
+|   `-- style.css
+|-- scripts/
+|   `-- smoke_video.py
+|-- tests/
+|-- workspace/                # 运行时任务文件，已被 Git 忽略
+|-- .env.example
+|-- pyproject.toml
+|-- start.ps1
+|-- README_CN.md
+`-- README_EN.md
 ```
 
-响应示例：
-```json
-{
-  "task_id": "abc123-def456-ghi789",
-  "file_path": "D:\\workspace\\abc123\\video.mp4",
-  "filename": "video.mp4"
-}
-```
+## 常见问题
 
-**2. 开始总结（本地文件）：**
-```bash
-curl -X POST "http://localhost:8000/api/summarize" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_url": "",
-    "upload_task_id": "abc123-def456-ghi789",
-    "screenshot_interval": 10,
-    "whisper_model": "base",
-    "use_gpu": false,
-    "llm_config": {
-      "model_type": "deepseek",
-      "api_key": "sk-your-api-key"
-    }
-  }'
-```
+### 首次转写为什么等待很久？
 
-**3. 开始总结（在线视频）：**
-```bash
-curl -X POST "http://localhost:8000/api/summarize" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_url": "https://www.bilibili.com/video/BV1xx411c7mD",
-    "screenshot_interval": 10,
-    "whisper_model": "base",
-    "use_gpu": false,
-    "bilibili_cookie": {
-      "sessdata": "your-sessdata",
-      "bili_jct": "your-bili-jct",
-      "buvid3": "your-buvid3"
-    },
-    "llm_config": {
-      "model_type": "deepseek",
-      "api_key": "sk-your-api-key"
-    }
-  }'
-```
+`faster-whisper` 会在第一次使用某个模型时下载模型文件。下载耗时取决于模型大小和网络状况，后续会复用本机缓存。切换到另一个模型时仍可能再次下载。
 
-**4. 查询任务状态：**
-```bash
-curl "http://localhost:8000/api/task/{task_id}"
-```
+模型默认缓存在 `workspace/_model_cache/`。如需改到其他磁盘，可在 `.env` 中设置 `WHISPER_CACHE_DIR`。若首次下载失败，请检查 Hugging Face 的网络连通性、代理设置以及缓存目录写入权限。
+应用默认禁用 Hugging Face Xet 下载后端，改用普通 HTTP 下载，以减少 Windows 网络下的 CAS 文件重建错误。
+如果所选模型尚未完整缓存且本机已有可用的 `base`，任务会直接降级到 `base` 并在运行日志中注明，避免长时间卡在不稳定的权重下载上。
 
-**5. 下载总结报告：**
-```bash
-curl -O "http://localhost:8000/api/download/{task_id}"
-```
+### CPU 转写为什么比视频时长还久？
 
----
+速度取决于 CPU、视频时长和模型大小。CPU 模式使用 `int8` 以降低资源压力，但 `medium`、`large-v3` 和 `turbo` 仍可能较慢并占用较多内存。个人电脑上建议先用 `base`；确认 CUDA 环境可用后再启用 GPU。
 
-## ⚙️ 配置说明
+### 为什么需要 B 站 Cookie？
 
-### Whisper 模型选择
+公开且可直接访问的视频通常不需要 Cookie。部分播放器可见的中文 AI 字幕也只会在登录态字幕接口中返回；未填写凭据时，程序会记录提示并回退到 Whisper。登录可见、访问受限或字幕接口受限的视频可能需要当前账号凭据，但 Cookie 不能绕过账号本身没有的权限。凭据过期后需重新获取，且平台策略变化仍可能导致解析失败。
 
-| 模型 | 速度 | 准确度 | 显存占用 | 适用场景 |
-|------|------|--------|----------|----------|
-| tiny | ⚡⚡⚡⚡⚡ | ⭐⭐ | ~1GB | 短视频 (<10分钟)，快速测试 |
-| base | ⚡⚡⚡⚡ | ⭐⭐⭐ | ~1.5GB | **推荐**，平衡速度与准确度 |
-| small | ⚡⚡⚡ | ⭐⭐⭐⭐ | ~2.5GB | 中等长度视频，追求准确 |
-| medium | ⚡⚡ | ⭐⭐⭐⭐⭐ | ~5GB | 长视频 (>30分钟)，高准确度 |
-| large | ⚡ | ⭐⭐⭐⭐⭐⭐ | ~10GB | 专业场景，最高准确度 |
+### 重启服务后为什么找不到任务？
 
-### 截图间隔设置
+任务状态保存在后端进程内存中，服务重启后任务列表会清空。已经生成的文件仍保留在 `workspace/<task-id>/`；旧状态不能再通过 API 查询，但重新提交同一链接时可以自动复用其中的转录，并在新任务目录生成新笔记。
 
-- **5秒**：适合教程类、技术演示类视频，细节丰富
-- **10秒**：**推荐**，适合大多数视频
-- **15-30秒**：适合讲座、访谈类视频，减少图片数量
+### 为什么某个链接无法处理？
 
-### GPU 加速
+先确认链接能在当前网络和账号下正常播放，再更新项目依赖中的 `yt-dlp`。付费内容、DRM、验证码、地区限制、临时签名失效或平台接口变化都可能阻止解析。本项目不会绕过平台权限控制。
 
-如果你的电脑有 NVIDIA 显卡，建议启用 GPU 加速：
+### 没有字幕时会发生什么？
 
-1. 确保已安装 CUDA 驱动（版本 >= 11.8）
-2. 安装 CUDA 版本的 PyTorch（见安装步骤）
-3. 在前端勾选"启用 GPU 加速"选项
+应用会下载该链接可取得的最佳音频，并在本机运行 `faster-whisper`。这比直接读取字幕耗时更多，也会受到音质、口音、背景噪声和专业术语的影响。
 
-Whisper 在 GPU 上的速度提升约为 **5-10倍**。
+## 项目状态
 
----
-
-## 📋 输出示例
-
-生成的 Markdown 笔记包含以下内容：
-
-```markdown
-# 视频总结：《Python 入门教程》
-
-## 📌 一句话摘要
-本视频详细介绍了 Python 编程语言的基础知识，包括变量、数据类型、控制流和函数等核心概念。
-
-## 🎯 核心观点
-- Python 是一门简洁易读的高级编程语言，适合初学者
-- 掌握基础语法后，可以快速开发各种应用
-- 良好的代码规范和注释习惯至关重要
-
-## ⏱️ 关键时间节点
-| 时间点 | 内容摘要 |
-|--------|----------|
-| 00:00 | 课程介绍和环境搭建 |
-| 05:30 | 变量和数据类型详解 |
-| 15:20 | 条件语句和循环结构 |
-| 28:45 | 函数的定义和使用 |
-
-## 💡 学习要点
-1. 理解 Python 的动态类型特性
-2. 掌握列表推导式的使用技巧
-3. 学会使用异常处理机制
-
-## 🎬 总结评价
-这是一门非常适合初学者的 Python 入门课程，讲解清晰，示例丰富。强烈推荐编程新手观看。
-
-## 📸 视频截图预览
-
-![截图1](./images/frame_0000_0s.jpg)
-
-![截图2](./images/frame_0001_10s.jpg)
-
-...
-```
-
-下载的 ZIP 包结构：
-```
-视频标题_summary.zip
-├── 视频标题.md          # Markdown 笔记
-└── images/              # 视频截图文件夹
-    ├── frame_0000_0s.jpg
-    ├── frame_0001_10s.jpg
-    └── ...
-```
-
----
-
-## 🔧 常见问题
-
-### 1. 提示 "ffmpeg 不是内部或外部命令"
-
-**解决方案：**
-- 确认已正确安装 FFmpeg
-- 将 FFmpeg 的 `bin` 目录添加到系统 PATH 环境变量
-- 重启命令行窗口
-
-### 2. Whisper 模型下载失败
-
-**解决方案：**
-- 首次运行会自动下载模型，可能需要科学上网
-- 可以手动下载模型并放置到缓存目录：
-  ```bash
-  # Windows 缓存目录
-  C:\Users\你的用户名\.cache\whisper
-  
-  # macOS/Linux 缓存目录
-  ~/.cache/whisper
-  ```
-
-### 3. B站视频下载失败或画质低
-
-**解决方案：**
-- 确保已正确配置 B站 Cookie（SESSDATA、bili_jct、buvid3）
-- Cookie 会过期，如失效请重新获取
-- 大会员专属视频需要大会员账号的 Cookie
-
-### 4. API 调用失败或返回错误
-
-**解决方案：**
-- 检查 API Key 是否正确
-- 确认账户余额充足
-- 查看后端控制台日志获取详细错误信息
-- 尝试更换其他 AI 模型
-
-### 5. 内存不足或处理速度慢
-
-**解决方案：**
-- 使用较小的 Whisper 模型（tiny 或 base）
-- 增加截图间隔，减少截图数量
-- 启用 GPU 加速
-- 关闭其他占用内存的程序
-
-### 6. 中文乱码问题
-
-**解决方案：**
-- 确保系统编码为 UTF-8
-- Windows 用户可以在环境变量中添加：
-  ```
-  PYTHONIOENCODING=utf-8
-  ```
-
----
-
-## 🛠️ 技术栈
-
-### 后端
-- **FastAPI**: 高性能异步 Web 框架
-- **yt-dlp**: 强大的视频下载工具
-- **OpenAI Whisper**: 先进的语音识别模型
-- **OpenCV**: 视频帧提取和处理
-- **OpenAI Python SDK**: 调用各大语言模型 API
-
-### 前端
-- **原生 HTML/CSS/JavaScript**: 轻量级无依赖
-- **Marked.js**: Markdown 渲染
-- **Fetch API**: 异步请求
-
----
-
-## 📝 开发计划
-
-- [ ] 支持更多视频平台
-- [ ] 添加批量处理功能
-- [ ] 支持自定义总结模板
-- [ ] 添加视频片段剪辑功能
-- [ ] 支持导出为 PDF、Word 等格式
-- [ ] 添加用户系统和历史记录
-- [ ] 优化长视频处理性能
-- [ ] 支持多语言翻译
-
----
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
----
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
----
-
-## 🙏 致谢
-
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - 强大的视频下载工具
-- [OpenAI Whisper](https://github.com/openai/whisper) - 先进的语音识别模型
-- [FastAPI](https://fastapi.tiangolo.com/) - 现代化的 Web 框架
-- 感谢所有开源项目的贡献者
-
----
-
-## 📮 联系方式
-
-如有问题或建议，欢迎通过以下方式联系：
-
-- 提交 [Issue](https://github.com/your-username/VideoToNotes/issues)
-- 发送邮件至：your-email@example.com
-
----
-
-<div align="center">
-
-**如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！**
-
-Made with ❤️ by Your Name
-
-</div>
+这是面向本地个人使用的工具，不是多用户服务。仓库当前未提供许可证文件；请不要仅根据历史徽章或描述推断其许可条款。

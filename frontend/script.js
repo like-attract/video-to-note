@@ -1,574 +1,830 @@
-// API配置
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = '/api';
+const POLL_DELAY_MS = 2000;
+const POLL_TIMEOUT_MS = 12000;
+const MAX_POLL_ERRORS = 5;
+const CUSTOM_MODEL_ID = '__custom__';
+const PREFERENCE_KEYS = [
+    'llm_provider',
+    'llm_model_id',
+    'llm_model',
+    'custom_base_url',
+    'custom_model_name',
+    'whisper_model',
+    'screenshot_interval',
+    'include_screenshots',
+    'use_gpu',
+    'summary_style',
+    'processing_mode',
+    'reasoning_effort'
+];
+const LEGACY_SENSITIVE_KEYS = [
+    'custom_api_key',
+    'bili_sessdata',
+    'bili_jct',
+    'bili_buvid3',
+    'deepseek_api_key',
+    'openai_api_key',
+    'qwen_api_key',
+    'zhipu_api_key',
+    'moonshot_api_key'
+];
 
-// DOM元素
-let currentTaskId = null;
-let pollInterval = null;
-let currentMarkdown = '';
-let currentHtml = '';
-let currentJson = null;
-
-// 模型配置映射
-const MODEL_CONFIG = {
+const PROVIDER_CONFIG = {
     deepseek: {
         name: 'DeepSeek',
-        base_url: 'https://api.deepseek.com',
-        model: 'deepseek-chat',
-        need_api_key: true
+        baseUrl: 'https://api.deepseek.com',
+        defaultModel: 'deepseek-v4-flash',
+        models: [
+            ['deepseek-v4-flash', 'DeepSeek V4 Flash'],
+            ['deepseek-v4-pro', 'DeepSeek V4 Pro']
+        ]
     },
     openai: {
-        name: 'OpenAI GPT-4o-mini',
-        base_url: 'https://api.openai.com/v1',
-        model: 'gpt-4o-mini',
-        need_api_key: true
+        name: 'OpenAI',
+        baseUrl: 'https://api.openai.com/v1',
+        defaultModel: 'gpt-5.6-terra',
+        models: [
+            ['gpt-5.6-sol', 'GPT-5.6 Sol'],
+            ['gpt-5.6-terra', 'GPT-5.6 Terra'],
+            ['gpt-5.6-luna', 'GPT-5.6 Luna']
+        ]
     },
-    openai_gpt4: {
-        name: 'OpenAI GPT-4o',
-        base_url: 'https://api.openai.com/v1',
-        model: 'gpt-4o',
-        need_api_key: true
-    },
-    openai_gpt35: {
-        name: 'OpenAI GPT-3.5-Turbo',
-        base_url: 'https://api.openai.com/v1',
-        model: 'gpt-3.5-turbo',
-        need_api_key: true
+    glm: {
+        name: '智谱 GLM',
+        baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+        defaultModel: 'glm-4.5-flash',
+        models: [
+            ['glm-5.2', 'GLM-5.2'],
+            ['glm-4.5-flash', 'GLM-4.5-Flash（免费）']
+        ]
     },
     qwen: {
         name: '通义千问',
-        base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        model: 'qwen-plus',
-        need_api_key: true
-    },
-    glm: {
-        name: '智谱清言',
-        base_url: 'https://open.bigmodel.cn/api/paas/v4',
-        model: 'glm-4-flash',
-        need_api_key: true
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        defaultModel: 'qwen3.7-plus',
+        models: [
+            ['qwen3.7-max', 'Qwen3.7 Max'],
+            ['qwen3.7-plus', 'Qwen3.7 Plus'],
+            ['qwen3.7-flash', 'Qwen3.7 Flash']
+        ]
     },
     moonshot: {
         name: '月之暗面 Kimi',
-        base_url: 'https://api.moonshot.cn/v1',
-        model: 'moonshot-v1-8k',
-        need_api_key: true
+        baseUrl: 'https://api.moonshot.cn/v1',
+        defaultModel: 'kimi-k3',
+        models: [
+            ['kimi-k3', 'Kimi K3'],
+            ['kimi-k2.6', 'Kimi K2.6'],
+            ['kimi-k2.7-code-highspeed', 'Kimi K2.7 Code Highspeed']
+        ]
     },
     custom: {
-        name: '自定义',
-        base_url: '',
-        model: '',
-        need_api_key: true
+        name: '自定义接口',
+        baseUrl: '',
+        defaultModel: CUSTOM_MODEL_ID,
+        models: []
     }
 };
 
-// 初始化
+const LEGACY_PROVIDER_MAP = {
+    deepseek: 'deepseek',
+    openai: 'openai',
+    openai_gpt4: 'openai',
+    openai_gpt35: 'openai',
+    qwen: 'qwen',
+    glm: 'glm',
+    moonshot: 'moonshot',
+    custom: 'custom'
+};
+
+let currentTaskId = null;
+let currentMarkdown = '';
+let currentHtml = '';
+let pollTimer = null;
+let pollErrorCount = 0;
+let isSubmitting = false;
+let isTaskActive = false;
+let isDownloading = false;
+let isCancelling = false;
+let elapsedTimer = null;
+let elapsedBaseSeconds = 0;
+let elapsedSyncedAt = 0;
+
 document.addEventListener('DOMContentLoaded', () => {
-    loadConfig();
+    removeLegacySecrets();
+    loadPreferences();
     bindEvents();
-    document.getElementById('llmModel').addEventListener('change', toggleCustomConfig);
-    document.getElementById('sourceType').addEventListener('change', toggleSourceType);
+    toggleSourceType();
 });
 
 function bindEvents() {
-    document.getElementById('saveConfigBtn').addEventListener('click', saveConfig);
-    document.getElementById('resetConfigBtn').addEventListener('click', resetConfig);
-    document.getElementById('submitBtn').addEventListener('click', startSummary);
-    document.getElementById('downloadMdBtn').addEventListener('click', downloadSummary);
+    byId('saveConfigBtn').addEventListener('click', savePreferences);
+    byId('resetConfigBtn').addEventListener('click', resetPreferences);
+    byId('submitBtn').addEventListener('click', () => startSummary());
+    byId('retryBtn').addEventListener('click', () => startSummary({ resumeCurrent: true }));
+    byId('restartBtn').addEventListener('click', () => startSummary({ forceRestart: true }));
+    byId('regenerateBtn').addEventListener('click', () => startSummary({ resumeCurrent: true }));
+    byId('cancelTaskBtn').addEventListener('click', cancelCurrentTask);
+    byId('downloadMdBtn').addEventListener('click', downloadSummary);
+    byId('llmProvider').addEventListener('change', handleProviderChange);
+    byId('llmModel').addEventListener('change', toggleCustomConfig);
+    byId('sourceType').addEventListener('change', toggleSourceType);
+    byId('includeScreenshots').addEventListener('change', toggleScreenshotSettings);
+    byId('localFile').addEventListener('change', updateFileInfo);
+    byId('videoUrl').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.isComposing) startSummary();
+    });
+    window.addEventListener('beforeunload', () => {
+        stopPolling();
+        stopElapsedTimer();
+    });
+}
+
+function byId(id) {
+    return document.getElementById(id);
+}
+
+function removeLegacySecrets() {
+    LEGACY_SENSITIVE_KEYS.forEach((key) => localStorage.removeItem(key));
+}
+
+function loadPreferences() {
+    const legacyChoice = localStorage.getItem('llm_model');
+    const savedProvider = localStorage.getItem('llm_provider') || LEGACY_PROVIDER_MAP[legacyChoice] || 'deepseek';
+    byId('llmProvider').value = PROVIDER_CONFIG[savedProvider] ? savedProvider : 'deepseek';
+    byId('customBaseUrl').value = localStorage.getItem('custom_base_url') || '';
+    byId('customModelName').value = localStorage.getItem('custom_model_name') || '';
+    populateModelOptions(localStorage.getItem('llm_model_id'));
+    byId('whisperModel').value = localStorage.getItem('whisper_model') || 'base';
+    byId('screenshotInterval').value = localStorage.getItem('screenshot_interval') || '10';
+    byId('includeScreenshots').checked = localStorage.getItem('include_screenshots') === 'true';
+    byId('useGpu').checked = localStorage.getItem('use_gpu') === 'true';
+    byId('summaryStyle').value = localStorage.getItem('summary_style') || 'detailed';
+    byId('reasoningEffort').value = localStorage.getItem('reasoning_effort') || 'auto';
+    const processingMode = localStorage.getItem('processing_mode') || 'reuse';
+    const processingModeInput = document.querySelector(`input[name="processingMode"][value="${processingMode}"]`);
+    if (processingModeInput) processingModeInput.checked = true;
+    toggleScreenshotSettings();
+}
+
+function savePreferences() {
+    const interval = normalizeScreenshotInterval();
+    localStorage.setItem('llm_provider', byId('llmProvider').value);
+    localStorage.setItem('llm_model_id', byId('llmModel').value);
+    localStorage.removeItem('llm_model');
+    localStorage.setItem('custom_base_url', byId('customBaseUrl').value.trim());
+    localStorage.setItem('custom_model_name', byId('customModelName').value.trim());
+    localStorage.setItem('whisper_model', byId('whisperModel').value);
+    localStorage.setItem('screenshot_interval', String(interval));
+    localStorage.setItem('include_screenshots', String(byId('includeScreenshots').checked));
+    localStorage.setItem('use_gpu', String(byId('useGpu').checked));
+    localStorage.setItem('summary_style', byId('summaryStyle').value);
+    localStorage.setItem('reasoning_effort', byId('reasoningEffort').value);
+    localStorage.setItem(
+        'processing_mode',
+        document.querySelector('input[name="processingMode"]:checked')?.value || 'reuse'
+    );
+    showToast('非敏感偏好已保存', 'success');
+}
+
+function resetPreferences() {
+    PREFERENCE_KEYS.forEach((key) => localStorage.removeItem(key));
+    loadPreferences();
+    showToast('已恢复默认偏好', 'info');
+}
+
+function handleProviderChange() {
+    populateModelOptions();
+}
+
+function populateModelOptions(preferredModel = null) {
+    const provider = byId('llmProvider').value;
+    const providerConfig = PROVIDER_CONFIG[provider];
+    const modelSelect = byId('llmModel');
+    modelSelect.replaceChildren();
+
+    providerConfig.models.forEach(([modelId, label]) => {
+        const option = new Option(label, modelId);
+        option.title = modelId;
+        modelSelect.add(option);
+    });
+    modelSelect.add(new Option('手动输入模型 ID…', CUSTOM_MODEL_ID));
+
+    const requestedModel = preferredModel || providerConfig.defaultModel;
+    const hasPreset = Array.from(modelSelect.options).some((option) => option.value === requestedModel);
+    modelSelect.value = hasPreset ? requestedModel : CUSTOM_MODEL_ID;
+    if (!hasPreset && requestedModel && requestedModel !== CUSTOM_MODEL_ID && !byId('customModelName').value) {
+        byId('customModelName').value = requestedModel;
+    }
+    toggleCustomConfig();
 }
 
 function toggleCustomConfig() {
-    const llmModel = document.getElementById('llmModel').value;
-    const customConfig = document.getElementById('customApiConfig');
-    customConfig.style.display = llmModel === 'custom' ? 'block' : 'none';
+    const customProvider = byId('llmProvider').value === 'custom';
+    const customModel = byId('llmModel').value === CUSTOM_MODEL_ID;
+    byId('customBaseUrlField').hidden = !customProvider;
+    byId('customModelNameField').hidden = !customModel;
+    byId('customApiConfig').hidden = !customProvider;
+}
+
+function getSelectedModelConfig() {
+    const provider = byId('llmProvider').value;
+    const providerConfig = PROVIDER_CONFIG[provider];
+    if (!providerConfig) return null;
+
+    const selectedModel = byId('llmModel').value;
+    const model = selectedModel === CUSTOM_MODEL_ID
+        ? byId('customModelName').value.trim()
+        : selectedModel;
+    const baseUrl = provider === 'custom'
+        ? byId('customBaseUrl').value.trim()
+        : providerConfig.baseUrl;
+    const modelLabel = selectedModel === CUSTOM_MODEL_ID
+        ? model
+        : byId('llmModel').selectedOptions[0]?.textContent;
+    return {
+        provider,
+        baseUrl,
+        model,
+        name: modelLabel ? `${providerConfig.name} · ${modelLabel}` : providerConfig.name
+    };
 }
 
 function toggleSourceType() {
-    const sourceType = document.getElementById('sourceType').value;
-    const urlInput = document.getElementById('videoUrl');
-    const fileInput = document.getElementById('localFile');
-    const fileInfo = document.getElementById('fileInfo');
+    const isLocal = byId('sourceType').value === 'local';
+    byId('urlField').hidden = isLocal;
+    byId('fileField').hidden = !isLocal;
+    updateFileInfo();
+}
 
-    if (sourceType === 'local') {
-        urlInput.style.display = 'none';
-        fileInput.style.display = 'block';
-        fileInfo.style.display = 'block';
-        fileInfo.innerHTML = '📁 支持的格式：MP4、MOV、AVI、MKV、FLV、WEBM（最大500MB）';
-    } else {
-        urlInput.style.display = 'block';
-        fileInput.style.display = 'none';
-        fileInfo.style.display = 'none';
+function updateFileInfo() {
+    if (byId('sourceType').value !== 'local') {
+        byId('fileInfo').textContent = '支持常见视频链接；平台字幕可用时优先读取';
+        return;
     }
+    const file = byId('localFile').files[0];
+    byId('fileInfo').textContent = file
+        ? `${file.name} · ${formatBytes(file.size)}`
+        : '支持常见视频格式，单个文件不超过 500 MB';
 }
 
-// 配置管理
-function loadConfig() {
-    document.getElementById('llmModel').value = localStorage.getItem('llm_model') || 'deepseek';
-    document.getElementById('customBaseUrl').value = localStorage.getItem('custom_base_url') || '';
-    document.getElementById('customModelName').value = localStorage.getItem('custom_model_name') || '';
-    document.getElementById('customApiKey').value = localStorage.getItem('custom_api_key') || '';
-    document.getElementById('sessdata').value = localStorage.getItem('bili_sessdata') || '';
-    document.getElementById('biliJct').value = localStorage.getItem('bili_jct') || '';
-    document.getElementById('buvid3').value = localStorage.getItem('bili_buvid3') || '';
-    document.getElementById('whisperModel').value = localStorage.getItem('whisper_model') || 'base';
-    document.getElementById('screenshotInterval').value = localStorage.getItem('screenshot_interval') || '10';
-    document.getElementById('useGpu').checked = localStorage.getItem('use_gpu') === 'true';
-
-    toggleCustomConfig();
-    toggleSourceType();
+function toggleScreenshotSettings() {
+    const enabled = byId('includeScreenshots').checked;
+    byId('screenshotInterval').disabled = !enabled;
+    byId('screenshotIntervalField').classList.toggle('is-muted', !enabled);
 }
 
-function saveConfig() {
-    localStorage.setItem('llm_model', document.getElementById('llmModel').value);
-    localStorage.setItem('custom_base_url', document.getElementById('customBaseUrl').value);
-    localStorage.setItem('custom_model_name', document.getElementById('customModelName').value);
-    localStorage.setItem('custom_api_key', document.getElementById('customApiKey').value);
-    localStorage.setItem('bili_sessdata', document.getElementById('sessdata').value);
-    localStorage.setItem('bili_jct', document.getElementById('biliJct').value);
-    localStorage.setItem('bili_buvid3', document.getElementById('buvid3').value);
-    localStorage.setItem('whisper_model', document.getElementById('whisperModel').value);
-    localStorage.setItem('screenshot_interval', document.getElementById('screenshotInterval').value);
-    localStorage.setItem('use_gpu', document.getElementById('useGpu').checked);
-
-    showToast('配置已保存', 'success');
+function formatBytes(bytes) {
+    if (!bytes) return '0 MB';
+    return `${(bytes / 1024 / 1024).toFixed(bytes > 10 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
-function resetConfig() {
-    localStorage.clear();
-    loadConfig();
-    showToast('已重置为默认配置', 'info');
+function normalizeScreenshotInterval() {
+    const input = byId('screenshotInterval');
+    const value = Math.min(300, Math.max(5, Number.parseInt(input.value, 10) || 30));
+    input.value = String(value);
+    return value;
 }
 
-function getApiKeyForModel(modelType) {
-    if (modelType === 'custom') {
-        return document.getElementById('customApiKey').value;
-    }
-
-    const keyMap = {
-        deepseek: 'deepseek_api_key',
-        openai: 'openai_api_key',
-        openai_gpt4: 'openai_api_key',
-        openai_gpt35: 'openai_api_key',
-        qwen: 'qwen_api_key',
-        glm: 'zhipu_api_key',
-        moonshot: 'moonshot_api_key'
-    };
-
-    const storageKey = keyMap[modelType];
-    let apiKey = localStorage.getItem(storageKey);
-
-    if (!apiKey) {
-        const modelName = MODEL_CONFIG[modelType]?.name || modelType;
-        apiKey = prompt(`请输入 ${modelName} 的 API Key：`);
-        if (apiKey) {
-            localStorage.setItem(storageKey, apiKey);
-        }
-    }
-
-    return apiKey;
-}
-
-// 上传本地文件
-async function uploadLocalFile(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const response = await fetch(`${API_BASE}/upload`, {
-        method: 'POST',
-        body: formData
-    });
-
-    if (!response.ok) {
-        throw new Error('上传失败');
-    }
-
-    const data = await response.json();
-    return { file_path: data.file_path, task_id: data.task_id, filename: data.filename };
-}
-
-// 主要功能
-async function startSummary() {
-    const sourceType = document.getElementById('sourceType').value;
-    let videoUrl = '';
-    let uploadTaskId = null;
-
-    if (sourceType === 'local') {
-        const file = document.getElementById('localFile').files[0];
-        if (!file) {
-            showToast('请选择本地视频文件', 'error');
-            return;
-        }
-
-        // 检查文件大小（限制500MB）
-        if (file.size > 500 * 1024 * 1024) {
-            showToast('文件过大，请选择小于500MB的视频', 'error');
-            return;
-        }
-
-        showToast('正在上传文件...', 'info');
-        try {
-            const uploadResult = await uploadLocalFile(file);
-            videoUrl = uploadResult.file_path;
-            uploadTaskId = uploadResult.task_id;
-            showToast(`文件上传成功: ${uploadResult.filename}`, 'success');
-        } catch (error) {
-            showToast('文件上传失败: ' + error.message, 'error');
-            return;
-        }
-    } else {
-        videoUrl = document.getElementById('videoUrl').value.trim();
-        if (!videoUrl) {
-            showToast('请输入视频链接', 'error');
-            return;
-        }
-    }
-
-    const llmModel = document.getElementById('llmModel').value;
-    const modelConfig = MODEL_CONFIG[llmModel];
-
-    if (!modelConfig) {
-        showToast('请选择有效的 AI 模型', 'error');
+async function startSummary(options = {}) {
+    if (isSubmitting || isTaskActive) {
+        showToast('已有任务正在处理中', 'info');
         return;
     }
 
-    let apiKey = '';
-    if (modelConfig.need_api_key) {
-        apiKey = getApiKeyForModel(llmModel);
-        if (!apiKey) {
-            showToast(`请先配置 ${modelConfig.name} 的 API Key`, 'error');
-            return;
-        }
-    }
+    const resumeTaskId = options.resumeCurrent ? currentTaskId : null;
+    const selectedMode = document.querySelector('input[name="processingMode"]:checked')?.value || 'reuse';
+    const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
+    const request = validateAndBuildRequestBase(resumeTaskId);
+    if (!request) return;
 
-    // 构建 LLM 配置
-    let llmConfig = {
-        model_type: llmModel,
-        api_key: apiKey
-    };
-
-    if (llmModel === 'custom') {
-        llmConfig.custom_base_url = document.getElementById('customBaseUrl').value;
-        llmConfig.custom_model_name = document.getElementById('customModelName').value;
-        if (!llmConfig.custom_base_url || !llmConfig.custom_model_name) {
-            showToast('自定义模型需要填写 Base URL 和模型名称', 'error');
-            return;
-        }
-    } else {
-        llmConfig.base_url = modelConfig.base_url;
-        llmConfig.model = modelConfig.model;
-    }
-
-    // 构建 Cookie 配置（仅当有值时传递）
-    const sessdata = document.getElementById('sessdata').value.trim();
-    let bilibiliCookie = null;
-    if (sessdata) {
-        bilibiliCookie = {
-            sessdata: sessdata,
-            bili_jct: document.getElementById('biliJct').value.trim(),
-            buvid3: document.getElementById('buvid3').value.trim()
-        };
-    }
-
-    // 收集配置
-    const config = {
-        video_url: videoUrl,
-        screenshot_interval: parseInt(document.getElementById('screenshotInterval').value),
-        whisper_model: document.getElementById('whisperModel').value,
-        use_gpu: document.getElementById('useGpu').checked,
-        llm_config: llmConfig
-    };
-
-    if (bilibiliCookie) {
-        config.bilibili_cookie = bilibiliCookie;
-    }
-
-    // 如果是本地上传的文件，传递upload_task_id
-    if (uploadTaskId) {
-        config.upload_task_id = uploadTaskId;
-    }
-
-    // 显示进度区
-    document.getElementById('progressArea').style.display = 'block';
-    document.getElementById('resultArea').style.display = 'none';
-    clearLogs();
-    updateProgress(0);
-    updateStep(0);
-
-    addLog(`🚀 正在提交任务... 使用模型: ${modelConfig.name}`);
-    addLog(`📌 视频来源: ${sourceType === 'local' ? '本地文件' : '在线视频'}`);
+    resetTaskView();
+    setSubmitting(true, request.sourceType === 'local' ? '正在上传' : '正在提交');
 
     try {
+        let videoUrl = request.videoUrl;
+        let uploadTaskId = null;
+
+        if (request.sourceType === 'local' && !resumeTaskId) {
+            addLog('正在上传本地视频');
+            const uploadResult = await uploadLocalFile(request.file);
+            videoUrl = uploadResult.file_path;
+            uploadTaskId = uploadResult.task_id;
+            addLog(`上传完成：${uploadResult.filename || request.file.name}`, 'success');
+        }
+
+        const config = buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId, forceRestart);
+        addLog(`正在提交总结任务 · ${request.modelConfig.name}`);
         const response = await fetch(`${API_BASE}/summarize`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
         });
+        const data = await readResponse(response, '提交任务失败');
 
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || '提交失败');
-        }
-
-        const data = await response.json();
+        if (!data.task_id) throw new Error('后端未返回任务 ID');
         currentTaskId = data.task_id;
-        addLog(`✅ 任务已创建，ID: ${currentTaskId}`);
-
-        startPolling(currentTaskId);
-
+        if (data.reused_task_id) addLog(`已复用任务 ${data.reused_task_id} 的中间结果`, 'success');
+        addLog(`任务已创建：${currentTaskId}`, 'success');
+        setTaskActive(true);
+        startElapsedTimer(0);
+        setTaskState('processing', '处理中');
+        setSubmitting(false, '处理中');
+        schedulePoll(currentTaskId, 0);
     } catch (error) {
-        addLog(`❌ 提交失败: ${error.message}`);
-        showToast('提交失败，请检查后端服务是否启动', 'error');
+        if (resumeTaskId) currentTaskId = resumeTaskId;
+        setSubmitting(false);
+        failTask(error.message || '提交失败，请确认本地后端已启动');
     }
 }
 
-function startPolling(taskId) {
-    if (pollInterval) clearInterval(pollInterval);
+function validateAndBuildRequestBase(resumeTaskId = null) {
+    const sourceType = byId('sourceType').value;
+    const modelConfig = getSelectedModelConfig();
+    const apiKey = byId('apiKey').value.trim();
 
-    pollInterval = setInterval(async () => {
-        try {
-            const response = await fetch(`${API_BASE}/task/${taskId}`);
-            if (!response.ok) throw new Error('获取状态失败');
+    if (!modelConfig) return validationError('请选择有效的总结模型');
+    if (!apiKey) return validationError(`请输入 ${modelConfig.name} 的 API Key`);
+    if (!modelConfig.model) return validationError('请输入模型 ID');
+    if (!modelConfig.baseUrl) return validationError('请输入 API Base URL');
 
-            const task = await response.json();
+    if (sourceType === 'local') {
+        const file = byId('localFile').files[0];
+        if (resumeTaskId) return { sourceType, file: null, videoUrl: '', modelConfig };
+        if (!file) return validationError('请选择本地视频文件');
+        if (file.size > 500 * 1024 * 1024) return validationError('文件不能超过 500 MB');
+        return { sourceType, file, videoUrl: '', modelConfig };
+    }
 
-            updateProgress(task.progress);
-            updateStep(task.step);
+    const videoUrl = byId('videoUrl').value.trim();
+    if (!videoUrl) return validationError('请输入视频链接');
+    try {
+        const parsed = new URL(videoUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+    } catch {
+        return validationError('请输入有效的 http(s) 视频链接');
+    }
+    return { sourceType, file: null, videoUrl, modelConfig };
+}
 
-            if (task.logs && task.logs.length > 0) {
-                updateLogs(task.logs);
-            }
+function validationError(message) {
+    showToast(message, 'error');
+    return null;
+}
 
-            if (task.status === 'completed') {
-                clearInterval(pollInterval);
-                pollInterval = null;
-                showResult(task.result);
-                addLog('🎉 视频总结完成！');
-                showToast('总结完成！', 'success');
-            } else if (task.status === 'failed') {
-                clearInterval(pollInterval);
-                pollInterval = null;
-                addLog(`❌ 任务失败: ${task.error}`);
-                showToast('任务失败，请查看日志', 'error');
-            }
+function buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId = null, forceRestart = false) {
+    const modelConfig = getSelectedModelConfig();
+    const llmConfig = {
+        model_type: modelConfig.provider,
+        api_key: byId('apiKey').value.trim(),
+        base_url: modelConfig.baseUrl,
+        model: modelConfig.model
+    };
 
-        } catch (error) {
-            console.error('轮询错误:', error);
+    const config = {
+        video_url: videoUrl,
+        screenshot_interval: normalizeScreenshotInterval(),
+        prefer_subtitles: true,
+        include_screenshots: byId('includeScreenshots').checked,
+        whisper_model: byId('whisperModel').value,
+        use_gpu: byId('useGpu').checked,
+        processing_mode: forceRestart ? 'restart' : 'reuse',
+        summary_style: byId('summaryStyle').value,
+        reasoning_effort: byId('reasoningEffort').value,
+        llm_config: llmConfig
+    };
+
+    const sessdata = byId('sessdata').value.trim();
+    if (sessdata) {
+        config.bilibili_cookie = {
+            sessdata,
+            bili_jct: byId('biliJct').value.trim(),
+            buvid3: byId('buvid3').value.trim()
+        };
+    }
+    if (uploadTaskId) config.upload_task_id = uploadTaskId;
+    if (resumeTaskId && !forceRestart) config.resume_task_id = resumeTaskId;
+    return config;
+}
+
+async function uploadLocalFile(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+    return readResponse(response, '上传失败');
+}
+
+function schedulePoll(taskId, delay = POLL_DELAY_MS) {
+    stopPolling();
+    pollTimer = window.setTimeout(() => pollTask(taskId), delay);
+}
+
+async function pollTask(taskId) {
+    pollTimer = null;
+    try {
+        const response = await fetchWithTimeout(
+            `${API_BASE}/task/${encodeURIComponent(taskId)}`,
+            { cache: 'no-store' },
+            POLL_TIMEOUT_MS
+        );
+        const task = await readResponse(response, '读取任务状态失败');
+        pollErrorCount = 0;
+        syncElapsedTimer(task.elapsed_seconds);
+        byId('networkState').textContent = '连接正常';
+        byId('networkState').classList.remove('network-warning');
+
+        updateProgress(task.progress);
+        updateStep(task.step);
+        if (Array.isArray(task.logs) && task.logs.length) updateLogs(task.logs);
+
+        if (task.status === 'completed') {
+            completeTask(task.result, task.elapsed_seconds);
+            return;
         }
-    }, 2000);
+        if (task.status === 'failed') {
+            failTask(task.error || '后端未提供失败原因', task.elapsed_seconds);
+            return;
+        }
+        if (task.status === 'cancelled') {
+            markTaskCancelled(
+                '任务已取消；已生成的中间文件仍保留在工作目录',
+                task.elapsed_seconds
+            );
+            return;
+        }
+        schedulePoll(taskId);
+    } catch (error) {
+        pollErrorCount += 1;
+        byId('networkState').textContent = `连接异常，重试 ${pollErrorCount}/${MAX_POLL_ERRORS}`;
+        byId('networkState').classList.add('network-warning');
+        addLog(`状态连接异常：${error.message}`, 'warning');
+
+        if (pollErrorCount >= MAX_POLL_ERRORS) {
+            failTask(`连续 ${MAX_POLL_ERRORS} 次无法读取任务状态。请确认本地后端仍在运行，然后重新提交。`);
+            return;
+        }
+        schedulePoll(taskId, Math.min(POLL_DELAY_MS * pollErrorCount, 8000));
+    }
 }
 
-function updateProgress(progress) {
-    const fill = document.getElementById('progressFill');
-    if (fill) fill.style.width = `${progress}%`;
+function stopPolling() {
+    if (pollTimer !== null) window.clearTimeout(pollTimer);
+    pollTimer = null;
 }
 
-function updateStep(step) {
-    const steps = document.querySelectorAll('.step');
-    steps.forEach((stepEl, index) => {
-        stepEl.classList.remove('active', 'completed');
-        if (index + 1 < step) stepEl.classList.add('completed');
-        else if (index + 1 === step) stepEl.classList.add('active');
+function resetElapsedTimer() {
+    stopElapsedTimer(0);
+    elapsedBaseSeconds = 0;
+    elapsedSyncedAt = Date.now();
+    renderElapsedTime(0);
+}
+
+function startElapsedTimer(initialSeconds = 0) {
+    stopElapsedTimer(initialSeconds);
+    elapsedBaseSeconds = Math.max(0, Number(initialSeconds) || 0);
+    elapsedSyncedAt = Date.now();
+    renderElapsedTime(elapsedBaseSeconds);
+    elapsedTimer = window.setInterval(() => {
+        const seconds = elapsedBaseSeconds + (Date.now() - elapsedSyncedAt) / 1000;
+        renderElapsedTime(seconds);
+    }, 500);
+}
+
+function syncElapsedTimer(rawSeconds) {
+    const seconds = Number(rawSeconds);
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+    elapsedBaseSeconds = seconds;
+    elapsedSyncedAt = Date.now();
+    renderElapsedTime(seconds);
+}
+
+function stopElapsedTimer(finalSeconds = null) {
+    if (elapsedTimer !== null) window.clearInterval(elapsedTimer);
+    elapsedTimer = null;
+    if (finalSeconds !== null) syncElapsedTimer(finalSeconds);
+}
+
+function renderElapsedTime(rawSeconds) {
+    const total = Math.max(0, Math.floor(Number(rawSeconds) || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    byId('elapsedTime').textContent = hours
+        ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+        : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function resetTaskView() {
+    stopPolling();
+    resetElapsedTimer();
+    setTaskActive(false);
+    pollErrorCount = 0;
+    currentTaskId = null;
+    currentMarkdown = '';
+    currentHtml = '';
+    byId('progressArea').hidden = false;
+    byId('resultArea').hidden = true;
+    byId('taskError').hidden = true;
+    byId('downloadMdBtn').disabled = true;
+    byId('regenerateBtn').disabled = true;
+    byId('outputNotice').hidden = true;
+    byId('outputPath').textContent = '';
+    byId('networkState').textContent = '准备提交';
+    byId('networkState').classList.remove('network-warning');
+    clearLogs();
+    updateProgress(0);
+    updateStep(0);
+    setTaskState('processing', '准备中');
+}
+
+function completeTask(result, elapsedSeconds = null) {
+    stopPolling();
+    stopElapsedTimer(elapsedSeconds ?? result?.processing_seconds ?? null);
+    if (!showResult(result)) return;
+    setTaskActive(false);
+    updateProgress(100);
+    updateStep(6);
+    byId('regenerateBtn').disabled = false;
+    setTaskState('completed', '已完成');
+    byId('networkState').textContent = '任务完成';
+    addLog('视频笔记已生成', 'success');
+    setSubmitButton(false, '再次生成');
+    showToast('视频笔记已生成', 'success');
+}
+
+function failTask(message, elapsedSeconds = null) {
+    stopPolling();
+    stopElapsedTimer(elapsedSeconds);
+    setTaskActive(false);
+    setTaskState('failed', '失败');
+    byId('taskError').hidden = false;
+    byId('taskErrorMessage').textContent = message;
+    byId('networkState').textContent = '任务已停止';
+    addLog(`任务失败：${message}`, 'error');
+    setSubmitButton(false, '重新提交');
+    showToast(message, 'error');
+}
+
+async function cancelCurrentTask() {
+    if (!currentTaskId || !isTaskActive || isCancelling) return;
+    if (!window.confirm('取消当前任务？已生成的音频和转录文件会保留。')) return;
+
+    isCancelling = true;
+    const button = byId('cancelTaskBtn');
+    button.disabled = true;
+    button.textContent = '正在取消';
+    try {
+        const response = await fetch(`${API_BASE}/task/${encodeURIComponent(currentTaskId)}/cancel`, {
+            method: 'POST'
+        });
+        const data = await readResponse(response, '取消任务失败');
+        markTaskCancelled(
+            '任务已取消；已生成的中间文件仍保留在工作目录',
+            data.elapsed_seconds
+        );
+    } catch (error) {
+        showToast(`取消失败：${error.message}`, 'error');
+        button.disabled = false;
+    } finally {
+        isCancelling = false;
+        button.textContent = '取消任务';
+    }
+}
+
+function markTaskCancelled(message, elapsedSeconds = null) {
+    stopPolling();
+    stopElapsedTimer(elapsedSeconds);
+    setTaskActive(false);
+    setTaskState('cancelled', '已取消');
+    byId('taskError').hidden = true;
+    byId('networkState').textContent = '任务已取消';
+    addLog(message, 'warning');
+    setSubmitButton(false, '重新开始');
+    showToast('任务已取消', 'info');
+}
+
+function setSubmitting(active, label = '开始生成') {
+    isSubmitting = active;
+    setSubmitButton(active, label);
+    byId('retryBtn').disabled = active;
+    byId('restartBtn').disabled = active;
+    byId('regenerateBtn').disabled = active || !currentMarkdown;
+    setSourceControlsDisabled(active || isTaskActive);
+}
+
+function setTaskActive(active) {
+    isTaskActive = active;
+    setSourceControlsDisabled(active || isSubmitting);
+    byId('submitBtn').disabled = active || isSubmitting;
+    const cancelButton = byId('cancelTaskBtn');
+    cancelButton.hidden = !active;
+    cancelButton.disabled = !active || isCancelling;
+}
+
+function setSourceControlsDisabled(disabled) {
+    byId('sourceType').disabled = disabled;
+    byId('videoUrl').disabled = disabled;
+    byId('localFile').disabled = disabled;
+    byId('summaryStyle').disabled = disabled;
+    byId('reasoningEffort').disabled = disabled;
+    document.querySelectorAll('input[name="processingMode"]').forEach((input) => {
+        input.disabled = disabled;
     });
 }
 
-function addLog(message) {
-    const logArea = document.getElementById('logArea');
-    if (logArea) {
-        const logEntry = document.createElement('div');
-        logEntry.className = 'log-entry';
-        logEntry.innerHTML = `[${new Date().toLocaleTimeString()}] ${message}`;
-        logArea.appendChild(logEntry);
-        logArea.scrollTop = logArea.scrollHeight;
-    }
+function setSubmitButton(loading, label) {
+    const button = byId('submitBtn');
+    button.disabled = loading || isTaskActive;
+    button.classList.toggle('is-loading', loading);
+    button.querySelector('.btn-text').textContent = label;
 }
 
-function updateLogs(logs) {
-    const logArea = document.getElementById('logArea');
-    if (logArea && logs && logs.length > 0) {
-        logArea.innerHTML = '';
-        logs.forEach(log => {
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry';
-            logEntry.innerHTML = `[${new Date().toLocaleTimeString()}] ${log}`;
-            logArea.appendChild(logEntry);
-        });
-        logArea.scrollTop = logArea.scrollHeight;
-    }
+function setTaskState(type, text) {
+    const state = byId('taskState');
+    state.className = `status-badge ${type}`;
+    state.textContent = text;
+}
+
+function updateProgress(rawProgress) {
+    const progress = Math.min(100, Math.max(0, Number(rawProgress) || 0));
+    byId('progressFill').style.width = `${progress}%`;
+    byId('progressPercent').textContent = `${Math.round(progress)}%`;
+    const progressBar = document.querySelector('[role="progressbar"]');
+    progressBar.setAttribute('aria-valuenow', String(Math.round(progress)));
+}
+
+function updateStep(rawStep) {
+    const activeStep = Number(rawStep) || 0;
+    document.querySelectorAll('.progress-steps .step').forEach((step, index) => {
+        const number = index + 1;
+        step.classList.toggle('completed', number < activeStep || activeStep > 5);
+        step.classList.toggle('active', number === activeStep);
+    });
 }
 
 function clearLogs() {
-    const logArea = document.getElementById('logArea');
-    if (logArea) logArea.innerHTML = '<div class="log-entry">等待任务开始...</div>';
+    byId('logArea').replaceChildren(createLogEntry('等待任务开始'));
+}
+
+function addLog(message, type = 'info') {
+    const logArea = byId('logArea');
+    logArea.appendChild(createLogEntry(message, type, true));
+    logArea.scrollTop = logArea.scrollHeight;
+}
+
+function updateLogs(logs) {
+    const logArea = byId('logArea');
+    logArea.replaceChildren(...logs.map((log) => createLogEntry(String(log))));
+    logArea.scrollTop = logArea.scrollHeight;
+}
+
+function createLogEntry(message, type = 'info', includeTime = false) {
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${type}`;
+    entry.textContent = includeTime ? `[${new Date().toLocaleTimeString()}] ${message}` : message;
+    return entry;
 }
 
 function showResult(result) {
-    const resultArea = document.getElementById('resultArea');
-    const markdownContent = document.getElementById('markdownContent');
-
-    if (resultArea && markdownContent && result && result.markdown) {
-        currentMarkdown = result.markdown;
-        // currentTaskId 已经在 startSummary 中设置
-
-        // 处理markdown中的图片路径，替换为完整的API URL
-        // 将 ./images/filename.jpg 替换为 http://localhost:8000/api/image/{task_id}/filename.jpg
-        let processedMarkdown = result.markdown;
-        if (currentTaskId) {
-            processedMarkdown = processedMarkdown.replace(
-                /!\[([^\]]*)\]\(\.\/images\/([^)]+)\)/g,
-                `![$1](${API_BASE}/image/${currentTaskId}/$2)`
-            );
-        }
-
-        if (typeof marked !== 'undefined') {
-            markdownContent.innerHTML = marked.parse(processedMarkdown);
-        } else {
-            markdownContent.innerHTML = `<pre>${processedMarkdown}</pre>`;
-        }
-
-        resultArea.style.display = 'block';
-        
-        // 保存处理后的markdown用于HTML下载（使用完整URL）
-        currentHtml = processedMarkdown;
+    if (!result || typeof result.markdown !== 'string') {
+        failTask('任务完成，但后端未返回可用的 Markdown 内容');
+        return false;
     }
+
+    currentMarkdown = result.markdown;
+    currentHtml = replaceImagePaths(result.markdown);
+    const content = byId('markdownContent');
+    if (typeof marked !== 'undefined') {
+        content.innerHTML = marked.parse(currentHtml);
+    } else {
+        const pre = document.createElement('pre');
+        pre.textContent = currentHtml;
+        content.replaceChildren(pre);
+    }
+    byId('resultArea').hidden = false;
+    byId('downloadMdBtn').disabled = false;
+    const outputDirectory = typeof result.output_directory === 'string'
+        ? result.output_directory.trim()
+        : '';
+    byId('outputPath').textContent = outputDirectory;
+    byId('outputNotice').hidden = !outputDirectory;
+    return true;
+}
+
+function replaceImagePaths(markdown) {
+    if (!currentTaskId) return markdown;
+    return markdown.replace(
+        /!\[([^\]]*)\]\(\.\/images\/([^)]+)\)/g,
+        `![$1](${API_BASE}/image/${encodeURIComponent(currentTaskId)}/$2)`
+    );
 }
 
 async function downloadSummary() {
-    const format = document.getElementById('formatSelect').value;
-    
-    // 如果是markdown格式，下载zip包含图片
+    if (isDownloading || !currentMarkdown) return;
+    const format = byId('formatSelect').value;
     if (format === 'markdown') {
-        await downloadMarkdownWithImages();
+        await downloadMarkdownFile();
         return;
     }
-    
-    let content = currentMarkdown;
-    let extension = '.md';
-    let mimeType = 'text/markdown';
 
-    switch(format) {
-        case 'html':
-            // 使用已经处理过的markdown（带完整URL）
-            content = convertToHtml(currentHtml || currentMarkdown);
-            extension = '.html';
-            mimeType = 'text/html';
-            break;
-        case 'json':
-            content = convertToJson(currentMarkdown);
-            extension = '.json';
-            mimeType = 'application/json';
-            break;
-        case 'txt':
-            content = stripMarkdown(currentMarkdown);
-            extension = '.txt';
-            mimeType = 'text/plain';
-            break;
-        default:
-            extension = '.md';
-            mimeType = 'text/markdown';
-    }
-
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `video_summary_${new Date().toISOString().slice(0, 19)}${extension}`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    showToast('下载成功', 'success');
+    const formats = {
+        html: { content: convertToHtml(currentHtml || currentMarkdown), extension: '.html', mime: 'text/html' },
+        json: { content: convertToJson(currentMarkdown), extension: '.json', mime: 'application/json' },
+        txt: { content: stripMarkdown(currentMarkdown), extension: '.txt', mime: 'text/plain' }
+    };
+    const selected = formats[format] || { content: currentMarkdown, extension: '.md', mime: 'text/markdown' };
+    triggerBlobDownload(new Blob([selected.content], { type: selected.mime }), selected.extension);
+    showToast('下载已开始', 'success');
 }
 
-async function downloadMarkdownWithImages() {
-    if (!currentTaskId) {
-        showToast('没有可下载的任务', 'error');
-        return;
-    }
-    
-    showToast('正在打包下载...', 'info');
-    
+async function downloadMarkdownFile() {
+    if (!currentTaskId) return validationError('没有可下载的任务');
+    setDownloading(true);
     try {
-        const response = await fetch(`${API_BASE}/download/${currentTaskId}`);
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || '下载失败');
-        }
-        
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `video_summary_${new Date().toISOString().slice(0, 19)}.zip`;
-        a.click();
-        URL.revokeObjectURL(url);
-        
-        showToast('下载成功', 'success');
+        const response = await fetch(`${API_BASE}/download/${encodeURIComponent(currentTaskId)}`);
+        if (!response.ok) throw new Error(await extractErrorMessage(response, '下载失败'));
+        triggerBlobDownload(await response.blob(), '.md');
+        showToast('下载已开始', 'success');
     } catch (error) {
-        showToast('下载失败: ' + error.message, 'error');
+        showToast(`下载失败：${error.message}`, 'error');
+    } finally {
+        setDownloading(false);
     }
+}
+
+function setDownloading(active) {
+    isDownloading = active;
+    const button = byId('downloadMdBtn');
+    button.disabled = active;
+    button.classList.toggle('is-loading', active);
+    button.querySelector('.btn-text').textContent = active ? '准备下载' : '下载';
+}
+
+function triggerBlobDownload(blob, extension) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `video_summary_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}${extension}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function convertToHtml(markdown) {
-    // 先将相对路径替换为完整URL
-    let processedMarkdown = markdown;
-    if (currentTaskId) {
-        processedMarkdown = markdown.replace(
-            /!\[([^\]]*)\]\(\.\/images\/([^)]+)\)/g,
-            `![$1](${API_BASE}/image/${currentTaskId}/$2)`
-        );
-    }
-    
-    if (typeof marked !== 'undefined') {
-        return marked.parse(processedMarkdown);
-    }
-    return `<pre>${processedMarkdown}</pre>`;
+    const body = typeof marked !== 'undefined' ? marked.parse(markdown) : `<pre>${escapeHtml(markdown)}</pre>`;
+    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频笔记</title></head><body><main>${body}</main></body></html>`;
 }
 
 function convertToJson(markdown) {
-    const jsonObj = {
-        summary: markdown,
-        generated_at: new Date().toISOString(),
-        format: 'markdown'
-    };
-    return JSON.stringify(jsonObj, null, 2);
+    return JSON.stringify({ summary: markdown, generated_at: new Date().toISOString(), format: 'markdown' }, null, 2);
 }
 
 function stripMarkdown(markdown) {
-    return markdown
-        .replace(/[#*`>\[\]()|]/g, '')
-        .replace(/\n{3,}/g, '\n\n');
+    return markdown.replace(/!\[[^\]]*\]\([^)]+\)/g, '').replace(/[#*`>|]/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/\n{3,}/g, '\n\n');
+}
+
+function escapeHtml(value) {
+    const element = document.createElement('div');
+    element.textContent = value;
+    return element.innerHTML;
+}
+
+async function readResponse(response, fallbackMessage) {
+    if (!response.ok) throw new Error(await extractErrorMessage(response, fallbackMessage));
+    try {
+        return await response.json();
+    } catch {
+        throw new Error('后端返回了无法解析的数据');
+    }
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+        if (error.name === 'AbortError') throw new Error('请求超时');
+        throw error;
+    } finally {
+        window.clearTimeout(timeout);
+    }
+}
+
+async function extractErrorMessage(response, fallbackMessage) {
+    try {
+        const data = await response.json();
+        return data.detail || data.error || data.message || `${fallbackMessage}（HTTP ${response.status}）`;
+    } catch {
+        return `${fallbackMessage}（HTTP ${response.status}）`;
+    }
 }
 
 function showToast(message, type = 'info') {
     const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
+    toast.className = `toast ${type}`;
     toast.textContent = message;
-    toast.style.cssText = `
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 12px 24px;
-        background: ${type === 'error' ? '#ef4444' : type === 'success' ? '#10b981' : '#3b82f6'};
-        color: white;
-        border-radius: 8px;
-        z-index: 1000;
-        animation: slideIn 0.3s ease;
-    `;
-
-    document.body.appendChild(toast);
-
-    setTimeout(() => {
-        toast.style.animation = 'slideOut 0.3s ease';
-        setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    byId('toastRegion').appendChild(toast);
+    window.setTimeout(() => toast.remove(), 4200);
 }
-
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes slideIn {
-        from { transform: translateX(100%); opacity: 0; }
-        to { transform: translateX(0); opacity: 1; }
-    }
-    @keyframes slideOut {
-        from { transform: translateX(0); opacity: 1; }
-        to { transform: translateX(100%); opacity: 0; }
-    }
-`;
-document.head.appendChild(style);

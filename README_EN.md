@@ -1,514 +1,224 @@
-# 🎬 VideoToNotes - Multi-Platform Video to Structured Notes
+# VideoToNo
 
-<div align="center">
+VideoToNo is a local video-to-notes tool intended for personal use. It reads a video URL or local media file on your machine, prefers subtitles supplied by the platform, falls back to local transcription with `faster-whisper`, and then asks the selected language model to produce timestamped Markdown notes.
 
-**Convert videos from local files, YouTube, Bilibili, and more into structured notes with one click**
+The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## Features
 
-Supports Bilibili · YouTube · Douyin · Kuaishou · Tencent Video · iQiyi · Youku · Local Videos
+- Accepts video URLs and local audio or video files.
+- Tries manual and automatic platform captions first, including Bilibili `ai-zh` tracks, then falls back to the `bestaudio/best` stream from `yt-dlp` and `faster-whisper`.
+- Preserves real segment start and end times from captions or Whisper instead of asking the language model to invent timestamps.
+- Checks transcript size and speech coverage before calling the language model. Muted, replaced, or outro-only sources stop early instead of producing misleading notes.
+- Sends short transcripts directly to the model and only uses chunking plus integration for long transcripts.
+- Keeps screenshots disabled by default. When enabled, low-resolution preview frames are attached to the notes but are not analyzed by a vision model.
+- Downloads the Markdown note directly while keeping transcripts and optional images in the local task directory.
+- Uses API keys and Bilibili cookies only for the current request; they are not written to persistent browser storage or task output files.
 
-</div>
+## Supported inputs
 
----
+The current implementation is primarily intended for:
 
-## ✨ Features
+- Bilibili video URLs;
+- YouTube video URLs;
+- other `http` or `https` video URLs that the installed version of `yt-dlp` can parse;
+- local media files with these extensions: `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.mp4`, `.mkv`, `.mov`, `.webm`, and `.avi`.
 
-- 🌐 **Multi-Platform Support**: Supports major video platforms including Bilibili, YouTube, Douyin, Kuaishou, Tencent Video, iQiyi, Youku, and more
-- 📁 **Local Upload**: Directly upload and process local video files
-- 🎙️ **Speech Recognition**: Powered by OpenAI Whisper with multiple accuracy levels and GPU acceleration
-- 🤖 **AI Summarization**: Integrated with DeepSeek, OpenAI GPT, Qwen, GLM, Kimi, and other LLMs
-- 📸 **Key Frame Extraction**: Automatically extracts video screenshots and embeds them in notes
-- 📝 **Structured Output**: Generates Markdown notes with summaries, key points, and timestamps
-- 🎨 **Modern UI**: Beautiful web interface with real-time progress tracking
-- 💾 **One-Click Download**: Download complete ZIP packages containing notes and screenshots
+Platform APIs, sign-in requirements, and anti-automation measures change over time. This project does not guarantee that every video, format, or platform listed above will always work. Actual support depends on access permissions, caption availability, and `yt-dlp` support for the specific URL. Playlists are handled as a single video rather than as a batch.
 
----
+## Pipeline
 
-## 🏗️ Project Structure
+1. Read metadata from a URL, or accept a local media upload.
+2. For online videos, look for Chinese or English manual captions and then automatic captions.
+3. If captions are missing, inaccessible, or cannot be parsed, download the `bestaudio/best` stream and transcribe it with `faster-whisper`. Local files go directly to transcription.
+4. Save caption or transcription segments with their real start and end times.
+5. Split long transcripts at segment boundaries, summarize each chunk, and combine the results into final notes.
+6. Optionally extract frames at a fixed interval.
+7. Export Markdown notes, transcript files, and optional screenshots.
 
-```
-VideoToNotes/
-├── backend/                    # Backend service
-│   ├── main.py                # FastAPI main entry point
-│   ├── video_processor.py     # Video processor (download, info extraction, frame extraction)
-│   ├── whisper_asr.py         # Whisper speech recognition module
-│   ├── llm_summarizer.py      # LLM summarization generator
-│   ├── requirements.txt       # Python dependencies
-│   ├── .env                   # Environment configuration
-│   └── workspace/             # Temporary working directory (auto-generated)
-├── frontend/                  # Frontend pages
-│   ├── index.html             # Main page
-│   ├── style.css              # Stylesheet
-│   └── script.js              # Interaction logic
-└── README.md                  # Project documentation
-```
+## Requirements
 
----
+- Windows and PowerShell for the included launcher. Other operating systems can run Uvicorn directly.
+- Python **3.11**.
+- Network access to the video source, Whisper model download host, and selected language-model API.
+- An API key for a supported language-model service.
+- Optional: an NVIDIA GPU with a working CUDA environment. CPU is used by default.
 
-## 🚀 Quick Start
+Use a `.venv` in the project root so that project dependencies remain separate from the system Python installation.
 
-### Prerequisites
+## Installation
 
-- **Python**: 3.9 or higher
-- **FFmpeg**: For audio extraction and video processing
-- **GPU (Optional)**: NVIDIA GPU + CUDA drivers (for Whisper acceleration)
+Run the following commands from the project root:
 
-### Step 1: Install FFmpeg
-
-**Windows:**
-```bash
-# Install using Chocolatey
-choco install ffmpeg
-
-# Or download manually
-# Visit https://ffmpeg.org/download.html to download Windows version
-# Extract and add the bin directory to system PATH
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r backend\requirements.txt
 ```
 
-**macOS:**
-```bash
-brew install ffmpeg
+If PowerShell blocks the activation script, use the virtual environment without activating it:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
-**Linux:**
-```bash
-sudo apt update && sudo apt install ffmpeg
+## Running the app
+
+The recommended launcher is:
+
+```powershell
+.\start.ps1
 ```
 
-### Step 2: Clone the Repository
+The script starts the service in the background, checks the port and health endpoint, and stores its PID and logs under the Git-ignored `.runtime/` directory. Common commands:
 
-```bash
-git clone https://github.com/your-username/VideoToNotes.git
-cd VideoToNotes
+```powershell
+.\stop.ps1                 # Stop
+.\restart.ps1              # Restart
+.\start.ps1 -Foreground    # Foreground debugging; stop with Ctrl+C
+.\start.ps1 -Port 8010     # Use a different port
 ```
 
-### Step 3: Create Virtual Environment
+`HOST`, `PORT`, and `RELOAD` can be set in the project-root `.env`. Background mode stays single-process; foreground mode honors `RELOAD=true`.
 
-```bash
-# Navigate to backend directory
-cd backend
+You can also start the application manually from an activated `.venv`:
 
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+```powershell
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-### Step 4: Install Dependencies
+Then open <http://127.0.0.1:8000>. The static frontend and all `/api/*` endpoints use the same port, so no separate frontend server is needed.
 
-```bash
-pip install -r requirements.txt
-```
+The health endpoint is available at <http://127.0.0.1:8000/api/health>. While a job is active, the frontend displays backend-synchronized processing time and freezes it when the job completes, fails, or is cancelled.
 
-**For GPU Acceleration (NVIDIA GPU users):**
-```bash
-# Uninstall CPU version of torch
-pip uninstall torch torchaudio
+## Usage
 
-# Install CUDA version of torch (choose based on your CUDA version)
-# CUDA 11.8:
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+1. Select a provider, choose a preset model, and enter its API key. DeepSeek presets submit `deepseek-v4-flash` or `deepseek-v4-pro` verbatim; the job log shows the effective provider, model, and base URL.
+2. Select a note style. Concise and faithful modes use one call for short transcripts. Detailed notes with commentary first write faithful notes, then make a separate focused call for balanced commentary and analysis.
+3. Select reasoning effort. Auto disables thinking for concise notes, uses high effort for faithful notes, and maximum effort for analysis. The backend maps these choices to provider-specific parameters and retries an empty response once with thinking disabled.
+4. Select a Whisper model. `base` is the default because its download is smaller and startup is more reliable. `small` is generally more accurate for Chinese speech but needs more download time, memory, and processing time.
+5. Paste a video URL, or switch to local-file mode and upload media.
+6. Reuse mode finds an existing `transcript.json` for the same URL. The failure and result actions can explicitly resume an old task; restart mode repeats caption, audio, and Whisper processing.
+7. If a Bilibili video cannot be accessed publicly, optionally enter `SESSDATA`, `bili_jct`, and `buvid3` for the current session.
+8. Start the job, then preview or download the Markdown note. Active jobs can be cancelled while preserving completed intermediate files for later reuse.
 
-# CUDA 12.1:
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
+Screenshots are disabled by default. Enabling them makes online jobs download an additional low-resolution video and extract frames at the selected interval, increasing runtime, bandwidth, and disk use. Screenshots are currently attached as reference files only; they are not sent to a multimodal model for visual analysis.
 
-### Step 5: Configure Environment Variables
+## Output
 
-Copy the `.env` file and edit it:
+Each job writes its files under `workspace/<task-id>/`, and the result view shows the absolute directory path. The frontend downloads `notes.md` directly; the directory also contains:
 
-```bash
-# Windows
-copy .env .env.local
+Reusing a transcript still creates a new task ID. The new `notes.md` is written to the new directory, so earlier transcripts and notes are not overwritten.
 
-# macOS/Linux
-cp .env .env.local
-```
+- `notes.md`: the final structured video notes;
+- `transcript.md`: a readable timestamped transcript;
+- `transcript.json`: a structured transcript containing the language, source, and `start`, `end`, and `text` fields for every segment;
+- `images/*.jpg`: present only when screenshots were enabled.
 
-Edit the `.env` file and fill in your API keys:
+Caption accuracy depends on the platform source. Whisper can misrecognize names, numbers, and specialist terminology. Verify important claims against the source video at the corresponding timestamp.
 
-```env
-# ========== AI Model Configuration (configure at least one) ==========
+For longer media, the application stops before the language-model call when both speech coverage and text density are unusually low. The transcript is retained for inspection. Typical causes include moderation placeholders, muted or replaced audio, and music-led content.
 
-# DeepSeek (Recommended, cost-effective)
-DEEPSEEK_API_KEY=sk-your-deepseek-api-key
-DEEPSEEK_MODEL=deepseek-chat
+## Privacy and security
 
-# OpenAI GPT (Optional)
-# OPENAI_API_KEY=sk-your-openai-api-key
+- API keys and Bilibili cookies are sent only with the current request to the local backend. They are not stored in `localStorage`, task files, or logs.
+- The backend uses the API key to call the selected language-model service, so transcript text is sent to that provider. Review the provider's privacy policy before processing sensitive material.
+- Media download, subtitle parsing, Whisper transcription, and file generation run locally. Online media still has to be downloaded from its source platform.
+- The server listens on `127.0.0.1` by default. Do not switch it to `0.0.0.0` and expose it to the public internet. The application has no authentication, tenant isolation, or public-deployment hardening.
+- Treat cookies as login credentials. Enter them only when needed, never share them, and close or refresh the page after use.
 
-# Qwen (Optional)
-# QWEN_API_KEY=sk-your-qwen-api-key
+## Configuration
 
-# GLM (Optional)
-# ZHIPU_API_KEY=your-zhipu-api-key
+The application reads optional settings from `.env` in the project root. See `.env.example`:
 
-# Moonshot Kimi (Optional)
-# MOONSHOT_API_KEY=sk-your-moonshot-api-key
-
-# ========== Bilibili Cookie Configuration (required for HD videos) ==========
-BILIBILI_SESSDATA=your-sessdata
-BILIBILI_BILI_JCT=your-bili-jct
-BILIBILI_BUVID3=your-buvid3
-
-# ========== Service Configuration ==========
-HOST=0.0.0.0
+```dotenv
+HOST=127.0.0.1
 PORT=8000
+RELOAD=false
+MAX_UPLOAD_MB=500
+# VIDEOTONOTES_WORKSPACE=D:\path\to\workspace
 ```
 
-#### 🔑 Getting API Keys
+Keep `HOST=127.0.0.1` to preserve the intended personal-desktop security boundary. The frontend persists only non-sensitive preferences such as model selection, Whisper settings, and screenshot settings.
 
-**DeepSeek (Recommended):**
-1. Visit [DeepSeek Platform](https://platform.deepseek.com/)
-2. Register an account and complete verification
-3. Create a new API key in the "API Keys" section
-4. New users receive free credits, highly cost-effective
+## Tests
 
-**OpenAI:**
-1. Visit [OpenAI Platform](https://platform.openai.com/)
-2. Register an account and add payment method
-3. Create an API key in the "API Keys" section
+Install the development dependencies and run the test suite:
 
-**Other Models:**
-- Qwen: [Alibaba Cloud DashScope](https://dashscope.aliyun.com/)
-- GLM: [Zhipu AI Open Platform](https://open.bigmodel.cn/)
-- Moonshot: [Kimi Open Platform](https://platform.moonshot.cn/)
-
-#### 🍪 Getting Bilibili Cookies
-
-1. Log in to [Bilibili](https://www.bilibili.com/) in your browser
-2. Press `F12` to open Developer Tools
-3. Switch to the **Application** tab
-4. Select **Cookies** → `https://www.bilibili.com` in the left panel
-5. Find and copy these three values:
-   - `SESSDATA`: Login credential
-   - `bili_jct`: CSRF Token
-   - `buvid3`: Device identifier
-
----
-
-## 🎯 Usage
-
-### Method 1: Web Interface (Recommended)
-
-#### 1. Start the Backend Service
-
-```bash
-cd backend
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
-
-python main.py
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-The service will start at `http://localhost:8000`.
+You can also probe the online-media pipeline without making an LLM request:
 
-#### 2. Open the Frontend Page
-
-Open `frontend/index.html` directly in your browser, or use a simple HTTP server:
-
-```bash
-# Execute from project root
-cd frontend
-python -m http.server 3000
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL"
+.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL" --download-audio
+.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL" --transcribe --model base
 ```
 
-Then visit `http://localhost:3000`
+The last two commands use real network bandwidth. The transcription command also downloads the selected Whisper model on first use.
 
-#### 3. Usage Flow
+## Project structure
 
-1. **Configure AI Model**: Select an AI model in the left sidebar and enter the API Key
-2. **Configure Bilibili Cookie** (Optional): Fill in cookie information for HD Bilibili videos
-3. **Adjust Parameters**: Choose Whisper model, screenshot interval, etc. as needed
-4. **Enter Video URL or Upload Local File**:
-   - Select "Video Link" mode and paste the video URL
-   - Or select "Local File" mode and upload a video file
-5. **Click "Start Summarization"**: Wait for processing to complete
-6. **View and Download**: Preview the generated notes online or download the complete ZIP package
-
-### Method 2: API Calls
-
-#### After starting the service, you can make API calls:
-
-**1. Upload Local Video:**
-```bash
-curl -X POST "http://localhost:8000/api/upload" \
-  -F "file=@/path/to/video.mp4"
+```text
+VideoToNo/
+|-- backend/
+|   |-- main.py               # FastAPI routes, cancellable jobs, and file output
+|   |-- video_processor.py    # yt-dlp, caption selection, audio, and frames
+|   |-- whisper_asr.py        # faster-whisper transcription
+|   |-- transcript.py         # caption parsing, timestamps, and chunking
+|   |-- llm_summarizer.py     # chunk summaries and final notes
+|   |-- requirements.txt
+|   `-- requirements-dev.txt
+|-- frontend/
+|   |-- index.html
+|   |-- script.js
+|   `-- style.css
+|-- scripts/
+|   `-- smoke_video.py
+|-- tests/
+|-- workspace/                # Runtime job files; ignored by Git
+|-- .env.example
+|-- pyproject.toml
+|-- start.ps1
+|-- README_CN.md
+`-- README_EN.md
 ```
 
-Response example:
-```json
-{
-  "task_id": "abc123-def456-ghi789",
-  "file_path": "D:\\workspace\\abc123\\video.mp4",
-  "filename": "video.mp4"
-}
-```
+## Troubleshooting
 
-**2. Start Summarization (Local File):**
-```bash
-curl -X POST "http://localhost:8000/api/summarize" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_url": "",
-    "upload_task_id": "abc123-def456-ghi789",
-    "screenshot_interval": 10,
-    "whisper_model": "base",
-    "use_gpu": false,
-    "llm_config": {
-      "model_type": "deepseek",
-      "api_key": "sk-your-api-key"
-    }
-  }'
-```
+### Why does the first transcription take so long to start?
 
-**3. Start Summarization (Online Video):**
-```bash
-curl -X POST "http://localhost:8000/api/summarize" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_url": "https://www.bilibili.com/video/BV1xx411c7mD",
-    "screenshot_interval": 10,
-    "whisper_model": "base",
-    "use_gpu": false,
-    "bilibili_cookie": {
-      "sessdata": "your-sessdata",
-      "bili_jct": "your-bili-jct",
-      "buvid3": "your-buvid3"
-    },
-    "llm_config": {
-      "model_type": "deepseek",
-      "api_key": "sk-your-api-key"
-    }
-  }'
-```
+`faster-whisper` downloads a model the first time that model is used. Download time depends on model size and network conditions. The local cache is reused on later runs, but selecting another model can trigger another download.
 
-**4. Check Task Status:**
-```bash
-curl "http://localhost:8000/api/task/{task_id}"
-```
+Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk. If the first download fails, check Hugging Face connectivity, proxy settings, and write access to the cache directory.
+The application disables Hugging Face's Xet download backend by default and uses regular HTTP downloads to avoid CAS reconstruction failures on some Windows networks.
+If the selected model is not fully cached but a usable `base` model is already available, the job falls back to `base` and records that decision in the task log instead of waiting on an unreliable weight download.
 
-**5. Download Summary Report:**
-```bash
-curl -O "http://localhost:8000/api/download/{task_id}"
-```
+### Why is CPU transcription slower than the video duration?
 
----
+Speed depends on the CPU, media duration, and model size. CPU mode uses `int8` to reduce resource pressure, but `medium`, `large-v3`, and `turbo` can still be slow and memory-intensive. Start with `base` on a personal computer, and enable GPU mode only after confirming that CUDA works correctly.
 
-## ⚙️ Configuration Guide
+### Why would I need a Bilibili cookie?
 
-### Whisper Model Selection
+Publicly accessible videos usually do not require one. Videos or captions restricted to signed-in users may need credentials for an account that already has access. A cookie cannot grant permissions the account does not have, can expire, and may stop working when the platform changes its access rules.
 
-| Model | Speed | Accuracy | VRAM Usage | Use Case |
-|-------|-------|----------|------------|----------|
-| tiny | ⚡⚡⚡⚡⚡ | ⭐⭐ | ~1GB | Short videos (<10 min), quick testing |
-| base | ⚡⚡⚡⚡ | ⭐⭐⭐ | ~1.5GB | **Recommended**, balanced speed and accuracy |
-| small | ⚡⚡⚡ | ⭐⭐⭐⭐ | ~2.5GB | Medium-length videos, higher accuracy |
-| medium | ⚡⚡ | ⭐⭐⭐⭐⭐ | ~5GB | Long videos (>30 min), high accuracy |
-| large | ⚡ | ⭐⭐⭐⭐⭐⭐ | ~10GB | Professional use, highest accuracy |
+### Why did my job disappear after restarting the server?
 
-### Screenshot Interval Settings
+Job status is held in process memory. Restarting the server clears the job registry. Generated files normally remain under `workspace/<task-id>/`, but the old job can no longer be queried through the API or downloaded through its button. Retrieve the files manually or submit the job again.
 
-- **5 seconds**: Suitable for tutorials and tech demos, rich in details
-- **10 seconds**: **Recommended**, suitable for most videos
-- **15-30 seconds**: Suitable for lectures and interviews, fewer images
+### Why can a particular URL not be processed?
 
-### GPU Acceleration
+First confirm that it plays in the current network and account, then update the project's `yt-dlp` dependency. Paid content, DRM, CAPTCHAs, region restrictions, expired signatures, and platform API changes can all prevent extraction. This project does not bypass platform access controls.
 
-If you have an NVIDIA GPU, enabling GPU acceleration is recommended:
+### What happens when no captions are available?
 
-1. Ensure CUDA drivers are installed (version >= 11.8)
-2. Install CUDA version of PyTorch (see installation steps)
-3. Check "Enable GPU Acceleration" in the frontend
+The application downloads the best available audio stream and runs `faster-whisper` locally. This takes longer than using captions and is affected by audio quality, accents, background noise, and domain-specific vocabulary.
 
-Whisper runs approximately **5-10x faster** on GPU.
+## Project status
 
----
-
-## 📋 Output Example
-
-The generated Markdown note includes:
-
-```markdown
-# Video Summary: "Python Beginner Tutorial"
-
-## 📌 One-Sentence Summary
-This video provides a detailed introduction to Python programming basics, covering core concepts such as variables, data types, control flow, and functions.
-
-## 🎯 Key Points
-- Python is a concise and readable high-level programming language, ideal for beginners
-- Master basic syntax to quickly develop various applications
-- Good coding standards and commenting habits are essential
-
-## ⏱️ Key Timestamps
-| Time | Content Summary |
-|------|----------------|
-| 00:00 | Course introduction and environment setup |
-| 05:30 | Detailed explanation of variables and data types |
-| 15:20 | Conditional statements and loop structures |
-| 28:45 | Function definition and usage |
-
-## 💡 Learning Points
-1. Understand Python's dynamic typing characteristics
-2. Master list comprehension techniques
-3. Learn to use exception handling mechanisms
-
-## 🎬 Overall Evaluation
-This is an excellent Python introductory course for beginners, with clear explanations and abundant examples. Highly recommended for programming novices.
-
-## 📸 Video Screenshots
-
-![Screenshot 1](./images/frame_0000_0s.jpg)
-
-![Screenshot 2](./images/frame_0001_10s.jpg)
-
-...
-```
-
-Downloaded ZIP package structure:
-```
-Video_Title_summary.zip
-├── Video_Title.md          # Markdown notes
-└── images/                 # Video screenshots folder
-    ├── frame_0000_0s.jpg
-    ├── frame_0001_10s.jpg
-    └── ...
-```
-
----
-
-## 🔧 Troubleshooting
-
-### 1. Error: "ffmpeg is not recognized as an internal or external command"
-
-**Solution:**
-- Verify FFmpeg is correctly installed
-- Add FFmpeg's `bin` directory to system PATH environment variable
-- Restart the command line window
-
-### 2. Whisper Model Download Failed
-
-**Solution:**
-- The model downloads automatically on first run; you may need a VPN
-- Manually download models and place them in the cache directory:
-  ```bash
-  # Windows cache directory
-  C:\Users\YourUsername\.cache\whisper
-  
-  # macOS/Linux cache directory
-  ~/.cache/whisper
-  ```
-
-### 3. Bilibili Video Download Failed or Low Quality
-
-**Solution:**
-- Ensure Bilibili cookies are correctly configured (SESSDATA, bili_jct, buvid3)
-- Cookies expire; re-obtain if invalid
-- Premium member-exclusive videos require premium account cookies
-
-### 4. API Call Failed or Returns Errors
-
-**Solution:**
-- Verify API Key is correct
-- Confirm sufficient account balance
-- Check backend console logs for detailed error messages
-- Try switching to a different AI model
-
-### 5. Insufficient Memory or Slow Processing
-
-**Solution:**
-- Use smaller Whisper models (tiny or base)
-- Increase screenshot interval to reduce image count
-- Enable GPU acceleration
-- Close other memory-intensive programs
-
-### 6. Character Encoding Issues
-
-**Solution:**
-- Ensure system encoding is UTF-8
-- Windows users can add to environment variables:
-  ```
-  PYTHONIOENCODING=utf-8
-  ```
-
----
-
-## 🛠️ Tech Stack
-
-### Backend
-- **FastAPI**: High-performance async web framework
-- **yt-dlp**: Powerful video downloader
-- **OpenAI Whisper**: Advanced speech recognition model
-- **OpenCV**: Video frame extraction and processing
-- **OpenAI Python SDK**: Calling various LLM APIs
-
-### Frontend
-- **Native HTML/CSS/JavaScript**: Lightweight, no dependencies
-- **Marked.js**: Markdown rendering
-- **Fetch API**: Async requests
-
----
-
-## 📝 Roadmap
-
-- [ ] Support more video platforms
-- [ ] Add batch processing functionality
-- [ ] Support custom summary templates
-- [ ] Add video clip editing features
-- [ ] Support export to PDF, Word, and other formats
-- [ ] Add user system and history records
-- [ ] Optimize long video processing performance
-- [ ] Support multi-language translation
-
----
-
-## 🤝 Contributing
-
-Issues and Pull Requests are welcome!
-
-1. Fork this repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
-
----
-
-## 🙏 Acknowledgments
-
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Powerful video downloader
-- [OpenAI Whisper](https://github.com/openai/whisper) - Advanced speech recognition model
-- [FastAPI](https://fastapi.tiangolo.com/) - Modern web framework
-- Thanks to all open-source project contributors
-
----
-
-## 📮 Contact
-
-For questions or suggestions, feel free to reach out:
-
-- Submit an [Issue](https://github.com/your-username/VideoToNotes/issues)
-- Email: your-email@example.com
-
----
-
-<div align="center">
-
-**If this project helps you, please give it a ⭐ Star!**
-
-Made with ❤️ by Your Name
-
-</div>
+This is a local personal-use tool, not a multi-user service. The repository currently has no license file; do not infer licensing terms from historical badges or descriptions.

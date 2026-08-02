@@ -1,304 +1,311 @@
-import os
-import re
+from __future__ import annotations
+
 import asyncio
+import os
 import shutil
-import subprocess
-from pathlib import Path
-from typing import Dict, Tuple, List, Optional
+import urllib.request
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+from typing import Any, Iterator
+from urllib.parse import urlparse
+
 import yt_dlp
-import cv2
-from dotenv import load_dotenv
 
-load_dotenv()
+from .transcript import TranscriptSegment, parse_subtitle_payload
 
 
-class VideoSource(Enum):
-    """视频来源类型"""
+class VideoSource(str, Enum):
     BILIBILI = "bilibili"
     YOUTUBE = "youtube"
-    DOUYIN = "douyin"
-    KUAISHOU = "kuaishou"
-    TENCENT = "tencent"
-    IQIYI = "iqiyi"
-    YOUKU = "youku"
-    WEIBO = "weibo"
     LOCAL = "local"
     OTHER = "other"
 
 
+@dataclass(frozen=True)
+class SubtitleResult:
+    segments: list[TranscriptSegment]
+    language: str
+    source: str
+
+
 class VideoProcessor:
-    def __init__(self):
-        self.work_dir = Path("./workspace")
-        self.work_dir.mkdir(exist_ok=True)
+    def __init__(self, work_dir: Path) -> None:
+        self.work_dir = work_dir
+        self.work_dir.mkdir(parents=True, exist_ok=True)
 
-    async def detect_source(self, url_or_path: str) -> VideoSource:
-        """检测视频来源"""
-        # 本地文件 - 检查绝对路径和相对路径
-        if os.path.exists(url_or_path):
+    @staticmethod
+    def detect_source(value: str, allow_local: bool = False) -> VideoSource:
+        if allow_local and Path(value).is_file():
             return VideoSource.LOCAL
-        
-        # 也检查是否是Windows绝对路径（例如 D:\path\to\file.mp4）
-        try:
-            normalized_path = Path(url_or_path).resolve()
-            if normalized_path.exists():
-                return VideoSource.LOCAL
-        except Exception:
-            pass
-
-        url_lower = url_or_path.lower()
-
-        # B站
-        if "bilibili.com" in url_lower or "b23.tv" in url_lower:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Video URL must use http or https")
+        host = (parsed.hostname or "").lower()
+        if host == "bilibili.com" or host.endswith(".bilibili.com") or host == "b23.tv":
             return VideoSource.BILIBILI
-
-        # YouTube
-        if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
             return VideoSource.YOUTUBE
-
-        # 抖音
-        if "douyin.com" in url_lower or "iesdouyin.com" in url_lower:
-            return VideoSource.DOUYIN
-
-        # 快手
-        if "kuaishou.com" in url_lower:
-            return VideoSource.KUAISHOU
-
-        # 腾讯视频
-        if "v.qq.com" in url_lower:
-            return VideoSource.TENCENT
-
-        # 爱奇艺
-        if "iqiyi.com" in url_lower:
-            return VideoSource.IQIYI
-
-        # 优酷
-        if "youku.com" in url_lower:
-            return VideoSource.YOUKU
-
-        # 微博
-        if "weibo.com" in url_lower:
-            return VideoSource.WEIBO
-
-        # 其他
         return VideoSource.OTHER
 
-    async def get_video_info(self, url_or_path: str, cookie: Dict = None) -> Dict:
-        """获取视频信息（支持多种来源）"""
-        source = await self.detect_source(url_or_path)
-
-        # 本地文件
+    async def get_video_info(
+        self, url_or_path: str, cookie: dict[str, str] | None = None, allow_local: bool = False
+    ) -> dict[str, Any]:
+        source = self.detect_source(url_or_path, allow_local=allow_local)
         if source == VideoSource.LOCAL:
-            return await self._get_local_video_info(url_or_path)
-
-        # 在线视频，使用 yt-dlp 获取信息
-        return await self._get_online_video_info(url_or_path, cookie)
-
-    async def _get_local_video_info(self, file_path: str) -> Dict:
-        """获取本地视频文件信息"""
-        def _read_info():
-            cap = cv2.VideoCapture(file_path)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = frame_count / fps if fps > 0 else 0
-            cap.release()
-            return fps, frame_count, duration
-
-        fps, frame_count, duration = await asyncio.to_thread(_read_info)
-
-        return {
-            "title": Path(file_path).stem,
-            "source": "local",
-            "duration": duration,
-            "file_path": file_path,
-            "owner": "",
-            "description": ""
-        }
-
-    async def _get_online_video_info(self, url: str, cookie: Dict = None) -> Dict:
-        """获取在线视频信息（使用 yt-dlp）"""
-        def _fetch_info():
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
+            path = Path(url_or_path)
+            return {
+                "title": path.stem,
+                "source": source.value,
+                "duration": 0,
+                "owner": "",
+                "description": "",
             }
-            if cookie:
-                cookie_str = self._build_cookie_string(cookie)
-                if cookie_str:
-                    ydl_opts['headers'] = {'Cookie': cookie_str}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return info
+        return await asyncio.to_thread(self._extract_info, url_or_path, cookie)
 
-        info = await asyncio.to_thread(_fetch_info)
-        return {
-            "title": info.get("title", "未知标题"),
-            "source": info.get("extractor", "unknown"),
-            "duration": info.get("duration", 0),
-            "owner": info.get("uploader", ""),
-            "description": info.get("description", "")[:500],
-            "thumbnail": info.get("thumbnail", ""),
-            "view_count": info.get("view_count", 0)
-        }
+    async def fetch_subtitles(
+        self,
+        url: str,
+        info: dict[str, Any],
+        cookie: dict[str, str] | None = None,
+    ) -> SubtitleResult | None:
+        for language, track, source in self._subtitle_candidates(info):
+            try:
+                if track.get("data") is not None:
+                    payload = str(track["data"])
+                else:
+                    payload = await asyncio.to_thread(
+                        self._download_text, track["url"], url, cookie
+                    )
+                segments = parse_subtitle_payload(payload, track.get("ext", "vtt"))
+            except Exception:
+                continue
+            if segments:
+                return SubtitleResult(
+                    segments=segments,
+                    language=language,
+                    source=source,
+                )
+        return None
 
-    async def download_video(self, url_or_path: str, task_id: str, cookie: Dict = None) -> Tuple[Path, Path]:
-        """下载视频（支持多种来源）"""
-        source = await self.detect_source(url_or_path)
-        task_dir = self.work_dir / task_id
-        task_dir.mkdir(exist_ok=True)
+    async def download_audio(
+        self, url: str, task_id: str, cookie: dict[str, str] | None = None
+    ) -> Path:
+        task_dir = self._task_dir(task_id)
 
-        # 本地文件
-        if source == VideoSource.LOCAL:
-            return await self._use_local_video(url_or_path, task_dir)
-
-        # 在线视频：使用 yt-dlp 下载
-        return await self._download_online_video(url_or_path, task_dir, cookie)
-
-    async def _use_local_video(self, file_path: str, task_dir: Path) -> Tuple[Path, Path]:
-        """使用本地视频文件"""
-        # 转换为绝对路径并规范化
-        video_path = Path(file_path).resolve()
-        
-        print(f"[本地视频] 原始路径: {file_path}")
-        print(f"[本地视频] 规范化路径: {video_path}")
-        print(f"[本地视频] 文件是否存在: {video_path.exists()}")
-
-        if not video_path.exists():
-            raise FileNotFoundError(f"视频文件不存在: {video_path}")
-
-        # 如果文件不在当前task目录下，复制过来（不移动，保护用户原始文件）
-        if video_path.parent != task_dir.resolve():
-            target_path = task_dir / video_path.name
-            print(f"[本地视频] 正在复制文件到workspace...")
-            print(f"[本地视频] 源文件: {video_path}")
-            print(f"[本地视频] 目标文件: {target_path}")
-            await asyncio.to_thread(shutil.copy2, str(video_path), str(target_path))
-            video_path = target_path
-            print(f"[本地视频] 文件复制完成")
-
-        # 提取音频
-        audio_path = task_dir / f"{video_path.stem}.mp3"
-        if not audio_path.exists():
-            await self._extract_audio(video_path, audio_path)
-
-        return video_path, audio_path
-
-    async def _extract_audio(self, video_path: Path, audio_path: Path) -> Path:
-        """从视频中提取音频，处理无音轨等异常情况"""
-        vpath = str(video_path.resolve())
-        apath = str(audio_path.resolve())
-
-        def _run_ffmpeg(cmd):
-            return subprocess.run(cmd, capture_output=True)
-
-        # 尝试提取音频
-        cmd = [
-            'ffmpeg', '-i', vpath,
-            '-q:a', '0', '-map', 'a',
-            apath, '-y'
-        ]
-        result = await asyncio.to_thread(_run_ffmpeg, cmd)
-        if result.returncode != 0:
-            # 音频提取失败，可能是无音轨视频，生成静音音频
-            print(f"[音频提取] 提取失败(rc={result.returncode})，生成静音音频: {video_path.name}")
-            cmd_silent = [
-                'ffmpeg', '-i', vpath,
-                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=mono:sample_rate=16000',
-                '-t', '1', '-c:a', 'libmp3lame',
-                apath, '-y'
+        def _download() -> Path:
+            options = self._base_ydl_options(cookie)
+            options.update(
+                {
+                    "format": "bestaudio/best",
+                    "outtmpl": str(task_dir / "audio.%(ext)s"),
+                    "noplaylist": True,
+                }
+            )
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.extract_info(url, download=True)
+            matches = [
+                item
+                for item in task_dir.glob("audio.*")
+                if item.suffix not in {".part", ".ytdl"}
             ]
-            result2 = await asyncio.to_thread(_run_ffmpeg, cmd_silent)
-            if result2.returncode != 0:
-                raise RuntimeError(f"音频处理失败: {result2.stderr.decode('utf-8', errors='replace')[:200]}")
-        return audio_path
+            if not matches:
+                raise RuntimeError("yt-dlp completed without producing an audio file")
+            return max(matches, key=lambda item: item.stat().st_size)
 
-    async def _download_online_video(self, url: str, task_dir: Path, cookie: Dict = None) -> Tuple[Path, Path]:
-        """下载在线视频"""
-        def _download():
-            ydl_opts = {
-                'format': 'bestvideo+bestaudio/best',
-                'outtmpl': str(task_dir / '%(title)s.%(ext)s'),
-                'merge_output_format': 'mp4',
-                'noplaylist': True,
-                'quiet': True,
-                'no_warnings': True,
-            }
-            if cookie:
-                cookie_str = self._build_cookie_string(cookie)
-                if cookie_str:
-                    ydl_opts['headers'] = {'Cookie': cookie_str}
-                    print(f"使用 Cookie: {cookie_str[:50]}...")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                return info
+        return await asyncio.to_thread(_download)
 
-        info = await asyncio.to_thread(_download)
-        video_path = task_dir / f"{info['title']}.mp4"
+    async def download_preview_video(
+        self, url: str, task_id: str, cookie: dict[str, str] | None = None
+    ) -> Path:
+        task_dir = self._task_dir(task_id)
 
-        # 提取音频
-        audio_path = task_dir / f"{info['title']}.mp3"
-        if not audio_path.exists():
-            await self._extract_audio(video_path, audio_path)
+        def _download() -> Path:
+            options = self._base_ydl_options(cookie)
+            options.update(
+                {
+                    "format": "worstvideo[height>=360]/bestvideo[height<=720]/worst",
+                    "outtmpl": str(task_dir / "preview.%(ext)s"),
+                    "noplaylist": True,
+                }
+            )
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.extract_info(url, download=True)
+            matches = [
+                item
+                for item in task_dir.glob("preview.*")
+                if item.suffix not in {".part", ".ytdl"}
+            ]
+            if not matches:
+                raise RuntimeError("yt-dlp completed without producing a preview video")
+            return max(matches, key=lambda item: item.stat().st_size)
 
-        return video_path, audio_path
+        return await asyncio.to_thread(_download)
 
-    def _build_cookie_string(self, cookie: Dict) -> str:
-        """构建 Cookie 字符串"""
-        cookie_parts = []
-        if cookie.get("sessdata"):
-            cookie_parts.append(f"SESSDATA={cookie['sessdata']}")
-        if cookie.get("bili_jct"):
-            cookie_parts.append(f"bili_jct={cookie['bili_jct']}")
-        if cookie.get("buvid3"):
-            cookie_parts.append(f"buvid3={cookie['buvid3']}")
-        return "; ".join(cookie_parts)
+    async def copy_local_media(self, source: Path, task_id: str) -> Path:
+        task_dir = self._task_dir(task_id)
+        source = source.resolve()
+        target = (task_dir / f"input{source.suffix.lower()}").resolve()
+        if source != target:
+            await asyncio.to_thread(shutil.copy2, source, target)
+        return target
 
-    async def extract_frames(self, video_path: Path, task_id: str, interval: int = 10) -> List[Path]:
-        """提取视频关键帧"""
-        frames_dir = self.work_dir / task_id / "frames"
+    async def extract_frames(
+        self, video_path: Path, task_id: str, interval: int
+    ) -> list[Path]:
+        if interval <= 0:
+            return []
+        return await asyncio.to_thread(
+            self._extract_frames_sync, video_path, task_id, interval
+        )
+
+    def _extract_frames_sync(
+        self, video_path: Path, task_id: str, interval: int
+    ) -> list[Path]:
+        try:
+            import av
+        except ImportError as exc:
+            raise RuntimeError("PyAV is required to extract screenshots") from exc
+
+        frames_dir = self._task_dir(task_id) / "frames"
         frames_dir.mkdir(exist_ok=True)
+        paths: list[Path] = []
+        with av.open(str(video_path)) as container:
+            if not container.streams.video:
+                return []
+            duration = (container.duration or 0) / av.time_base
+            if duration <= 0:
+                return []
+            for timestamp in range(0, int(duration) + 1, interval):
+                container.seek(int(timestamp * av.time_base), backward=True)
+                frame = next(container.decode(video=0), None)
+                if frame is None:
+                    continue
+                path = frames_dir / f"frame_{len(paths):04d}_{timestamp}s.jpg"
+                frame.to_image().save(path, quality=82)
+                paths.append(path)
+        return paths
 
-        def _extract():
-            cap = cv2.VideoCapture(str(video_path))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_interval = int(fps * interval)
-
-            frame_count = 0
-            paths = []
-
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                if frame_count % frame_interval == 0:
-                    timestamp = frame_count / fps
-                    output_path = frames_dir / f"frame_{len(paths):04d}_{int(timestamp)}s.jpg"
-                    cv2.imwrite(str(output_path), frame)
-                    paths.append(output_path)
-
-                frame_count += 1
-
-            cap.release()
-            return paths
-
-        screenshot_paths = await asyncio.to_thread(_extract)
-        return screenshot_paths
-
-    async def cleanup(self, task_id: str):
-        """清理临时文件"""
+    async def cleanup(self, task_id: str) -> None:
         task_dir = self.work_dir / task_id
         if task_dir.exists():
             await asyncio.to_thread(shutil.rmtree, task_dir)
 
-    def _extract_bvid(self, url: str) -> str:
-        """提取B站BV号"""
-        if "b23.tv" in url:
-            import requests
-            response = requests.head(url, allow_redirects=True)
-            url = response.url
+    def _extract_info(
+        self, url: str, cookie: dict[str, str] | None
+    ) -> dict[str, Any]:
+        options = self._base_ydl_options(cookie)
+        options.update({"skip_download": True, "noplaylist": True})
+        with yt_dlp.YoutubeDL(options) as ydl:
+            raw_info = ydl.extract_info(url, download=False)
+            info = ydl.sanitize_info(raw_info)
+        return {
+            "title": info.get("title") or "Untitled video",
+            "source": info.get("extractor_key", "other").lower(),
+            "duration": info.get("duration") or 0,
+            "owner": info.get("uploader") or "",
+            "description": (info.get("description") or "")[:1_000],
+            "thumbnail": info.get("thumbnail") or "",
+            "view_count": info.get("view_count") or 0,
+            "subtitles": info.get("subtitles") or {},
+            "automatic_captions": info.get("automatic_captions") or {},
+        }
 
-        match = re.search(r'BV\w+', url)
-        if match:
-            return match.group()
-        return None
+    @staticmethod
+    def _select_subtitle(
+        info: dict[str, Any]
+    ) -> tuple[str, dict[str, Any], str] | None:
+        return next(VideoProcessor._subtitle_candidates(info), None)
+
+    @staticmethod
+    def _subtitle_candidates(
+        info: dict[str, Any]
+    ) -> Iterator[tuple[str, dict[str, Any], str]]:
+        language_preferences = (
+            "zh-hans",
+            "zh-cn",
+            "zh",
+            "zh-hant",
+            "zh-tw",
+            "ai-zh",
+            "en",
+            "ai-en",
+        )
+        format_preferences = ("json3", "json", "vtt", "srt")
+        for source_key, source_name in (
+            ("subtitles", "platform_subtitle"),
+            ("automatic_captions", "platform_auto_caption"),
+        ):
+            tracks = info.get(source_key) or {}
+            for preferred_language in language_preferences:
+                matching_languages = [
+                    language
+                    for language in tracks
+                    if language.lower() == preferred_language
+                    or language.lower().startswith(preferred_language + "-")
+                ]
+                for language in matching_languages:
+                    entries = tracks.get(language) or []
+                    selected_source = (
+                        "platform_auto_caption"
+                        if source_key == "automatic_captions"
+                        or language.lower().startswith("ai-")
+                        else source_name
+                    )
+                    for extension in format_preferences:
+                        for entry in entries:
+                            has_content = entry.get("url") or entry.get("data") is not None
+                            if has_content and entry.get("ext", "").lower() == extension:
+                                yield language, entry, selected_source
+
+    @staticmethod
+    def _download_text(
+        subtitle_url: str, referer: str, cookie: dict[str, str] | None
+    ) -> str:
+        if subtitle_url.startswith("//"):
+            subtitle_url = "https:" + subtitle_url
+        headers = {
+            "Referer": referer,
+            "User-Agent": "Mozilla/5.0 VideoToNotes/2.0",
+        }
+        cookie_header = VideoProcessor._cookie_header(cookie)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        request = urllib.request.Request(subtitle_url, headers=headers)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8-sig", errors="replace")
+
+    @staticmethod
+    def _base_ydl_options(cookie: dict[str, str] | None) -> dict[str, Any]:
+        headers = {"User-Agent": "Mozilla/5.0 VideoToNotes/2.0"}
+        cookie_header = VideoProcessor._cookie_header(cookie)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        return {
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "http_headers": headers,
+        }
+
+    @staticmethod
+    def _cookie_header(cookie: dict[str, str] | None) -> str:
+        if not cookie:
+            return ""
+        names = {
+            "sessdata": "SESSDATA",
+            "bili_jct": "bili_jct",
+            "buvid3": "buvid3",
+        }
+        return "; ".join(
+            f"{header_name}={cookie[key]}"
+            for key, header_name in names.items()
+            if cookie.get(key)
+        )
+
+    def _task_dir(self, task_id: str) -> Path:
+        task_dir = (self.work_dir / task_id).resolve()
+        if task_dir.parent != self.work_dir.resolve():
+            raise ValueError("Invalid task id")
+        task_dir.mkdir(parents=True, exist_ok=True)
+        return task_dir
