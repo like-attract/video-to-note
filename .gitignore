@@ -17,3 +17,6 @@ Thumbs.db
 .DS_Store
 .idea/
 *.iml
+
+# Local screenshot containing a workstation path; publish the sanitized copy.
+/sources/output.png

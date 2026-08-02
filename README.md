@@ -6,6 +6,20 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 前端页面和 API 由同一个 FastAPI 服务提供，默认地址为 <http://127.0.0.1:8000>。
 
+## 界面预览
+
+### 配置与提交
+
+![VideoToNo 配置与视频提交界面](sources/preview.png)
+
+### 处理进度
+
+![VideoToNo 任务处理进度与运行记录](sources/process.png)
+
+### 笔记输出
+
+![VideoToNo 生成的详细视频笔记](sources/output-public.png)
+
 ## 功能特点
 
 - 支持视频链接和本地音视频文件。
