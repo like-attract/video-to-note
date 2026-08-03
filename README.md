@@ -42,72 +42,44 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 平台接口、登录限制和反爬策略会变化。本项目不保证上述每个平台、每个视频或每种清晰度始终可用；是否能够处理，最终取决于视频访问权限、字幕可见性以及 `yt-dlp` 对该链接的解析能力。播放列表会按单个视频处理。
 
+**平台适配说明**：B 站为深度适配——除 yt-dlp 可读取的人工字幕外，还会直连官方接口抓取 AI 字幕（ai-zh/ai-en/ai-ja，需登录凭据，界面支持扫码登录导入）。抖音、爱奇艺、腾讯视频**未做适配**，不保证可用（爱奇艺与腾讯视频暂无适配计划）；这些平台建议使用带公开字幕的链接或本地文件。
+
 ## 处理流程
 
 1. 读取链接元数据，或接收本地媒体上传。
 2. 对在线视频优先查找中文或英文人工字幕，其次查找自动字幕。
-3. 如果字幕不存在、不可访问或无法解析，下载 `bestaudio/best` 音轨并使用 `faster-whisper` 转写。本地文件直接进入转写流程。
-4. 将字幕或转写结果保存为带真实起止时间的分段记录。
-5. 对较长转录按分段边界切块，生成局部摘要后再生成完整笔记。
-6. 可选地提取定时截图。
-7. 输出 Markdown 笔记、转录文件和可选截图。
+3. 如果字幕不存在、不可访问或无法解析，下载 `b## 环境要求
 
-## 环境要求
+- Windows + PowerShell（其他系统可手动运行 Uvicorn）、Python 3.11
+- 网络：可访问视频来源、Whisper 模型下载地址与所选大模型 API
+- 大模型服务的 API Key
+- 可选：NVIDIA GPU（未启用或不可用时使用 CPU）
 
-- Windows 和 PowerShell；其他系统也可以手动运行 Uvicorn。
-- Python **3.11**。
-- 可访问视频来源、Whisper 模型下载地址和所选大模型 API 的网络环境。
-- 大模型服务的 API Key。
-- 可选：支持 CUDA 的 NVIDIA GPU。未启用或不可用时使用 CPU。
-
-建议始终使用项目根目录下的 `.venv`，避免依赖与系统 Python 混用。
+> 便携版 exe 不需要 Python 环境。
 
 ## 安装
 
-在项目根目录执行：
-
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r backend\requirements.txt
-```
-
-如果 PowerShell 阻止激活脚本，可以不激活环境，直接使用：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
 ## 启动
 
-推荐运行项目自带脚本：
-
 ```powershell
-.\start.ps1
+\start.ps1                  # 后台启动（自动检查端口与健康状态）
+\stop.ps1                   # 关闭
+\restart.ps1                # 重启
+\start.ps1 -Foreground      # 前台调试，Ctrl+C 退出
 ```
 
-脚本默认在后台启动，自动检查端口和健康状态，并将 PID 与日志写入被 Git 忽略的 `.runtime/`。常用管理命令：
+`HOST`、`PORT`、`RELOAD` 可写入根目录 `.env`。也可以手动运行：
 
 ```powershell
-.\stop.ps1                 # 关闭
-.\restart.ps1              # 重启
-.\start.ps1 -Foreground    # 前台调试，Ctrl+C 关闭
-.\start.ps1 -Port 8010     # 指定其他端口
+\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-`HOST`、`PORT` 和 `RELOAD` 可以写入项目根目录的 `.env`；后台模式不会启用自动重载，前台模式会读取 `RELOAD=true`。
-
-也可以在已激活的 `.venv` 中手动启动：
-
-```powershell
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
-
-随后打开 <http://127.0.0.1:8000>。前端静态文件和 `/api/*` 接口都由这个 8000 端口提供，不需要单独启动前端服务。
-
-健康检查地址为 <http://127.0.0.1:8000/api/health>。任务处理期间，前端会显示后端同步的实际处理时长，并在完成、失败或取消时冻结计时。
+打开 <http://127.0.0.1:8000> 即可使用（前端与 API 共用此端口）；健康检查地址为 <http://127.0.0.1:8000/api/health>。
 
 ## 便携版（Windows exe）
 

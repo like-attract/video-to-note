@@ -42,6 +42,8 @@ The current implementation is primarily intended for:
 
 Platform APIs, sign-in requirements, and anti-automation measures change over time. This project does not guarantee that every video, format, or platform listed above will always work. Actual support depends on access permissions, caption availability, and `yt-dlp` support for the specific URL. Playlists are handled as a single video rather than as a batch.
 
+**Platform adaptation notes**: Bilibili is deeply integrated - besides the human-made subtitles readable via yt-dlp, the app also queries Bilibili's own API for AI subtitles (ai-zh / ai-en / ai-ja, requires login credentials; the UI supports QR-code login import). Douyin, iQiyi, and Tencent Video are **not adapted** and not guaranteed to work (iQiyi and Tencent Video are not planned). For those platforms, prefer links with public subtitles or local files.
+
 ## Pipeline
 
 1. Read metadata from a URL, or accept a local media upload.
@@ -54,60 +56,36 @@ Platform APIs, sign-in requirements, and anti-automation measures change over ti
 
 ## Requirements
 
-- Windows and PowerShell for the included launcher. Other operating systems can run Uvicorn directly.
-- Python **3.11**.
-- Network access to the video source, Whisper model download host, and selected language-model API.
-- An API key for a supported language-model service.
-- Optional: an NVIDIA GPU with a working CUDA environment. CPU is used by default.
+- Windows + PowerShell (other OSes can run Uvicorn manually), Python 3.11
+- Network access to the video source, the Whisper model download host, and the selected LLM API
+- An API key for a supported language-model service
+- Optional: an NVIDIA GPU (CPU is used otherwise)
 
-Use a `.venv` in the project root so that project dependencies remain separate from the system Python installation.
+> The portable exe does not require a Python environment.
 
 ## Installation
 
-Run the following commands from the project root:
-
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r backend\requirements.txt
-```
-
-If PowerShell blocks the activation script, use the virtual environment without activating it:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
 ## Running the app
 
-The recommended launcher is:
-
 ```powershell
-.\start.ps1
+\start.ps1                  # Start in the background (checks port and health)
+\stop.ps1                   # Stop
+\restart.ps1                # Restart
+\start.ps1 -Foreground      # Foreground debugging; stop with Ctrl+C
 ```
 
-The script starts the service in the background, checks the port and health endpoint, and stores its PID and logs under the Git-ignored `.runtime/` directory. Common commands:
+`HOST`, `PORT`, and `RELOAD` can be set in the project-root `.env`. Or run manually:
 
 ```powershell
-.\stop.ps1                 # Stop
-.\restart.ps1              # Restart
-.\start.ps1 -Foreground    # Foreground debugging; stop with Ctrl+C
-.\start.ps1 -Port 8010     # Use a different port
+\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-`HOST`, `PORT`, and `RELOAD` can be set in the project-root `.env`. Background mode stays single-process; foreground mode honors `RELOAD=true`.
-
-You can also start the application manually from an activated `.venv`:
-
-```powershell
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
-
-Then open <http://127.0.0.1:8000>. The static frontend and all `/api/*` endpoints use the same port, so no separate frontend server is needed.
-
-The health endpoint is available at <http://127.0.0.1:8000/api/health>. While a job is active, the frontend displays backend-synchronized processing time and freezes it when the job completes, fails, or is cancelled.
+Open <http://127.0.0.1:8000> to use the app (frontend and API share this port); the health endpoint is <http://127.0.0.1:8000/api/health>.
 
 ## Portable build (Windows exe)
 
