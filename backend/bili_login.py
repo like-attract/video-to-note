@@ -104,27 +104,34 @@ class BiliLoginManager:
             "--window-size=430,700",
             LOGIN_URL,
         ]
-        try:
-            process = subprocess.Popen(args)
-        except OSError as exc:
-            return {"ok": False, "error": f"启动浏览器失败：{exc}"}
+        for retry in range(2):
+            try:
+                process = subprocess.Popen(args)
+            except OSError as exc:
+                return {"ok": False, "error": f"启动浏览器失败：{exc}"}
 
-        self.session = BiliLoginSession(
-            browser_path=browser,
-            profile_dir=profile_dir,
-            cdp_port=port,
-            started_at=time.time(),
-            process=process,
-        )
-        cookies = None
-        for _ in range(30):
-            # 等待浏览器 CDP 就绪并检查是否已有登录（约 8 秒）
-            if process.poll() is not None:
-                break
-            cookies = await self._fetch_cookies()
+            self.session = BiliLoginSession(
+                browser_path=browser,
+                profile_dir=profile_dir,
+                cdp_port=port,
+                started_at=time.time(),
+                process=process,
+            )
+            cookies = None
+            for _ in range(30):
+                # 等待浏览器 CDP 就绪并检查是否已有登录（约 8 秒）
+                if process.poll() is not None:
+                    break
+                cookies = await self._fetch_cookies()
+                if cookies:
+                    break
+                await asyncio.sleep(0.25)
             if cookies:
                 break
-            await asyncio.sleep(0.25)
+            if retry == 0:
+                # 浏览器异常退出（多为残留进程锁住 profile）：清理后重试一次
+                await asyncio.to_thread(self._kill_profile_browsers, profile_dir)
+                await asyncio.sleep(1)
         if cookies:
             # 该浏览器配置已登录过，直接完成
             self.session.cookies = cookies
@@ -146,7 +153,7 @@ class BiliLoginManager:
                 session.process.terminate()
             except OSError:
                 pass
-        if session:
+            # 仅当进程还存活时才枚举清理（PowerShell 枚举较慢，避免阻塞热路径）
             self._kill_profile_browsers(session.profile_dir)
         self.session = None
 

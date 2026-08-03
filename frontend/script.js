@@ -340,6 +340,12 @@ async function startBiliLogin() {
             showToast(data.error || data.message || '启动失败', 'error');
             return;
         }
+        if (data.state === 'ready' && data.cookies) {
+            // 该浏览器配置已登录过：直接回填，无需等待弹窗
+            fillBiliCredentials(data.cookies);
+            cancelBiliLogin();
+            return;
+        }
         byId('biliLoginStatus').textContent = data.message || '请在弹出的窗口中扫码登录';
         byId('biliLoginCancelBtn').hidden = false;
         byId('biliLoginBtn').disabled = true;
@@ -350,6 +356,17 @@ async function startBiliLogin() {
     }
 }
 
+function fillBiliCredentials(cookies) {
+    byId('sessdata').value = cookies.sessdata || '';
+    byId('biliJct').value = cookies.bili_jct || '';
+    byId('buvid3').value = cookies.buvid3 || '';
+    const section = byId('credentialsSection');
+    section.open = true;
+    section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    showToast('B 站凭据已导入并填入下方表单', 'success');
+    updateBiliHint();
+}
+
 async function pollBiliLogin() {
     try {
         const response = await fetch(`${API_BASE}/bili-login/status`, { cache: 'no-store' });
@@ -357,22 +374,15 @@ async function pollBiliLogin() {
         byId('biliLoginStatus').textContent = data.message || '';
         if (data.state === 'ready' && data.cookies) {
             stopBiliLoginPolling();
-            byId('sessdata').value = data.cookies.sessdata || '';
-            byId('biliJct').value = data.cookies.bili_jct || '';
-            byId('buvid3').value = data.cookies.buvid3 || '';
-            const section = byId('credentialsSection');
-            section.open = true;
-            section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            showToast('B 站凭据已导入并填入下方表单', 'success');
-            updateBiliHint();
+            fillBiliCredentials(data.cookies);
             cancelBiliLogin();
         } else if (['failed', 'timeout'].includes(data.state)) {
             stopBiliLoginPolling();
             showToast(data.message || '导入失败', 'error');
         }
-    } catch (error) {
-        stopBiliLoginPolling();
-        showToast(`登录状态异常：${error.message}`, 'error');
+    } catch {
+        // 瞬时失败不停止轮询，避免扫码成功后错过回填
+        byId('biliLoginStatus').textContent = '状态读取失败，正在重试…';
     }
 }
 
@@ -439,6 +449,7 @@ async function refreshWhisperModelHints() {
             const model = byIdMap[option.value];
             const baseLabel = option.dataset.baseLabel || option.textContent;
             if (!model) return;
+            option.dataset.cached = model.cached ? 'true' : 'false';
             option.textContent = model.cached
                 ? `${baseLabel}（已缓存）`
                 : `${baseLabel}（未缓存，首次使用需下载 ${WHISPER_MODEL_SIZES[option.value] || ''}）`;
@@ -471,6 +482,21 @@ async function startSummary(options = {}) {
     const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
+
+    // 所选 Whisper 模型未缓存时，先确认下载（新用户首次使用）
+    if (!resumeTaskId) {
+        const whisperOption = byId('whisperModel').selectedOptions[0];
+        if (whisperOption && whisperOption.dataset.cached === 'false') {
+            const modelLabel = (whisperOption.dataset.baseLabel || whisperOption.textContent).split('（')[0];
+            const size = WHISPER_MODEL_SIZES[whisperOption.value] || '';
+            if (!window.confirm(
+                `当前缺少所选模型「${modelLabel}」。首次使用需从镜像下载约 ${size}（下载完成后自动开始转写）。是否继续？`
+            )) {
+                showToast('已取消，任务未提交', 'info');
+                return;
+            }
+        }
+    }
 
     // B 站链接且未填写凭据时，询问是否先补充（AI 字幕需要登录态）
     if (
