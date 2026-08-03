@@ -517,12 +517,31 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     f"已使用平台字幕：{subtitle.language}，共 {len(subtitle.segments)} 段"
                 )
             else:
-                if video_processor.detect_source(source_url or "") == VideoSource.BILIBILI:
+                is_bilibili = (
+                    video_processor.detect_source(source_url or "")
+                    == VideoSource.BILIBILI
+                )
+                subtitle = (
+                    await video_processor.fetch_bilibili_subtitles(source_url or "", cookie)
+                    if is_bilibili
+                    else None
+                )
+                if subtitle:
+                    transcript_result = {
+                        "segments": subtitle.segments,
+                        "language": subtitle.language,
+                        "source": subtitle.source,
+                    }
                     task["logs"].append(
-                        "未读取到可用的 B 站字幕轨；部分中文 AI 字幕需要填写当前账号的 "
-                        "SESSDATA 等访问凭据"
+                        f"已使用 B 站 AI 字幕：{subtitle.language}，共 {len(subtitle.segments)} 段"
                     )
-                task["logs"].append("未找到可用平台字幕，将进行语音转写")
+                else:
+                    if is_bilibili:
+                        task["logs"].append(
+                            "未读取到可用的 B 站字幕轨；AI 字幕需要填写当前账号的 "
+                            "SESSDATA 等访问凭据"
+                        )
+                    task["logs"].append("未找到可用平台字幕，将进行语音转写")
 
         if transcript_result is None:
             set_progress(task, 3, "准备音频", 40, "正在准备音频")

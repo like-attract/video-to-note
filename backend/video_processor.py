@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
+import re
 import shutil
+import time
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import yt_dlp
 
@@ -87,6 +91,128 @@ class VideoProcessor:
                     source=source,
                 )
         return None
+
+    async def fetch_bilibili_subtitles(
+        self,
+        url: str,
+        cookie: dict[str, str] | None = None,
+    ) -> SubtitleResult | None:
+        """B 站 AI 字幕专属通道。
+
+        yt-dlp 的 bilibili 提取器不暴露 AI 字幕（ai-*）轨道，这里直调
+        player API 获取字幕清单并下载。需要登录凭据（SESSDATA），下载
+        字幕文件时需携带 Origin 头。
+        """
+        match = re.search(r"BV[0-9A-Za-z]{10}", url)
+        if not match or not self._cookie_header(cookie):
+            return None
+        try:
+            track = await asyncio.to_thread(
+                self._bilibili_subtitle_track, match.group(0), cookie
+            )
+            if not track:
+                return None
+            payload = await asyncio.to_thread(
+                self._download_text,
+                track["url"],
+                url,
+                cookie,
+                {"Origin": "https://www.bilibili.com"},
+            )
+            segments = parse_subtitle_payload(payload, "json")
+        except Exception:
+            return None
+        if not segments:
+            return None
+        return SubtitleResult(
+            segments=segments,
+            language=track["language"],
+            source="bilibili_ai_subtitle",
+        )
+
+    BILI_SUBTITLE_LANGUAGES = (
+        "ai-zh",
+        "zh-hans",
+        "zh-cn",
+        "zh",
+        "zh-hant",
+        "zh-tw",
+        "ai-en",
+        "en",
+        "ai-ja",
+        "ja",
+    )
+
+    @classmethod
+    def _bilibili_subtitle_track(
+        cls, bvid: str, cookie: dict[str, str] | None
+    ) -> dict[str, Any] | None:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
+        }
+        cookie_header = cls._cookie_header(cookie)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        view = cls._bilibili_get_json(
+            "https://api.bilibili.com/x/web-interface/view", {"bvid": bvid}, headers
+        )
+        cid = (view.get("data") or {}).get("cid")
+        if not cid:
+            return None
+        player = cls._bilibili_get_json(
+            "https://api.bilibili.com/x/player/wbi/v2",
+            {"bvid": bvid, "cid": cid},
+            headers,
+        )
+        tracks = ((player.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
+        for language in cls.BILI_SUBTITLE_LANGUAGES:
+            for track in tracks:
+                if track.get("lan") == language and track.get("subtitle_url"):
+                    subtitle_url = track["subtitle_url"]
+                    if subtitle_url.startswith("//"):
+                        subtitle_url = "https:" + subtitle_url
+                    return {"language": language, "url": subtitle_url}
+        return None
+
+    @staticmethod
+    def _bilibili_get_json(
+        url: str, params: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(f"{url}?{urlencode(params)}", headers=headers),
+                timeout=20,
+            ) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return {}
+        if data.get("code") == 0:
+            return data
+        # 无签名被拒时补 wbi 签名重试
+        try:
+            signed = VideoProcessor._wbi_sign(params)
+            with urllib.request.urlopen(
+                urllib.request.Request(f"{url}?{urlencode(signed)}", headers=headers),
+                timeout=20,
+            ) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return data
+
+    _WBI_IMG_KEY = "7cd084941338484aae1ad9425b84077c"
+    _WBI_SUB_KEY = "4932caff0ff746eab6f01bf08b70ac45"
+
+    @classmethod
+    def _wbi_sign(cls, params: dict[str, Any]) -> dict[str, Any]:
+        mixin_key = "".join(sorted(cls._WBI_IMG_KEY + cls._WBI_SUB_KEY))[:32]
+        signed = dict(params)
+        signed["wts"] = int(time.time())
+        query = urlencode(sorted(signed.items()))
+        signed["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+        return signed
 
     async def download_audio(
         self, url: str, task_id: str, cookie: dict[str, str] | None = None
@@ -260,7 +386,10 @@ class VideoProcessor:
 
     @staticmethod
     def _download_text(
-        subtitle_url: str, referer: str, cookie: dict[str, str] | None
+        subtitle_url: str,
+        referer: str,
+        cookie: dict[str, str] | None,
+        extra_headers: dict[str, str] | None = None,
     ) -> str:
         if subtitle_url.startswith("//"):
             subtitle_url = "https:" + subtitle_url
@@ -268,6 +397,8 @@ class VideoProcessor:
             "Referer": referer,
             "User-Agent": "Mozilla/5.0 VideoToNotes/2.0",
         }
+        if extra_headers:
+            headers.update(extra_headers)
         cookie_header = VideoProcessor._cookie_header(cookie)
         if cookie_header:
             headers["Cookie"] = cookie_header
