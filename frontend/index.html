@@ -120,6 +120,11 @@
         <details class="config-section credentials-section">
             <summary>B 站访问凭据（可选）</summary>
             <p class="section-note">仅在公开访问受限时填写。凭据只保留到页面关闭。</p>
+            <div class="bili-login-row">
+                <button id="biliLoginBtn" class="button secondary" type="button">扫码登录导入</button>
+                <button id="biliLoginCancelBtn" class="button ghost" type="button" hidden>取消</button>
+                <span id="biliLoginStatus" class="bili-login-status"></span>
+            </div>
             <label class="field">
                 <span>SESSDATA</span>
                 <input type="password" id="sessdata" autocomplete="off">

@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
 from .llm_summarizer import LLMSummarizer
+from .bili_login import BiliLoginManager
 from .transcript import (
     TranscriptSegment,
     format_timestamp,
@@ -68,6 +69,7 @@ app.add_middleware(
 
 video_processor = VideoProcessor(WORKSPACE_DIR)
 transcriber = WhisperTranscriber(WHISPER_CACHE_DIR)
+bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
 
@@ -361,6 +363,21 @@ async def health_check() -> dict[str, Any]:
             "openai": importlib.util.find_spec("openai") is not None,
         },
     }
+
+
+@app.post("/api/bili-login/start")
+async def bili_login_start() -> dict[str, Any]:
+    return await bili_login_manager.start()
+
+
+@app.get("/api/bili-login/status")
+async def bili_login_status() -> dict[str, Any]:
+    return await bili_login_manager.status()
+
+
+@app.post("/api/bili-login/cancel")
+async def bili_login_cancel() -> dict[str, Any]:
+    return await bili_login_manager.cancel()
 
 
 @app.post("/api/upload")

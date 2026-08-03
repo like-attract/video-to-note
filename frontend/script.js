@@ -130,6 +130,7 @@ function bindEvents() {
     byId('llmProvider').addEventListener('change', handleProviderChange);
     byId('llmModel').addEventListener('change', toggleCustomConfig);
     byId('sourceType').addEventListener('change', toggleSourceType);
+    initBiliLogin();
     byId('includeScreenshots').addEventListener('change', toggleScreenshotSettings);
     byId('localFile').addEventListener('change', updateFileInfo);
     byId('videoUrl').addEventListener('keydown', (event) => {
@@ -277,6 +278,73 @@ function toggleSourceType() {
     byId('urlField').hidden = isLocal;
     byId('fileField').hidden = !isLocal;
     updateFileInfo();
+}
+
+let biliLoginTimer = null;
+
+function initBiliLogin() {
+    byId('biliLoginBtn').addEventListener('click', startBiliLogin);
+    byId('biliLoginCancelBtn').addEventListener('click', cancelBiliLogin);
+}
+
+async function startBiliLogin() {
+    if (biliLoginTimer) return;
+    try {
+        const response = await fetch(`${API_BASE}/bili-login/start`, { method: 'POST' });
+        const data = await readResponse(response, '启动扫码登录失败');
+        if (!data.ok) {
+            showToast(data.error || data.message || '启动失败', 'error');
+            return;
+        }
+        byId('biliLoginStatus').textContent = data.message || '请在弹出的窗口中扫码登录';
+        byId('biliLoginCancelBtn').hidden = false;
+        byId('biliLoginBtn').disabled = true;
+        biliLoginTimer = window.setInterval(pollBiliLogin, 2000);
+        pollBiliLogin();
+    } catch (error) {
+        showToast(`启动失败：${error.message}`, 'error');
+    }
+}
+
+async function pollBiliLogin() {
+    try {
+        const response = await fetch(`${API_BASE}/bili-login/status`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取登录状态失败');
+        byId('biliLoginStatus').textContent = data.message || '';
+        if (data.state === 'ready' && data.cookies) {
+            stopBiliLoginPolling();
+            byId('sessdata').value = data.cookies.sessdata || '';
+            byId('biliJct').value = data.cookies.bili_jct || '';
+            byId('buvid3').value = data.cookies.buvid3 || '';
+            showToast('B 站凭据已导入（仅本次会话）', 'success');
+            cancelBiliLogin();
+        } else if (['failed', 'timeout'].includes(data.state)) {
+            stopBiliLoginPolling();
+            showToast(data.message || '导入失败', 'error');
+        }
+    } catch (error) {
+        stopBiliLoginPolling();
+        showToast(`登录状态异常：${error.message}`, 'error');
+    }
+}
+
+function stopBiliLoginPolling() {
+    if (biliLoginTimer !== null) {
+        window.clearInterval(biliLoginTimer);
+        biliLoginTimer = null;
+    }
+    byId('biliLoginBtn').disabled = false;
+    byId('biliLoginCancelBtn').hidden = true;
+    byId('biliLoginStatus').textContent = '';
+}
+
+async function cancelBiliLogin() {
+    stopBiliLoginPolling();
+    try {
+        await fetch(`${API_BASE}/bili-login/cancel`, { method: 'POST' });
+    } catch {
+        // 后端不可达时忽略，浏览器窗口由用户自行关闭
+    }
 }
 
 function updateFileInfo() {
