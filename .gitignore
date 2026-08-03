@@ -13,6 +13,11 @@ server.stderr.log
 workspace/
 *.part
 *.ytdl
+
+# 打包产物
+/build/
+/dist/
+*.spec
 Thumbs.db
 .DS_Store
 .idea/
