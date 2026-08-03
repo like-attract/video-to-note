@@ -24,12 +24,14 @@ if (-not $SkipInstall) {
 }
 
 Set-Location -LiteralPath $projectRoot
-& $Python -m PyInstaller --noconfirm --clean --onefile `
+& $Python -m PyInstaller --noconfirm --clean --onefile --noconsole `
     --name "VideoToNo" `
     --add-data "frontend;frontend" `
+    --add-data "sources/icon.png;sources" `
     --collect-data faster_whisper `
     --version-file "scripts\version_info.txt" `
     --icon "sources\icon.ico" `
+    --hidden-import pystray._win32 `
     --exclude-module tkinter `
     launcher.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败" }

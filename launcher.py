@@ -1,11 +1,12 @@
-"""VideoToNo 便携版启动器。
+"""VideoToNo 启动器。
 
-PyInstaller 打包为单个 exe 后的入口：
-  1. 在 127.0.0.1 上启动本地 FastAPI 后端（默认 8000，被占用时自动顺延）
-  2. 服务就绪后自动打开默认浏览器
-  3. 控制台窗口保持运行，关闭窗口或按 Ctrl+C 退出
+开发模式（`python launcher.py`）：
+  - 控制台窗口显示地址，Ctrl+C 退出
 
-开发模式直接 `python launcher.py` 亦可运行。
+打包模式（PyInstaller onefile，--noconsole）：
+  - 无控制台窗口，服务启动后驻留系统托盘
+  - 托盘菜单：打开界面 / 查看日志 / 退出
+  - 日志写入工作目录的 _app.log
 """
 
 from __future__ import annotations
@@ -13,15 +14,20 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import webbrowser
 from pathlib import Path
+from typing import Any
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
+APP_NAME = f"VideoToNo v{VERSION}"
 
 
 def is_frozen() -> bool:
@@ -35,7 +41,7 @@ def base_dir() -> Path:
 
 
 def configure_runtime_dirs() -> None:
-    """设置工作目录：打包模式默认放在 exe 旁边（便携），开发模式为项目 workspace。"""
+    """设置工作目录：打包模式默认放在 exe 旁边（便携），允许环境变量覆盖。"""
     if is_frozen():
         exe_dir = base_dir()
         workspace = exe_dir / "workspace"
@@ -83,16 +89,149 @@ def find_available_port() -> int:
     raise RuntimeError(f"端口 {DEFAULT_PORT}-{DEFAULT_PORT + PORT_SCAN_RANGE - 1} 均不可用，请稍后重试")
 
 
+# --------------------------------------------------------------------------
+# 服务启动（两种模式共用）
+# --------------------------------------------------------------------------
+
+def start_server(port: int) -> tuple[Any, threading.Thread]:
+    """在线程中启动 uvicorn，返回 (server, thread)。"""
+    import uvicorn
+
+    from backend.main import app
+
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def wait_healthy(url: str, timeout: float = START_TIMEOUT_SECONDS) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if server_alive(url):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+# --------------------------------------------------------------------------
+# 开发模式（控制台）
+# --------------------------------------------------------------------------
+
 def print_banner(url: str, workspace: Path) -> None:
     width = 58
-    line = "=" * width
-    print(line)
-    print("  VideoToNo v" + VERSION + "（便携版）")
+    print("=" * width)
+    print("  VideoToNo v" + VERSION + "（开发模式）")
     print(f"  界面地址: {url}")
     print(f"  工作目录: {workspace}")
-    print("  说明: 界面将自动在浏览器中打开；关闭本窗口或按 Ctrl+C 退出。")
-    print(line, flush=True)
+    print("  关闭本窗口或按 Ctrl+C 退出。")
+    print("=" * width, flush=True)
 
+
+def run_console(url: str, workspace: Path, port: int) -> int:
+    print_banner(url, workspace)
+    print("  正在启动服务，请稍候…", flush=True)
+    try:
+        server, _ = start_server(port)
+        if not wait_healthy(url):
+            print(f"警告: {START_TIMEOUT_SECONDS} 秒内未就绪，请手动打开 {url}", flush=True)
+        else:
+            webbrowser.open(url)
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n已退出。再见！")
+        server.should_exit = True
+    except Exception as error:
+        print(f"\n启动失败：{error}")
+        input("按回车键退出…")
+        return 1
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 打包模式（系统托盘）
+# --------------------------------------------------------------------------
+
+def setup_file_logging(workspace: Path) -> Path:
+    """noconsole 模式下把 stdout/stderr 重定向到日志文件。"""
+    log_path = workspace / "_app.log"
+    log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = log_file
+    sys.stderr = log_file
+    return log_path
+
+
+def show_error(message: str) -> None:
+    """启动失败提示：Windows 弹消息框，其他平台写 stderr。"""
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, f"{APP_NAME} 启动失败", 0x10)
+    else:
+        print(message, file=sys.stderr, flush=True)
+
+
+def open_in_shell(path: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+def tray_icon_image() -> Any:
+    from PIL import Image
+
+    if is_frozen():
+        resource = Path(getattr(sys, "_MEIPASS", "")) / "sources" / "icon.png"
+    else:
+        resource = base_dir() / "sources" / "icon.png"
+    if resource.is_file():
+        return Image.open(resource).resize((64, 64))
+    # 兜底：生成一个简单占位图标
+    image = Image.new("RGB", (64, 64), (69, 200, 144))
+    return image
+
+
+def run_tray(url: str, workspace: Path, server: Any) -> int:
+    import pystray
+
+    log_path = workspace / "_app.log"
+    print(f"VideoToNo v{VERSION} 已启动: {url}（托盘图标可退出）", flush=True)
+
+    def on_open(_icon: Any, _item: Any) -> None:
+        webbrowser.open(url)
+
+    def on_logs(_icon: Any, _item: Any) -> None:
+        if log_path.is_file():
+            open_in_shell(log_path)
+
+    def on_quit(_icon: Any, _item: Any) -> None:
+        server.should_exit = True
+        _icon.stop()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("打开界面", on_open, default=True),
+        pystray.MenuItem("查看日志", on_logs),
+        pystray.MenuItem("退出", on_quit),
+    )
+    icon = pystray.Icon("videotono", tray_icon_image(), APP_NAME, menu)
+    icon.run()
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 入口
+# --------------------------------------------------------------------------
 
 def main() -> int:
     configure_runtime_dirs()
@@ -102,68 +241,34 @@ def main() -> int:
     try:
         port = find_available_port()
     except RuntimeError as error:
-        print(f"启动失败：{error}")
-        input("按回车键退出…")
+        show_error(str(error))
         return 1
 
     url = f"http://127.0.0.1:{port}"
 
     if server_alive(url):
-        print_banner(url, workspace)
-        print("  检测到服务已在运行，直接打开界面。")
+        # 服务已在运行，直接打开界面
         if not no_browser:
             webbrowser.open(url)
-        input("按回车键退出…")
         return 0
 
-    # 首次运行提示
-    if port != DEFAULT_PORT:
-        print(f"注意: 端口 {DEFAULT_PORT} 已被占用，已改用 {url}")
+    if not is_frozen():
+        return run_console(url, workspace, port)
 
-    print_banner(url, workspace)
-    if not no_browser:
-        print("  正在启动服务，请稍候…", flush=True)
-
+    # ---- 打包模式 ----
+    log_path = setup_file_logging(workspace)
     try:
-        # 重依赖放在 banner 之后导入，让提示更快显示
-        import uvicorn
-
-        from backend.main import app
-
-        async def run() -> None:
-            config = uvicorn.Config(
-                app,
-                host="127.0.0.1",
-                port=port,
-                log_level="info",
-                access_log=False,
-            )
-            server = uvicorn.Server(config)
-
-            async def open_browser_when_ready() -> None:
-                for _ in range(int(START_TIMEOUT_SECONDS / 0.1)):
-                    if server.started:
-                        break
-                    await asyncio.sleep(0.1)
-                if server.started and not no_browser:
-                    webbrowser.open(url)
-                elif not server.started:
-                    print(f"警告: {START_TIMEOUT_SECONDS} 秒内未就绪，请手动打开 {url}", flush=True)
-
-            browser_task = asyncio.create_task(open_browser_when_ready())
-            try:
-                await server.serve()
-            finally:
-                browser_task.cancel()
-
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        print("\n已退出。再见！")
+        server, _ = start_server(port)
+        if not wait_healthy(url):
+            server.should_exit = True
+            show_error(f"服务启动超时，请查看日志：{log_path}")
+            return 1
+        if not no_browser:
+            webbrowser.open(url)
+        return run_tray(url, workspace, server)
     except Exception as error:
-        print(f"\n启动失败：{error}")
-        input("按回车键退出…")
+        show_error(f"启动失败：{error}\n日志：{log_path}")
         return 1
-    return 0
 
 
 if __name__ == "__main__":

@@ -28,12 +28,16 @@ CDP_PORT_START = 9333
 CDP_PORT_COUNT = 10
 
 BROWSER_PATHS = [
-    # Edge
+    # Windows: Edge
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    # Chrome
+    # Windows: Chrome
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    # macOS: Chrome / Edge
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ]
 
 
@@ -160,22 +164,45 @@ class BiliLoginManager:
     @staticmethod
     def _kill_profile_browsers(profile_dir: Path) -> None:
         """杀掉占用指定 profile 的浏览器进程（同 profile 单例，残留进程会阻塞启动）。"""
-        path_filter = f"$_.CommandLine -like '*{profile_dir}*'"
-        script = (
-            "Get-CimInstance Win32_Process | "
-            "Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and "
-            + path_filter
-            + " } | "
-            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-        )
+        if os.name == "nt":
+            path_filter = f"$_.CommandLine -like '*{profile_dir}*'"
+            script = (
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and "
+                + path_filter
+                + " } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    capture_output=True,
+                    timeout=15,
+                )
+            except Exception:
+                pass
+            return
+        # macOS/Linux: 按命令行匹配浏览器进程并终止
         try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", script],
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
                 capture_output=True,
-                timeout=15,
+                text=True,
+                timeout=10,
             )
         except Exception:
-            pass
+            return
+        marker = str(profile_dir)
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(" ", 1)
+            if len(parts) != 2:
+                continue
+            pid, command = parts
+            if marker in command and ("Chrome" in command or "Edge" in command):
+                try:
+                    os.kill(int(pid), 9)
+                except (OSError, ValueError):
+                    pass
 
     def _describe(self) -> dict[str, Any]:
         session = self.session

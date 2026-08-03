@@ -8,3 +8,4 @@ python-dotenv>=1,<2
 aiofiles>=24,<25
 av>=13,<17
 Pillow>=10,<13
+pystray>=0.19,<1

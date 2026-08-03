@@ -96,7 +96,17 @@ py -3.11 -m venv .venv
 .\scripts\build_exe.ps1
 ```
 
-产物为 `dist\VideoToNo-<版本>-portable.exe`（约 110 MB）。程序图标来自 `sources/icon.ico`（由 `sources/icon_ico.png` 生成）。
+产物为 `dist\VideoToNo-<版本>-portable.exe`（约 115 MB），无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标来自 `sources/icon.ico`（由 `sources/icon_ico.png` 生成）。
+
+**macOS 构建**（需在 Mac 上执行，PyInstaller 不支持交叉编译；托盘与扫码登录均已适配）：
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
+bash scripts/build_mac.sh
+```
+
+产物为 `dist/VideoToNo-<版本>-macos.app`。首次运行需在「系统设置 → 隐私与安全性」中允许，或执行 `xattr -dr com.apple.quarantine <app>` 解除隔离。
 
 ## 使用方法
 

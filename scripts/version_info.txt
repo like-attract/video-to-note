@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 1, 1, 0),
-    prodvers=(0, 1, 1, 0),
+    filevers=(0, 2, 0, 0),
+    prodvers=(0, 2, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'VideoToNo'),
             StringStruct(u'FileDescription', u'VideoToNo - 本地视频笔记（便携版）'),
-            StringStruct(u'FileVersion', u'0.1.1.0'),
+            StringStruct(u'FileVersion', u'0.2.0.0'),
             StringStruct(u'InternalName', u'VideoToNo'),
             StringStruct(u'LegalCopyright', u'MIT License'),
             StringStruct(u'OriginalFilename', u'VideoToNo.exe'),
             StringStruct(u'ProductName', u'VideoToNo'),
-            StringStruct(u'ProductVersion', u'0.1.1.0')
+            StringStruct(u'ProductVersion', u'0.2.0.0')
           ]
         )
       ]
