@@ -136,6 +136,7 @@ function bindEvents() {
     });
     byId('biliHintScanBtn').addEventListener('click', startBiliLogin);
     byId('biliHintManualBtn').addEventListener('click', revealBiliCredentials);
+    byId('biliHintDismissBtn').addEventListener('click', dismissBiliHint);
     initBiliLogin();
     byId('includeScreenshots').addEventListener('change', toggleScreenshotSettings);
     byId('localFile').addEventListener('change', updateFileInfo);
@@ -165,6 +166,8 @@ function loadPreferences() {
     byId('customModelName').value = localStorage.getItem('custom_model_name') || '';
     populateModelOptions(localStorage.getItem('llm_model_id'));
     byId('whisperModel').value = localStorage.getItem('whisper_model') || 'base';
+    snapshotWhisperLabels();
+    refreshWhisperModelHints();
     byId('screenshotInterval').value = localStorage.getItem('screenshot_interval') || '10';
     byId('includeScreenshots').checked = localStorage.getItem('include_screenshots') === 'true';
     byId('useGpu').checked = localStorage.getItem('use_gpu') === 'true';
@@ -305,7 +308,7 @@ function hasBiliCredentials() {
 function updateBiliHint(forceShow = false) {
     const isBili = byId('sourceType').value !== 'local'
         && isBilibiliUrl(byId('videoUrl').value.trim());
-    byId('biliHint').hidden = !(forceShow || (isBili && !hasBiliCredentials()));
+    byId('biliHint').hidden = !(forceShow || (isBili && !hasBiliCredentials() && !biliPromptDismissed));
 }
 
 function revealBiliCredentials() {
@@ -314,6 +317,11 @@ function revealBiliCredentials() {
     section.open = true;
     section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     byId('sessdata').focus();
+}
+
+function dismissBiliHint() {
+    biliPromptDismissed = true;
+    updateBiliHint();
 }
 
 let biliLoginTimer = null;
@@ -352,7 +360,10 @@ async function pollBiliLogin() {
             byId('sessdata').value = data.cookies.sessdata || '';
             byId('biliJct').value = data.cookies.bili_jct || '';
             byId('buvid3').value = data.cookies.buvid3 || '';
-            showToast('B 站凭据已导入（仅本次会话）', 'success');
+            const section = byId('credentialsSection');
+            section.open = true;
+            section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            showToast('B 站凭据已导入并填入下方表单', 'success');
             updateBiliHint();
             cancelBiliLogin();
         } else if (['failed', 'timeout'].includes(data.state)) {
@@ -399,6 +410,42 @@ function toggleScreenshotSettings() {
     const enabled = byId('includeScreenshots').checked;
     byId('screenshotInterval').disabled = !enabled;
     byId('screenshotIntervalField').classList.toggle('is-muted', !enabled);
+}
+
+const WHISPER_MODEL_SIZES = {
+    tiny: '~75MB',
+    base: '~142MB',
+    small: '~466MB',
+    medium: '~1.5GB',
+    'large-v3': '~3.1GB',
+    turbo: '~1.6GB'
+};
+
+let whisperFallbackNotified = false;
+
+function snapshotWhisperLabels() {
+    Array.from(byId('whisperModel').options).forEach((option) => {
+        option.dataset.baseLabel = option.textContent;
+    });
+}
+
+async function refreshWhisperModelHints() {
+    try {
+        const response = await fetch(`${API_BASE}/whisper-models`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取模型状态失败');
+        const byIdMap = {};
+        (data.models || []).forEach((model) => { byIdMap[model.id] = model; });
+        Array.from(byId('whisperModel').options).forEach((option) => {
+            const model = byIdMap[option.value];
+            const baseLabel = option.dataset.baseLabel || option.textContent;
+            if (!model) return;
+            option.textContent = model.cached
+                ? `${baseLabel}（已缓存）`
+                : `${baseLabel}（未缓存，首次使用需下载 ${WHISPER_MODEL_SIZES[option.value] || ''}）`;
+        });
+    } catch {
+        // 后端不可达时保持默认文案
+    }
 }
 
 function formatBytes(bytes) {
@@ -662,6 +709,7 @@ function resetTaskView() {
     resetElapsedTimer();
     setTaskActive(false);
     pollErrorCount = 0;
+    whisperFallbackNotified = false;
     currentTaskId = null;
     currentMarkdown = '';
     currentHtml = '';
@@ -819,6 +867,13 @@ function updateLogs(logs) {
     const logArea = byId('logArea');
     logArea.replaceChildren(...logs.map((log) => createLogEntry(String(log))));
     logArea.scrollTop = logArea.scrollHeight;
+    if (
+        !whisperFallbackNotified
+        && logs.some((log) => String(log).includes('已自动降级'))
+    ) {
+        whisperFallbackNotified = true;
+        showToast('注意：所选 Whisper 模型未缓存或无法加载，已自动降级为已缓存的模型', 'info');
+    }
 }
 
 function createLogEntry(message, type = 'info', includeTime = false) {

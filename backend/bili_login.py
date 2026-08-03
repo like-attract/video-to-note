@@ -275,6 +275,8 @@ class BiliLoginManager:
                     process.terminate()
                 except OSError:
                     pass
+        # 兜底：清除仍占用该 profile 的浏览器进程（避免窗口残留）
+        self._kill_profile_browsers(session.profile_dir)
         if not session.cookies:
             self.session = None
         return {"ok": True, "message": "登录会话已结束"}

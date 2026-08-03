@@ -352,6 +352,19 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
     return payload
 
 
+@app.get("/api/whisper-models")
+async def whisper_models_status() -> dict[str, Any]:
+    """返回各 Whisper 模型在本机的缓存状态（供前端标注下拉框）。"""
+    models = [
+        {
+            "id": model_id,
+            "cached": transcriber._cached_model_path(model_id) is not None,
+        }
+        for model_id in sorted(WHISPER_MODELS)
+    ]
+    return {"models": models}
+
+
 @app.get("/api/health")
 async def health_check() -> dict[str, Any]:
     return {
