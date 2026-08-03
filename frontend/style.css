@@ -167,6 +167,27 @@ button, select { cursor: pointer; }
 .bili-login-row .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
 .bili-login-status { min-width: 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
 
+.bili-hint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid rgba(231, 183, 94, 0.4);
+    border-radius: var(--radius);
+    background: var(--amber-soft);
+}
+.bili-hint-text { display: grid; gap: 3px; }
+.bili-hint-text strong { font-size: 13px; }
+.bili-hint-text span { color: var(--text-muted); font-size: 12px; }
+.bili-hint-actions { display: flex; gap: 8px; flex: none; }
+.bili-hint-actions .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
+@media (max-width: 680px) {
+    .bili-hint { flex-direction: column; align-items: stretch; }
+    .bili-hint-actions { justify-content: flex-end; }
+}
+
 .field {
     display: grid;
     gap: 7px;

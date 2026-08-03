@@ -117,7 +117,7 @@
             </label>
         </section>
 
-        <details class="config-section credentials-section">
+        <details id="credentialsSection" class="config-section credentials-section">
             <summary>B 站访问凭据（可选）</summary>
             <p class="section-note">仅在公开访问受限时填写。凭据只保留到页面关闭。</p>
             <div class="bili-login-row">
@@ -181,11 +181,11 @@
                 <fieldset class="mode-control">
                     <legend class="sr-only">处理方式</legend>
                     <label>
-                        <input type="radio" name="processingMode" value="reuse" checked>
+                        <input type="radio" name="processingMode" value="reuse">
                         <span>复用转录</span>
                     </label>
                     <label>
-                        <input type="radio" name="processingMode" value="restart">
+                        <input type="radio" name="processingMode" value="restart" checked>
                         <span>从头处理</span>
                     </label>
                 </fieldset>
@@ -211,6 +211,16 @@
                     <span class="button-spinner" aria-hidden="true"></span>
                     <span class="btn-text">开始生成</span>
                 </button>
+            </div>
+            <div id="biliHint" class="bili-hint" hidden>
+                <div class="bili-hint-text">
+                    <strong>检测到 B 站链接</strong>
+                    <span>填写访问凭据可优先使用 AI 字幕，无需等待本地转写。</span>
+                </div>
+                <div class="bili-hint-actions">
+                    <button id="biliHintScanBtn" class="button secondary" type="button">扫码登录导入</button>
+                    <button id="biliHintManualBtn" class="button ghost" type="button">去填写</button>
+                </div>
             </div>
             <div class="source-meta">
                 <span id="fileInfo">支持常见视频链接与最大 500 MB 的本地视频</span>

@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-VideoToNo is a local video-to-notes tool intended for personal use. It reads a video URL or local media file on your machine, prefers subtitles supplied by the platform, falls back to local transcription with `faster-whisper`, and then asks the selected language model to produce timestamped Markdown notes.
+VideoToNo is a local video-to-notes tool intended for personal use. It reads a video URL or local media file on your machine, prefers subtitles supplied by the platform, and is **deeply integrated with Bilibili** - besides regular subtitles it can fetch Bilibili AI subtitles directly (scan-to-login import makes credentials effortless). When no subtitles are available it falls back to local transcription with `faster-whisper`, and then asks the selected language model to produce timestamped Markdown notes.
 
 The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 

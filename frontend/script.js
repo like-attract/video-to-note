@@ -130,6 +130,12 @@ function bindEvents() {
     byId('llmProvider').addEventListener('change', handleProviderChange);
     byId('llmModel').addEventListener('change', toggleCustomConfig);
     byId('sourceType').addEventListener('change', toggleSourceType);
+    byId('videoUrl').addEventListener('input', () => {
+        window.clearTimeout(biliHintDebounce);
+        biliHintDebounce = window.setTimeout(() => updateBiliHint(), 300);
+    });
+    byId('biliHintScanBtn').addEventListener('click', startBiliLogin);
+    byId('biliHintManualBtn').addEventListener('click', revealBiliCredentials);
     initBiliLogin();
     byId('includeScreenshots').addEventListener('change', toggleScreenshotSettings);
     byId('localFile').addEventListener('change', updateFileInfo);
@@ -164,7 +170,7 @@ function loadPreferences() {
     byId('useGpu').checked = localStorage.getItem('use_gpu') === 'true';
     byId('summaryStyle').value = localStorage.getItem('summary_style') || 'detailed';
     byId('reasoningEffort').value = localStorage.getItem('reasoning_effort') || 'auto';
-    const processingMode = localStorage.getItem('processing_mode') || 'reuse';
+    const processingMode = localStorage.getItem('processing_mode') || 'restart';
     const processingModeInput = document.querySelector(`input[name="processingMode"][value="${processingMode}"]`);
     if (processingModeInput) processingModeInput.checked = true;
     toggleScreenshotSettings();
@@ -278,6 +284,36 @@ function toggleSourceType() {
     byId('urlField').hidden = isLocal;
     byId('fileField').hidden = !isLocal;
     updateFileInfo();
+    updateBiliHint();
+}
+
+let biliHintDebounce = null;
+let biliPromptDismissed = false;
+
+function isBilibiliUrl(value) {
+    return /bilibili\.com|b23\.tv|BV[0-9A-Za-z]{10}/.test(value);
+}
+
+function hasBiliCredentials() {
+    return Boolean(
+        byId('sessdata').value.trim()
+        || byId('biliJct').value.trim()
+        || byId('buvid3').value.trim()
+    );
+}
+
+function updateBiliHint(forceShow = false) {
+    const isBili = byId('sourceType').value !== 'local'
+        && isBilibiliUrl(byId('videoUrl').value.trim());
+    byId('biliHint').hidden = !(forceShow || (isBili && !hasBiliCredentials()));
+}
+
+function revealBiliCredentials() {
+    updateBiliHint(true);
+    const section = byId('credentialsSection');
+    section.open = true;
+    section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    byId('sessdata').focus();
 }
 
 let biliLoginTimer = null;
@@ -317,6 +353,7 @@ async function pollBiliLogin() {
             byId('biliJct').value = data.cookies.bili_jct || '';
             byId('buvid3').value = data.cookies.buvid3 || '';
             showToast('B 站凭据已导入（仅本次会话）', 'success');
+            updateBiliHint();
             cancelBiliLogin();
         } else if (['failed', 'timeout'].includes(data.state)) {
             stopBiliLoginPolling();
@@ -383,10 +420,26 @@ async function startSummary(options = {}) {
     }
 
     const resumeTaskId = options.resumeCurrent ? currentTaskId : null;
-    const selectedMode = document.querySelector('input[name="processingMode"]:checked')?.value || 'reuse';
+    const selectedMode = document.querySelector('input[name="processingMode"]:checked')?.value || 'restart';
     const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
+
+    // B 站链接且未填写凭据时，询问是否先补充（AI 字幕需要登录态）
+    if (
+        !biliPromptDismissed
+        && request.sourceType !== 'local'
+        && isBilibiliUrl(request.videoUrl)
+        && !hasBiliCredentials()
+    ) {
+        updateBiliHint(true);
+        if (window.confirm('检测到 B 站链接。填写访问凭据可优先使用 AI 字幕（更快、更准确）。是否现在填写？')) {
+            revealBiliCredentials();
+            return;
+        }
+        biliPromptDismissed = true;
+        updateBiliHint();
+    }
 
     resetTaskView();
     setSubmitting(true, request.sourceType === 'local' ? '正在上传' : '正在提交');
