@@ -28,6 +28,7 @@ Set-Location -LiteralPath $projectRoot
     --name "VideoToNo" `
     --add-data "frontend;frontend" `
     --version-file "scripts\version_info.txt" `
+    --icon "sources\icon.ico" `
     --exclude-module tkinter `
     launcher.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败" }

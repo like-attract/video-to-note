@@ -109,6 +109,23 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 
 健康检查地址为 <http://127.0.0.1:8000/api/health>。任务处理期间，前端会显示后端同步的实际处理时长，并在完成、失败或取消时冻结计时。
 
+## 便携版（Windows exe）
+
+不需要 Python 环境，从 GitHub Releases 下载 `VideoToNo-0.1.0-portable.exe`（单文件）后双击即可运行：
+
+- 自动在本地启动服务并打开默认浏览器，控制台窗口显示界面地址与工作目录；关闭窗口或按 `Ctrl+C` 退出。
+- 端口 8000 被占用时自动顺延；若服务已在运行，再次双击只会打开浏览器，不会重复启动。
+- 输出目录（视频、转录、截图、笔记）默认放在 exe 同目录的 `workspace\`；exe 所在目录不可写时回退到 `%LOCALAPPDATA%\VideoToNo\workspace`。可用环境变量 `VIDEOTONOTES_WORKSPACE`、`WHISPER_CACHE_DIR` 覆盖。
+- 首次使用 Whisper 转写时会联网下载模型到工作目录，请保持网络通畅。
+
+自行构建（需要 Python 3.11 与已安装的依赖）：
+
+```powershell
+.\scripts\build_exe.ps1
+```
+
+产物为 `dist\VideoToNo-<版本>-portable.exe`（约 110 MB）。程序图标来自 `sources/icon.ico`（由 `sources/icon_ico.png` 生成）。
+
 ## 使用方法
 
 1. 先选择 Provider，再选择预设模型并填写 API Key。DeepSeek 预设会按 `deepseek-v4-flash` 或 `deepseek-v4-pro` 原样提交；运行日志会显示实际 Provider、Model 和 Base URL。也可以在任意 Provider 下手动填写模型 ID，或配置自定义 OpenAI 兼容地址。

@@ -109,6 +109,23 @@ Then open <http://127.0.0.1:8000>. The static frontend and all `/api/*` endpoint
 
 The health endpoint is available at <http://127.0.0.1:8000/api/health>. While a job is active, the frontend displays backend-synchronized processing time and freezes it when the job completes, fails, or is cancelled.
 
+## Portable build (Windows exe)
+
+No Python installation is required: download `VideoToNo-0.1.0-portable.exe` (single file) from GitHub Releases and double-click it:
+
+- It starts the local backend automatically, opens the default browser, and shows the URL and workspace in a console window; close the window or press `Ctrl+C` to exit.
+- If port 8000 is busy it picks the next free port; if the service is already running, a second launch just opens the browser.
+- Outputs (videos, transcripts, screenshots, notes) go to `workspace\` next to the exe by default; when the exe directory is not writable it falls back to `%LOCALAPPDATA%\VideoToNo\workspace`. Override with the `VIDEOTONOTES_WORKSPACE` / `WHISPER_CACHE_DIR` environment variables.
+- The first Whisper transcription downloads the model into the workspace, so network access is required.
+
+To build it yourself (needs Python 3.11 with installed dependencies):
+
+```powershell
+.\scripts\build_exe.ps1
+```
+
+The artifact is `dist\VideoToNo-<version>-portable.exe` (~110 MB). The app icon is generated from `sources/icon_ico.png` (`sources/icon.ico`).
+
 ## Usage
 
 1. Select a provider, choose a preset model, and enter its API key. DeepSeek presets submit `deepseek-v4-flash` or `deepseek-v4-pro` verbatim; the job log shows the effective provider, model, and base URL.
