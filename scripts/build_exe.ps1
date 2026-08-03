@@ -27,6 +27,7 @@ Set-Location -LiteralPath $projectRoot
 & $Python -m PyInstaller --noconfirm --clean --onefile `
     --name "VideoToNo" `
     --add-data "frontend;frontend" `
+    --collect-data faster_whisper `
     --version-file "scripts\version_info.txt" `
     --icon "sources\icon.ico" `
     --exclude-module tkinter `
