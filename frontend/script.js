@@ -15,7 +15,8 @@ const PREFERENCE_KEYS = [
     'use_gpu',
     'summary_style',
     'processing_mode',
-    'reasoning_effort'
+    'reasoning_effort',
+    'theme'
 ];
 const LEGACY_SENSITIVE_KEYS = [
     'custom_api_key',
@@ -134,6 +135,7 @@ function bindEvents() {
     byId('videoUrl').addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.isComposing) startSummary();
     });
+    initThemeControl();
     window.addEventListener('beforeunload', () => {
         stopPolling();
         stopElapsedTimer();
@@ -165,6 +167,26 @@ function loadPreferences() {
     const processingModeInput = document.querySelector(`input[name="processingMode"][value="${processingMode}"]`);
     if (processingModeInput) processingModeInput.checked = true;
     toggleScreenshotSettings();
+    applyTheme(localStorage.getItem('theme') || 'system');
+}
+
+function initThemeControl() {
+    byId('themeControl').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-theme-option]');
+        if (!button) return;
+        const theme = button.dataset.themeOption;
+        localStorage.setItem('theme', theme);
+        applyTheme(theme);
+    });
+}
+
+function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    document.querySelectorAll('#themeControl [data-theme-option]').forEach((button) => {
+        const isActive = button.dataset.themeOption === theme;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', String(isActive));
+    });
 }
 
 function savePreferences() {
