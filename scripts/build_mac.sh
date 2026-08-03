@@ -37,8 +37,19 @@ TARGET="dist/VideoToNo-${VERSION}-macos.app"
 rm -rf "$TARGET"
 mv "dist/VideoToNo.app" "$TARGET" 2>/dev/null || mv "dist/VideoToNo" "$TARGET"
 
+DMG="dist/VideoToNo-${VERSION}-macos.dmg"
+echo "==> 打包 dmg（拖拽安装包）"
+rm -f "$DMG"
+if command -v hdiutil >/dev/null 2>&1; then
+    hdiutil create -volname "VideoToNo" -srcfolder "$TARGET" -ov -format UDZO "$DMG" >/dev/null
+    echo "    dmg: $DMG"
+else
+    echo "    未找到 hdiutil，跳过 dmg（仅产出 .app）"
+fi
+
 echo ""
-echo "构建完成: $TARGET"
-echo "分发建议: 右键 $TARGET -> 压缩，或使用 create-dmg 打包"
+echo "构建完成:"
+echo "  $TARGET"
+[ -f "$DMG" ] && echo "  $DMG"
 echo "注意: 首次启动时 macOS 会提示“无法验证开发者”，需在 系统设置->隐私与安全性 中允许；"
 echo "      或执行: xattr -dr com.apple.quarantine \"$TARGET\""
