@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +39,9 @@ class WhisperTranscriber:
         use_gpu: bool,
         initial_prompt: str | None,
     ) -> dict:
-        # Hugging Face's Xet backend is fragile on some Windows networks. The
-        # regular HTTP downloader is slower but much more predictable here.
+        # Hugging Face 直连在国内网络常超时，默认走 hf-mirror.com 镜像；
+        # 可通过环境变量 HF_ENDPOINT 覆盖（切回官方源或自建镜像）。
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
         try:
@@ -114,6 +118,9 @@ class WhisperTranscriber:
         compute_type: str,
     ) -> Any:
         cached_path = self._cached_model_path(model_name)
+        if not cached_path and self.download_root:
+            # 自建下载（默认 hf-mirror 镜像），避免 huggingface_hub 对镜像的兼容问题
+            cached_path = self._download_model_files(model_name)
         model_reference = str(cached_path) if cached_path else model_name
         options: dict[str, Any] = {
             "device": device,
@@ -122,6 +129,82 @@ class WhisperTranscriber:
         if self.download_root and not cached_path:
             options["download_root"] = str(self.download_root)
         return model_class(model_reference, **options)
+
+    WHISPER_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+
+    def _download_model_files(self, model_name: str) -> Path | None:
+        """下载 Whisper 模型到标准缓存目录结构。
+
+        新版 huggingface_hub 校验重定向响应的 X-Repo-Commit 头，hf-mirror
+        等镜像不返回该头导致原生下载失败，因此这里自己实现下载：
+        走 HF_ENDPOINT（默认 hf-mirror.com），支持断点续传与重试。
+        """
+        endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
+        repo = f"Systran/faster-whisper-{model_name}"
+        base_url = f"{endpoint}/{repo}/resolve/main"
+        headers = {"User-Agent": "VideoToNo/2.0", "Accept-Encoding": "identity"}
+
+        # 从 307 重定向响应头取 commit hash（目录命名用）
+        commit = "main"
+        try:
+            request = urllib.request.Request(
+                f"{base_url}/config.json", headers=headers, method="HEAD"
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                commit = response.headers.get("X-Repo-Commit") or commit
+        except Exception:
+            pass
+
+        snapshot = (
+            self.download_root
+            / f"models--Systran--faster-whisper-{model_name}"
+            / "snapshots"
+            / commit
+        )
+        snapshot.mkdir(parents=True, exist_ok=True)
+        for filename in self.WHISPER_MODEL_FILES:
+            target = snapshot / filename
+            if target.is_file() and target.stat().st_size > 0:
+                continue
+            if not self._download_one_file(f"{base_url}/{filename}", target, headers):
+                return None
+        if not all((snapshot / name).is_file() for name in self.WHISPER_MODEL_FILES):
+            return None
+        return snapshot
+
+    @staticmethod
+    def _download_one_file(url: str, target: Path, headers: dict[str, str]) -> bool:
+        """单文件下载：断点续传（Range）+ 重试三次。"""
+        part = target.with_suffix(target.suffix + ".part")
+        for attempt in range(3):
+            try:
+                resume = part.stat().st_size if part.is_file() else 0
+                request_headers = dict(headers)
+                if resume:
+                    request_headers["Range"] = f"bytes={resume}-"
+                request = urllib.request.Request(url, headers=request_headers)
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    if response.status == 200 and resume:
+                        # 服务端忽略 Range，从头重下
+                        part.unlink(missing_ok=True)
+                        resume = 0
+                    mode = "ab" if resume else "wb"
+                    with open(part, mode) as out:
+                        while True:
+                            chunk = response.read(256 * 1024)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                if part.stat().st_size == 0:
+                    part.unlink(missing_ok=True)
+                    return False
+                if target.exists():
+                    target.unlink()
+                part.rename(target)
+                return True
+            except Exception:
+                time.sleep(1.5 * (attempt + 1))
+        return False
 
     def _load_cached_base_or_raise(
         self,
@@ -182,6 +265,7 @@ class WhisperTranscriber:
         cache_hint = f"，缓存目录：{self.download_root}" if self.download_root else ""
         return RuntimeError(
             f"Whisper 模型 {model_name} 下载或加载失败{cache_hint}。"
-            "请检查网络、代理和磁盘权限；首次使用该模型需要从 Hugging Face 下载。"
+            "下载默认走 hf-mirror.com 镜像；若仍失败，请检查网络/代理，"
+            "或通过 HF_ENDPOINT 环境变量指定可用镜像后重试。"
             f"原始错误：{message}"
         )

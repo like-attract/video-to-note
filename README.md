@@ -200,7 +200,9 @@ VideoToNo/
 
 `faster-whisper` 会在第一次使用某个模型时下载模型文件。下载耗时取决于模型大小和网络状况，后续会复用本机缓存。切换到另一个模型时仍可能再次下载。
 
-模型默认缓存在 `workspace/_model_cache/`。如需改到其他磁盘，可在 `.env` 中设置 `WHISPER_CACHE_DIR`。若首次下载失败，请检查 Hugging Face 的网络连通性、代理设置以及缓存目录写入权限。
+模型默认缓存在 `workspace/_model_cache/`。如需改到其他磁盘，可在 `.env` 中设置 `WHISPER_CACHE_DIR`。
+
+下载默认走 **hf-mirror.com 镜像**（国内可直接访问），并内置断点续传与重试；如需切换，在 `.env` 中设置 `HF_ENDPOINT`（如 `HF_ENDPOINT=https://huggingface.co` 使用官方源，或自建镜像地址）。若仍失败，请检查网络连通性、代理设置以及缓存目录写入权限。
 应用默认禁用 Hugging Face Xet 下载后端，改用普通 HTTP 下载，以减少 Windows 网络下的 CAS 文件重建错误。
 如果所选模型尚未完整缓存且本机已有可用的 `base`，任务会直接降级到 `base` 并在运行日志中注明，避免长时间卡在不稳定的权重下载上。
 

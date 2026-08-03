@@ -206,7 +206,9 @@ VideoToNo/
 
 `faster-whisper` downloads a model the first time that model is used. Download time depends on model size and network conditions. The local cache is reused on later runs, but selecting another model can trigger another download.
 
-Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk. If the first download fails, check Hugging Face connectivity, proxy settings, and write access to the cache directory.
+Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk.
+
+Downloads go through the **hf-mirror.com mirror** by default (directly reachable from mainland China) with built-in resume and retry. To switch, set `HF_ENDPOINT` in `.env` (e.g. `HF_ENDPOINT=https://huggingface.co` for the official source, or a self-hosted mirror). If downloads still fail, check network connectivity, proxy settings, and write access to the cache directory.
 The application disables Hugging Face's Xet download backend by default and uses regular HTTP downloads to avoid CAS reconstruction failures on some Windows networks.
 If the selected model is not fully cached but a usable `base` model is already available, the job falls back to `base` and records that decision in the task log instead of waiting on an unreliable weight download.
 
