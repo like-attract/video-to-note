@@ -297,6 +297,10 @@ function isBilibiliUrl(value) {
     return /bilibili\.com|b23\.tv|BV[0-9A-Za-z]{10}/.test(value);
 }
 
+function isDouyinUrl(value) {
+    return /(^|\.)douyin\.com|iesdouyin\.com/.test(value);
+}
+
 function hasBiliCredentials() {
     return Boolean(
         byId('sessdata').value.trim()
@@ -306,9 +310,24 @@ function hasBiliCredentials() {
 }
 
 function updateBiliHint(forceShow = false) {
-    const isBili = byId('sourceType').value !== 'local'
-        && isBilibiliUrl(byId('videoUrl').value.trim());
-    byId('biliHint').hidden = !(forceShow || (isBili && !hasBiliCredentials() && !biliPromptDismissed));
+    const value = byId('videoUrl').value.trim();
+    const notLocal = byId('sourceType').value !== 'local';
+    const isBili = notLocal && isBilibiliUrl(value);
+    const isDouyin = notLocal && isDouyinUrl(value);
+    const hint = byId('biliHint');
+    if (forceShow || (isBili && !hasBiliCredentials() && !biliPromptDismissed)) {
+        byId('biliHintTitle').textContent = '检测到 B 站链接';
+        byId('biliHintDesc').textContent = '填写访问凭据可优先使用 AI 字幕，无需等待本地转写。';
+        byId('biliHintActions').hidden = false;
+        hint.hidden = false;
+    } else if (forceShow || (isDouyin && !biliPromptDismissed)) {
+        byId('biliHintTitle').textContent = '抖音链接暂不支持直接解析';
+        byId('biliHintDesc').textContent = '请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。';
+        byId('biliHintActions').hidden = true;
+        hint.hidden = false;
+    } else {
+        hint.hidden = true;
+    }
 }
 
 function revealBiliCredentials() {
@@ -449,10 +468,15 @@ async function refreshWhisperModelHints() {
             const model = byIdMap[option.value];
             const baseLabel = option.dataset.baseLabel || option.textContent;
             if (!model) return;
-            option.dataset.cached = model.cached ? 'true' : 'false';
-            option.textContent = model.cached
-                ? `${baseLabel}（已缓存）`
-                : `${baseLabel}（未缓存，首次使用需下载 ${WHISPER_MODEL_SIZES[option.value] || ''}）`;
+            option.dataset.status = model.status || 'missing';
+            const size = WHISPER_MODEL_SIZES[option.value] || '';
+            if (model.status === 'cached') {
+                option.textContent = `${baseLabel}（已缓存）`;
+            } else if (model.status === 'incomplete') {
+                option.textContent = `${baseLabel}（缓存不完整，将自动补全）`;
+            } else {
+                option.textContent = `${baseLabel}（未缓存，首次使用需下载 ${size}）`;
+            }
         });
     } catch {
         // 后端不可达时保持默认文案
@@ -483,15 +507,23 @@ async function startSummary(options = {}) {
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
 
-    // 所选 Whisper 模型未缓存时，先确认下载（新用户首次使用）
+    // 抖音链接暂不支持直接解析：提示改用本地文件
+    if (request.sourceType !== 'local' && isDouyinUrl(request.videoUrl)) {
+        showToast('抖音暂不支持直接解析，请下载视频后使用本地文件上传', 'error');
+        return;
+    }
+
+    // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）
     if (!resumeTaskId) {
         const whisperOption = byId('whisperModel').selectedOptions[0];
-        if (whisperOption && whisperOption.dataset.cached === 'false') {
+        const status = whisperOption ? whisperOption.dataset.status : 'missing';
+        if (whisperOption && status && status !== 'cached') {
             const modelLabel = (whisperOption.dataset.baseLabel || whisperOption.textContent).split('（')[0];
             const size = WHISPER_MODEL_SIZES[whisperOption.value] || '';
-            if (!window.confirm(
-                `当前缺少所选模型「${modelLabel}」。首次使用需从镜像下载约 ${size}（下载完成后自动开始转写）。是否继续？`
-            )) {
+            const message = status === 'incomplete'
+                ? `所选模型「${modelLabel}」缓存不完整，将自动补全缺失文件（约 ${size}）。是否继续？`
+                : `当前缺少所选模型「${modelLabel}」。首次使用需从镜像下载约 ${size}（下载完成后自动开始转写）。是否继续？`;
+            if (!window.confirm(message)) {
                 showToast('已取消，任务未提交', 'info');
                 return;
             }

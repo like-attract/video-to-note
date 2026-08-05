@@ -57,6 +57,11 @@ ALLOWED_MEDIA_SUFFIXES = {
     ".avi",
 }
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo"}
+DOUYIN_HOSTS = ("v.douyin.com", "douyin.com", "iesdouyin.com")
+DOUYIN_HINT = (
+    "抖音链接暂不支持直接解析（平台签名反爬限制）。"
+    "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
+)
 
 app = FastAPI(title="VideoToNotes API", version="3.0.0")
 app.add_middleware(
@@ -295,6 +300,8 @@ def write_task_manifest(task_id: str, request: SummarizeRequest, reused_task_id:
 async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
     if request.whisper_model not in WHISPER_MODELS:
         raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
+    if request.video_url and urlsplit(request.video_url).netloc.endswith(DOUYIN_HOSTS):
+        raise HTTPException(status_code=422, detail=DOUYIN_HINT)
 
     reused_task_id = request.resume_task_id
     if request.processing_mode == "restart":
@@ -358,7 +365,7 @@ async def whisper_models_status() -> dict[str, Any]:
     models = [
         {
             "id": model_id,
-            "cached": transcriber._cached_model_path(model_id) is not None,
+            "status": transcriber._model_cache_status(model_id),
         }
         for model_id in sorted(WHISPER_MODELS)
     ]
@@ -709,8 +716,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             task["logs"].append("任务已取消；已生成的中间文件将保留")
     except Exception as exc:
         finish_task_timing(task)
-        task.update(status="failed", error=str(exc))
-        task["logs"].append(f"处理失败：{exc}")
+        message = friendly_task_error(str(exc))
+        task.update(status="failed", error=message)
+        task["logs"].append(f"处理失败：{message}")
 
 
 async def write_transcript_files(
@@ -729,6 +737,13 @@ async def write_transcript_files(
         await file.write("# 带时间戳转录\n\n")
         await file.write(segments_to_prompt(segments))
         await file.write("\n")
+
+
+def friendly_task_error(message: str) -> str:
+    """把已知的平台限制错误转成对用户友好的提示。"""
+    if "Douyin" in message or "douyin" in message or "Fresh cookies" in message:
+        return DOUYIN_HINT
+    return message
 
 
 def format_duration(seconds: float) -> str:

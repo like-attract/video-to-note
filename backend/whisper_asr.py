@@ -260,6 +260,32 @@ class WhisperTranscriber:
                     return snapshot.resolve()
         return None
 
+    def _model_cache_status(self, model_name: str) -> str:
+        """模型缓存状态：cached（完整）/ incomplete（部分文件）/ missing（无）。"""
+        if self._cached_model_path(model_name):
+            return "cached"
+        roots: list[Path] = []
+        if self.download_root:
+            roots.append(self.download_root)
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            roots.append(Path(HF_HUB_CACHE))
+        except ImportError:
+            pass
+        repo_name = f"models--Systran--faster-whisper-{model_name}"
+        for root in roots:
+            snapshots_dir = root / repo_name / "snapshots"
+            if not snapshots_dir.is_dir():
+                continue
+            for snapshot in snapshots_dir.iterdir():
+                if snapshot.is_dir() and any(
+                    (snapshot / filename).is_file()
+                    for filename in self.WHISPER_MODEL_FILES
+                ):
+                    return "incomplete"
+        return "missing"
+
     def _model_load_error(self, model_name: str, error: Exception) -> RuntimeError:
         message = str(error).strip() or error.__class__.__name__
         cache_hint = f"，缓存目录：{self.download_root}" if self.download_root else ""
