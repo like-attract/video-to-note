@@ -140,6 +140,34 @@ For longer media, the application stops before the language-model call when both
 - The server listens on `127.0.0.1` by default. Do not switch it to `0.0.0.0` and expose it to the public internet. The application has no authentication, tenant isolation, or public-deployment hardening.
 - Treat cookies as login credentials. Enter them only when needed, never share them, and close or refresh the page after use.
 
+## MCP integration (call from AI clients)
+
+VideoToNo ships a built-in MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first** — MCP tools call the local backend over HTTP, and tasks run in the backend process.
+
+Exposed tools:
+
+| Tool | Description |
+|---|---|
+| `summarize_video` | Submit a video summarization task (video URL + API key + optional model/style options), returns a task ID |
+| `get_task_status` | Poll task progress; `result.markdown` holds the note when completed |
+| `list_whisper_models` | Show local cache status of Whisper models |
+
+### Cherry Studio (recommended, no local Python needed)
+
+1. Start VideoToNo, then open Cherry Studio "Settings → MCP Servers → Add";
+2. Choose **Server-Sent Events (SSE)** and set URL to `http://127.0.0.1:8000/mcp/sse` (use the actual port if not 8000);
+3. Save and enable it, then ask the assistant to summarize a video.
+
+### Codex CLI
+
+```bash
+codex mcp add local videotono -- python -m backend.mcp_server
+```
+
+When run from any directory, the MCP server auto-scans ports 8000-8019 for a running VideoToNo instance; set `VIDEOTONOTES_BACKEND_URL` to override.
+
+> Note: `summarize_video` requires the API key at call time; it is never stored. Bilibili AI subtitles may need `bilibili_sessdata` etc. (same credentials as the web QR-code import).
+
 ## Configuration
 
 The application reads optional settings from `.env` in the project root. See `.env.example`:

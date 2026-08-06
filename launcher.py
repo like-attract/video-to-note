@@ -97,6 +97,8 @@ def start_server(port: int) -> tuple[Any, threading.Thread]:
     """在线程中启动 uvicorn，返回 (server, thread)。"""
     import uvicorn
 
+    # 让挂载的 MCP 端点（/mcp/sse）自调命中实际端口
+    os.environ.setdefault("VIDEOTONOTES_BACKEND_URL", f"http://127.0.0.1:{port}")
     from backend.main import app
 
     config = uvicorn.Config(

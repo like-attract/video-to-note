@@ -145,6 +145,34 @@ bash scripts/build_mac.sh
 - 服务默认只监听 `127.0.0.1`，请不要将它改为 `0.0.0.0` 后暴露到公网。当前项目没有身份认证、租户隔离或面向公网部署所需的防护。
 - Cookie 相当于登录凭据。仅在确有需要时填写，不要分享给他人；使用结束后关闭或刷新页面。
 
+## MCP 接入（在 AI 客户端中调用）
+
+VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio、Codex 等 AI 客户端里直接输入视频链接生成笔记。**使用前请先启动 VideoToNo**（MCP 工具通过 HTTP 调用本地后端，任务由后端实际执行）。
+
+暴露 3 个工具：
+
+| 工具 | 说明 |
+|---|---|
+| `summarize_video` | 提交视频总结任务（视频链接 + API Key + 可选模型/风格参数），返回任务 ID |
+| `get_task_status` | 查询任务进度；完成后 `result.markdown` 为笔记正文 |
+| `list_whisper_models` | 查看 Whisper 模型的本地缓存状态 |
+
+### Cherry Studio（推荐，无需本机 Python）
+
+1. 启动 VideoToNo 后，打开 Cherry Studio「设置 → MCP 服务器 → 添加」；
+2. 类型选择 **Server-Sent Events (SSE)**，URL 填 `http://127.0.0.1:8000/mcp/sse`（若服务端口不是 8000，改成实际端口）；
+3. 保存并启用，在对话中即可让 AI 调用工具。
+
+### Codex CLI
+
+```bash
+codex mcp add local videotono -- python -m backend.mcp_server
+```
+
+从任意目录运行时，MCP server 会自动扫描 8000-8019 端口找到正在运行的 VideoToNo 服务；也可用 `VIDEOTONOTES_BACKEND_URL` 环境变量显式指定。
+
+> 提示：`summarize_video` 的 API Key 需在调用时提供，不会保存。B 站 AI 字幕如需凭据，可传入 `bilibili_sessdata` 等参数（与网页端扫码导入相同）。
+
 ## 配置
 
 应用会从项目根目录的 `.env` 读取以下可选设置。可以参考 `.env.example`：

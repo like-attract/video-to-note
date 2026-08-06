@@ -9,3 +9,4 @@ aiofiles>=24,<25
 av>=13,<17
 Pillow>=10,<13
 pystray>=0.19,<1
+mcp>=1.0,<2

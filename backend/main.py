@@ -752,14 +752,25 @@ def format_duration(seconds: float) -> str:
     return format_timestamp(float(seconds))
 
 
+# MCP 端点：SSE 传输（/mcp/sse，供 Cherry Studio 等 MCP 客户端接入）
+try:
+    from .mcp_server import configure_backend_url, mcp as mcp_app
+    configure_backend_url(os.getenv("VIDEOTONOTES_BACKEND_URL", ""))
+    app.mount("/mcp", mcp_app.sse_app())
+except ImportError:
+    # mcp 依赖未安装时跳过，不影响主服务
+    pass
+
 if FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    os.environ.setdefault("VIDEOTONOTES_BACKEND_URL", f"http://127.0.0.1:{port}")
     uvicorn.run(
         "backend.main:app",
         host=os.getenv("HOST", "127.0.0.1"),
-        port=int(os.getenv("PORT", "8000")),
+        port=port,
         reload=os.getenv("RELOAD", "false").lower() == "true",
     )
