@@ -194,7 +194,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 从任意目录运行时，MCP server 会自动扫描 8000-8019 端口找到正在运行的 VideoToNo 服务；也可用 `VIDEOTONOTES_BACKEND_URL` 环境变量显式指定。
 
-> 隐私说明：`save_llm_config` / `save_bilibili_credentials` 保存的内容为明文，存放在本机工作目录（`workspace/llm_config.json`、`workspace/bili_credentials.json`，权限 600），仅本机可读，请勿分享这些文件；调用方未显式保存时，凭据不会落盘。
+> 隐私说明：`save_llm_config` / `save_bilibili_credentials` 保存的内容为明文，存放在本机工作目录（`workspace/llm_config.json`、`workspace/bili_credentials.json`，权限 600），仅本机可读，请勿分享这些文件；调用方未显式保存时，凭据不会落盘。工作目录整体已被 `.gitignore` 排除，这些文件不会进入 Git 仓库。
 
 ## 配置
 

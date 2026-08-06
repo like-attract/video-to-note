@@ -6,6 +6,9 @@ B 站凭据，由后端统一保管（明文保存在工作目录，仅本机可
 文件位置：
 - workspace/llm_config.json      大模型服务配置（provider/model/api_key）
 - workspace/bili_credentials.json B 站凭据（SESSDATA / bili_jct / buvid3）
+
+两者都在工作目录（workspace/）下，已被 .gitignore 整目录排除，不会进入 Git 仓库；
+请在开发中保持该约定，不要把它们放到仓库目录内。
 """
 from __future__ import annotations
 
