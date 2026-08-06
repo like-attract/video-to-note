@@ -25,3 +25,6 @@ Thumbs.db
 
 # Local screenshot containing a workstation path; publish the sanitized copy.
 /sources/output.png
+
+# 开发文档（本地保留，不入库）
+/DEVELOPMENT.md
