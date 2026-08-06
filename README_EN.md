@@ -6,12 +6,11 @@ VideoToNo is a local video-to-notes tool intended for personal use. It reads a v
 
 The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 
-## What's New (v0.2.2)
+## What's New (v0.2.4)
 
-- **MCP integration**: built-in MCP server lets AI clients (Cherry Studio, Codex, ...) turn a video link into a note directly; LLM config and Bilibili credentials can be saved locally so you don't repeat them on every call (see "MCP integration" below)
-- **Stable scan-to-login window**: the Bilibili QR window no longer closes and reopens while waiting for a scan; it stays for up to 5 minutes
-- **Remember LLM config**: the web UI can persist provider/model/API key to the local browser and auto-fill on next visit
-- **Content-focused analysis**: the "detailed notes + analysis" style now analyzes the video content itself (arguments, evidence, logic, conclusions), not the note's writing
+- **MCP polling improvement**: new `wait_for_task` tool waits up to 45 seconds and returns only when the task finishes — AI clients no longer poll `get_task_status` aggressively
+- **Auto-archived notes**: finished notes are saved to `workspace/notes/<video-title>.md` (auto-numbered on duplicates) so all history is easy to review
+- Previous releases (v0.2.2/0.2.3): MCP integration (Cherry Studio / Codex), local LLM config & Bilibili credentials storage, stable scan-to-login window, content-focused analysis
 
 ## Screenshots
 
