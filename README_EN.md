@@ -6,6 +6,13 @@ VideoToNo is a local video-to-notes tool intended for personal use. It reads a v
 
 The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 
+## What's New (v0.2.2)
+
+- **MCP integration**: built-in MCP server lets AI clients (Cherry Studio, Codex, ...) turn a video link into a note directly; LLM config and Bilibili credentials can be saved locally so you don't repeat them on every call (see "MCP integration" below)
+- **Stable scan-to-login window**: the Bilibili QR window no longer closes and reopens while waiting for a scan; it stays for up to 5 minutes
+- **Remember LLM config**: the web UI can persist provider/model/API key to the local browser and auto-fill on next visit
+- **Content-focused analysis**: the "detailed notes + analysis" style now analyzes the video content itself (arguments, evidence, logic, conclusions), not the note's writing
+
 ## Screenshots
 
 ### Configuration and submission
@@ -142,21 +149,37 @@ For longer media, the application stops before the language-model call when both
 
 ## MCP integration (call from AI clients)
 
-VideoToNo ships a built-in MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first** — MCP tools call the local backend over HTTP, and tasks run in the backend process.
+VideoToNo ships a built-in MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first** — tasks run in the local backend process, reusing your Whisper model cache and task directories (no duplicate downloads).
 
 Exposed tools:
 
 | Tool | Description |
 |---|---|
-| `summarize_video` | Submit a video summarization task (video URL + API key + optional model/style options), returns a task ID |
+| `summarize_video` | Submit a video summarization task (URL; API key/model/Bilibili credentials are all optional — saved local config is used automatically), returns a task ID |
 | `get_task_status` | Poll task progress; `result.markdown` holds the note when completed |
 | `list_whisper_models` | Show local cache status of Whisper models |
+| `save_llm_config` | Save provider/model/API key to this machine; no need to pass them again |
+| `save_bilibili_credentials` | Save Bilibili credentials (SESSDATA etc.) locally; used automatically for Bilibili videos |
+| `get_saved_config` | Show saved-config status (secrets masked) |
 
 ### Cherry Studio (recommended, no local Python needed)
 
 1. Start VideoToNo, then open Cherry Studio "Settings → MCP Servers → Add";
 2. Choose **Server-Sent Events (SSE)** and set URL to `http://127.0.0.1:8000/mcp/sse` (use the actual port if not 8000);
 3. Save and enable it, then ask the assistant to summarize a video.
+
+**On first use, ask the assistant to save your config once** (then no sensitive info is needed again):
+
+```text
+Please call save_llm_config with my DeepSeek API key sk-xxx,
+then call save_bilibili_credentials with sessdata=xxx, bili_jct=xxx, buvid3=xxx.
+```
+
+After that, just describe the request:
+
+```text
+Summarize this Bilibili video: https://www.bilibili.com/video/BV1xx
+```
 
 ### Codex CLI
 
@@ -166,7 +189,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 When run from any directory, the MCP server auto-scans ports 8000-8019 for a running VideoToNo instance; set `VIDEOTONOTES_BACKEND_URL` to override.
 
-> Note: `summarize_video` requires the API key at call time; it is never stored. Bilibili AI subtitles may need `bilibili_sessdata` etc. (same credentials as the web QR-code import).
+> Privacy: `save_llm_config` / `save_bilibili_credentials` store plaintext files in the local workspace (`workspace/llm_config.json`, `workspace/bili_credentials.json`, mode 600), readable only on this machine — don't share them. Nothing is persisted unless you explicitly save.
 
 ## Configuration
 

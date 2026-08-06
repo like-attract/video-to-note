@@ -1,4 +1,4 @@
-"""MCP server 测试：工具参数构建、后端客户端错误处理与端口发现。"""
+"""MCP server 测试：工具参数构建、保存配置回退、错误处理与端口发现。"""
 import httpx
 import pytest
 
@@ -6,9 +6,13 @@ from backend import mcp_server
 
 
 class FakeBackend:
-    def __init__(self, response=None, captured=None):
+    def __init__(self, response=None, captured=None, llm_config=None, bili_config=None):
         self.response = response or {"ok": True, "task_id": "task-1", "reused_task_id": None}
         self.captured = captured or {}
+        self.llm_config = llm_config or {"saved": False}
+        self.bili_config = bili_config or {"saved": False}
+        self.saved_llm = None
+        self.saved_bili = None
 
     async def start_summarize(self, payload):
         self.captured["payload"] = payload
@@ -20,6 +24,24 @@ class FakeBackend:
     async def whisper_models(self):
         return {"models": [{"id": "base", "status": "cached"}]}
 
+    async def get_llm_config(self):
+        return self.llm_config
+
+    async def save_llm_config(self, config):
+        self.saved_llm = config
+        return {"saved": True}
+
+    async def get_bili_credentials(self):
+        return self.bili_config
+
+    async def save_bili_credentials(self, credentials):
+        self.saved_bili = credentials
+        return {"saved": True}
+
+
+SAVED_LLM = {"saved": True, "model_type": "deepseek", "api_key": "sk-saved-key"}
+SAVED_BILI = {"saved": True, "sessdata": "sess-saved", "bili_jct": "jct", "buvid3": "buvid"}
+
 
 @pytest.mark.asyncio
 async def test_summarize_video_builds_payload_with_optional_fields(monkeypatch) -> None:
@@ -28,7 +50,7 @@ async def test_summarize_video_builds_payload_with_optional_fields(monkeypatch) 
 
     result = await mcp_server.summarize_video(
         "https://www.bilibili.com/video/BV1xx",
-        "sk-test",
+        api_key="sk-test",
         model_type="custom",
         model="my-model",
         base_url="https://api.example.com/v1",
@@ -63,7 +85,7 @@ async def test_summarize_video_omits_optional_keys_when_unset(monkeypatch) -> No
     fake = FakeBackend()
     monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
-    await mcp_server.summarize_video("https://www.youtube.com/watch?v=abc", "sk-test")
+    await mcp_server.summarize_video("https://www.youtube.com/watch?v=abc", api_key="sk-test")
 
     payload = fake.captured["payload"]
     assert "base_url" not in payload["llm_config"]
@@ -77,7 +99,75 @@ async def test_summarize_video_raises_when_backend_misses_task_id(monkeypatch) -
     monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
     with pytest.raises(RuntimeError, match="未返回任务 ID"):
-        await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx", "sk-test")
+        await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx", api_key="sk-test")
+
+
+@pytest.mark.asyncio
+async def test_summarize_video_uses_saved_llm_config_when_api_key_omitted(
+    monkeypatch,
+) -> None:
+    fake = FakeBackend(llm_config=SAVED_LLM, bili_config=SAVED_BILI)
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx")
+
+    payload = fake.captured["payload"]
+    assert payload["llm_config"] == {"model_type": "deepseek", "api_key": "sk-saved-key"}
+    assert payload["bilibili_cookie"] == {
+        "sessdata": "sess-saved",
+        "bili_jct": "jct",
+        "buvid3": "buvid",
+    }
+
+
+@pytest.mark.asyncio
+async def test_summarize_video_explicit_args_override_saved_config(monkeypatch) -> None:
+    fake = FakeBackend(llm_config=SAVED_LLM)
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    await mcp_server.summarize_video(
+        "https://www.bilibili.com/video/BV1xx", model_type="glm", model="glm-5.2"
+    )
+
+    payload = fake.captured["payload"]
+    assert payload["llm_config"] == {
+        "model_type": "glm",
+        "api_key": "sk-saved-key",
+        "model": "glm-5.2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_summarize_video_raises_when_no_key_and_nothing_saved(monkeypatch) -> None:
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    with pytest.raises(RuntimeError, match="save_llm_config"):
+        await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx")
+
+
+@pytest.mark.asyncio
+async def test_save_tools_store_config_and_get_saved_config_masks_secrets(
+    monkeypatch,
+) -> None:
+    fake = FakeBackend(llm_config=SAVED_LLM, bili_config=SAVED_BILI)
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    saved = await mcp_server.save_llm_config("sk-new", model_type="qwen", model="qwen3.7-plus")
+    assert saved["saved"] is True
+    assert fake.saved_llm == {
+        "model_type": "qwen",
+        "api_key": "sk-new",
+        "model": "qwen3.7-plus",
+    }
+
+    saved_bili = await mcp_server.save_bilibili_credentials("sess-1", "jct-1", "buvid-1")
+    assert saved_bili["saved"] is True
+    assert fake.saved_bili == {"sessdata": "sess-1", "bili_jct": "jct-1", "buvid3": "buvid-1"}
+
+    status = await mcp_server.get_saved_config()
+    assert status["llm_config"]["api_key_masked"] == "sk-s****"
+    assert status["bilibili_credentials"]["sessdata_masked"] == "sess****"
 
 
 @pytest.mark.asyncio
@@ -101,7 +191,7 @@ def test_backend_client_parses_api_error_detail() -> None:
         base_url="http://127.0.0.1:8000", transport=httpx.MockTransport(handler)
     )
     with pytest.raises(RuntimeError, match="不支持的 Whisper 模型"):
-        client.start_summarize({"video_url": "x", "llm_config": {"model_type": "deepseek"}})
+        client._request("POST", "/api/summarize", json={})
 
 
 def test_backend_client_falls_back_to_scanned_port(monkeypatch) -> None:
@@ -122,21 +212,21 @@ def test_backend_client_falls_back_to_scanned_port(monkeypatch) -> None:
     monkeypatch.setattr(httpx.Client, "request", request)
     client = mcp_server.BackendClient(base_url="http://127.0.0.1:8000")
 
-    result = client.start_summarize({"video_url": "x"})
+    result = client._request("POST", "/api/summarize", json={})
     assert result["task_id"] == "found"
     assert healthy_port["port"] == 8005
     assert client.base_url == "http://127.0.0.1:8005"
 
 
 def test_backend_client_raises_friendly_error_when_unreachable(monkeypatch) -> None:
-    def failing_request(self, method, path, **kwargs):
+    def failing_request(self, method, url, **kwargs):
         raise httpx.ConnectError("refused")
 
     monkeypatch.setattr(httpx.Client, "request", failing_request)
     client = mcp_server.BackendClient(base_url="http://127.0.0.1:8000")
 
     with pytest.raises(RuntimeError, match="请先启动服务"):
-        client.get_task("task-1")
+        client._request("GET", "/api/task/task-1")
 
 
 def test_mcp_endpoint_mounted_on_fastapi_app() -> None:

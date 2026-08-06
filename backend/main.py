@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
+from .config_store import ConfigStore
 from .llm_summarizer import LLMSummarizer
 from .bili_login import BiliLoginManager
 from .transcript import (
@@ -75,11 +76,25 @@ app.add_middleware(
 video_processor = VideoProcessor(WORKSPACE_DIR)
 transcriber = WhisperTranscriber(WHISPER_CACHE_DIR)
 bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
+config_store = ConfigStore(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
 
 
 class BilibiliCookie(BaseModel):
+    sessdata: str = ""
+    bili_jct: str = ""
+    buvid3: str = ""
+
+
+class LLMConfigPayload(BaseModel):
+    model_type: str = "deepseek"
+    api_key: SecretStr
+    base_url: str | None = None
+    model: str | None = None
+
+
+class BiliCredentialsPayload(BaseModel):
     sessdata: str = ""
     bili_jct: str = ""
     buvid3: str = ""
@@ -370,6 +385,58 @@ async def whisper_models_status() -> dict[str, Any]:
         for model_id in sorted(WHISPER_MODELS)
     ]
     return {"models": models}
+
+
+@app.get("/api/llm-config")
+async def get_llm_config() -> dict[str, Any]:
+    """读取本机保存的 LLM 配置（明文返回；仅监听 127.0.0.1，供 MCP 等本地调用方使用）。"""
+    config = config_store.load_llm_config()
+    if not config:
+        return {"saved": False}
+    return {"saved": True, **config}
+
+
+@app.post("/api/llm-config")
+async def save_llm_config(payload: LLMConfigPayload) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "model_type": payload.model_type,
+        "api_key": payload.api_key.get_secret_value(),
+    }
+    if payload.base_url:
+        config["base_url"] = payload.base_url
+    if payload.model:
+        config["model"] = payload.model
+    config_store.save_llm_config(config)
+    return {"saved": True, "model_type": payload.model_type, "model": config.get("model")}
+
+
+@app.delete("/api/llm-config")
+async def clear_llm_config() -> dict[str, bool]:
+    config_store.clear_llm_config()
+    return {"saved": False}
+
+
+@app.get("/api/bili-credentials")
+async def get_bili_credentials() -> dict[str, Any]:
+    """读取本机保存的 B 站凭据状态（明文返回；供 MCP 等本地调用方使用）。"""
+    credentials = config_store.load_bili_credentials()
+    if not credentials:
+        return {"saved": False}
+    return {"saved": True, **credentials}
+
+
+@app.post("/api/bili-credentials")
+async def save_bili_credentials(payload: BiliCredentialsPayload) -> dict[str, Any]:
+    config_store.save_bili_credentials(
+        {"sessdata": payload.sessdata, "bili_jct": payload.bili_jct, "buvid3": payload.buvid3}
+    )
+    return {"saved": True}
+
+
+@app.delete("/api/bili-credentials")
+async def clear_bili_credentials() -> dict[str, bool]:
+    config_store.clear_bili_credentials()
+    return {"saved": False}
 
 
 @app.get("/api/health")

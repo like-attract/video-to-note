@@ -6,6 +6,13 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 前端页面和 API 由同一个 FastAPI 服务提供，默认地址为 <http://127.0.0.1:8000>。
 
+## What's New（v0.2.2）
+
+- **MCP 接入**：内置 MCP server，可在 Cherry Studio、Codex 等 AI 客户端中直接「输入视频链接 → 输出视频笔记」；LLM 配置与 B 站凭据可保存到本机，调用时无需重复提供（详见下文「MCP 接入」）
+- **扫码登录窗口稳定**：B 站扫码窗口不再因等待扫码而自动关闭重开，可保留最长 5 分钟
+- **记住 LLM 配置**：网页端可勾选把 Provider/模型/API Key 保存到本机浏览器，刷新后自动回填
+- **点评分析聚焦视频内容**：「详细笔记 + 点评分析」的点评对象是视频内容本身（观点/论据/逻辑/结论），不再是笔记写法
+
 ## 界面预览
 
 ### 配置与提交
@@ -147,21 +154,37 @@ bash scripts/build_mac.sh
 
 ## MCP 接入（在 AI 客户端中调用）
 
-VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio、Codex 等 AI 客户端里直接输入视频链接生成笔记。**使用前请先启动 VideoToNo**（MCP 工具通过 HTTP 调用本地后端，任务由后端实际执行）。
+VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio、Codex 等 AI 客户端里直接输入视频链接生成笔记。**使用前请先启动 VideoToNo**（MCP 工具通过本地后端执行任务，Whisper 模型缓存、任务目录等全部复用本机资源，不会重复下载）。
 
-暴露 3 个工具：
+暴露 6 个工具：
 
 | 工具 | 说明 |
 |---|---|
-| `summarize_video` | 提交视频总结任务（视频链接 + API Key + 可选模型/风格参数），返回任务 ID |
+| `summarize_video` | 提交视频总结任务（视频链接；API Key / 模型 / B 站凭据均可省略，自动使用本机已保存的配置），返回任务 ID |
 | `get_task_status` | 查询任务进度；完成后 `result.markdown` 为笔记正文 |
 | `list_whisper_models` | 查看 Whisper 模型的本地缓存状态 |
+| `save_llm_config` | 把大模型配置（Provider/模型/API Key）保存到本机，之后无需每次传入 |
+| `save_bilibili_credentials` | 把 B 站凭据（SESSDATA 等）保存到本机，处理 B 站视频时自动使用 |
+| `get_saved_config` | 查看已保存配置的状态（敏感信息脱敏显示） |
 
 ### Cherry Studio（推荐，无需本机 Python）
 
 1. 启动 VideoToNo 后，打开 Cherry Studio「设置 → MCP 服务器 → 添加」；
 2. 类型选择 **Server-Sent Events (SSE)**，URL 填 `http://127.0.0.1:8000/mcp/sse`（若服务端口不是 8000，改成实际端口）；
 3. 保存并启用，在对话中即可让 AI 调用工具。
+
+**首次使用建议让 AI 先执行一次保存**（之后无需再提供敏感信息）：
+
+```text
+请调用 save_llm_config 保存配置：我的 DeepSeek API Key 是 sk-xxx
+再调用 save_bilibili_credentials 保存：sessdata=xxx，bili_jct=xxx，buvid3=xxx
+```
+
+之后直接说需求即可：
+
+```text
+帮我总结这个 B 站视频：https://www.bilibili.com/video/BV1xx
+```
 
 ### Codex CLI
 
@@ -171,7 +194,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 从任意目录运行时，MCP server 会自动扫描 8000-8019 端口找到正在运行的 VideoToNo 服务；也可用 `VIDEOTONOTES_BACKEND_URL` 环境变量显式指定。
 
-> 提示：`summarize_video` 的 API Key 需在调用时提供，不会保存。B 站 AI 字幕如需凭据，可传入 `bilibili_sessdata` 等参数（与网页端扫码导入相同）。
+> 隐私说明：`save_llm_config` / `save_bilibili_credentials` 保存的内容为明文，存放在本机工作目录（`workspace/llm_config.json`、`workspace/bili_credentials.json`，权限 600），仅本机可读，请勿分享这些文件；调用方未显式保存时，凭据不会落盘。
 
 ## 配置
 
