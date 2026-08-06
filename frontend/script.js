@@ -9,6 +9,8 @@ const PREFERENCE_KEYS = [
     'llm_model',
     'custom_base_url',
     'custom_model_name',
+    'save_api_key',
+    'llm_api_key',
     'whisper_model',
     'screenshot_interval',
     'include_screenshots',
@@ -165,6 +167,11 @@ function loadPreferences() {
     byId('customBaseUrl').value = localStorage.getItem('custom_base_url') || '';
     byId('customModelName').value = localStorage.getItem('custom_model_name') || '';
     populateModelOptions(localStorage.getItem('llm_model_id'));
+    byId('saveApiKey').checked = localStorage.getItem('save_api_key') === 'true';
+    if (byId('saveApiKey').checked) {
+        const savedApiKey = localStorage.getItem('llm_api_key');
+        if (savedApiKey) byId('apiKey').value = savedApiKey;
+    }
     byId('whisperModel').value = localStorage.getItem('whisper_model') || 'base';
     snapshotWhisperLabels();
     refreshWhisperModelHints();
@@ -199,6 +206,17 @@ function applyTheme(theme) {
     });
 }
 
+function persistApiKeyIfRequested() {
+    const remember = byId('saveApiKey').checked;
+    localStorage.setItem('save_api_key', String(remember));
+    if (remember) {
+        const apiKey = byId('apiKey').value.trim();
+        if (apiKey) localStorage.setItem('llm_api_key', apiKey);
+    } else {
+        localStorage.removeItem('llm_api_key');
+    }
+}
+
 function savePreferences() {
     const interval = normalizeScreenshotInterval();
     localStorage.setItem('llm_provider', byId('llmProvider').value);
@@ -216,7 +234,11 @@ function savePreferences() {
         'processing_mode',
         document.querySelector('input[name="processingMode"]:checked')?.value || 'reuse'
     );
-    showToast('非敏感偏好已保存', 'success');
+    persistApiKeyIfRequested();
+    showToast(
+        byId('saveApiKey').checked ? '偏好与 LLM 配置（含 API Key）已保存' : '非敏感偏好已保存',
+        'success'
+    );
 }
 
 function resetPreferences() {
@@ -571,6 +593,7 @@ async function startSummary(options = {}) {
         const data = await readResponse(response, '提交任务失败');
 
         if (!data.task_id) throw new Error('后端未返回任务 ID');
+        persistApiKeyIfRequested();
         currentTaskId = data.task_id;
         if (data.reused_task_id) addLog(`已复用任务 ${data.reused_task_id} 的中间结果`, 'success');
         addLog(`任务已创建：${currentTaskId}`, 'success');

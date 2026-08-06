@@ -42,7 +42,8 @@ def test_note_and_analysis_prompts_are_focused() -> None:
     assert "原文如此" in prompt
     assert "不必凑固定模板" in prompt
     assert "模型补充，未联网核验" in analysis
-    assert "内容组织" in analysis
+    assert "点评对象是视频里的内容" in analysis
+    assert "不要评价笔记的组织结构" in analysis
     assert "语气中性自然" in analysis
 
 

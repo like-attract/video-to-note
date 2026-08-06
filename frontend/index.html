@@ -72,7 +72,11 @@
             <label class="field">
                 <span>API Key</span>
                 <input type="password" id="apiKey" autocomplete="off" placeholder="仅在本次页面会话中使用">
-                <small>不会写入浏览器存储，刷新页面后需重新填写。</small>
+                <small>默认不保存；勾选下方选项后，保存偏好时一并存到本机浏览器。</small>
+            </label>
+            <label class="check-field">
+                <input type="checkbox" id="saveApiKey">
+                <span>记住 LLM 配置（含 API Key，仅保存在本机）</span>
             </label>
 
             <div id="customApiConfig" class="custom-config" hidden>
@@ -142,7 +146,7 @@
         <div class="sidebar-actions">
             <button id="saveConfigBtn" class="button secondary" type="button">保存偏好</button>
             <button id="resetConfigBtn" class="button ghost" type="button">恢复默认</button>
-            <p>只保存模型选择、识别参数等非敏感偏好。</p>
+            <p>保存模型选择、识别参数等非敏感偏好；勾选「记住 LLM 配置」时一并保存 API Key（仅存本机浏览器）。</p>
         </div>
     </aside>
 
@@ -304,6 +308,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260803-3"></script>
+<script src="script.js?v=20260803-4"></script>
 </body>
 </html>

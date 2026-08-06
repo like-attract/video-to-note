@@ -23,7 +23,7 @@ from typing import Any
 import websockets
 
 LOGIN_URL = "https://passport.bilibili.com/login"
-SESSION_TTL_SECONDS = 180
+SESSION_TTL_SECONDS = 300
 CDP_PORT_START = 9333
 CDP_PORT_COUNT = 10
 
@@ -132,8 +132,11 @@ class BiliLoginManager:
                 await asyncio.sleep(0.25)
             if cookies:
                 break
+            if process.poll() is None:
+                # 窗口还活着：用户未扫码时没有 cookie 属正常状态，绝不能重开窗口
+                break
             if retry == 0:
-                # 浏览器异常退出（多为残留进程锁住 profile）：清理后重试一次
+                # 仅当浏览器进程真正退出（多为残留进程锁住 profile）：清理后重试一次
                 await asyncio.to_thread(self._kill_profile_browsers, profile_dir)
                 await asyncio.sleep(1)
         if cookies:
