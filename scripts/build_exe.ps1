@@ -29,6 +29,8 @@ Set-Location -LiteralPath $projectRoot
     --add-data "frontend;frontend" `
     --add-data "sources/icon.png;sources" `
     --collect-data faster_whisper `
+    --collect-submodules mcp.server `
+    --collect-data mcp `
     --version-file "scripts\version_info.txt" `
     --icon "sources\icon.ico" `
     --hidden-import pystray._win32 `

@@ -43,11 +43,14 @@ def _extract_detail(response: httpx.Response) -> str:
 
 
 class BackendClient:
-    """本地 VideoToNo 后端的薄 HTTP 客户端，带端口自动发现。"""
+    """本地 VideoToNo 后端的薄 HTTP 客户端，带端口自动发现（stdio 模式使用）。"""
 
     def __init__(self, base_url: str = "", transport: Any = None) -> None:
         self.base_url = (base_url or DEFAULT_BACKEND_URL).rstrip("/")
-        self._client = httpx.Client(timeout=HTTP_TIMEOUT, transport=transport)
+        # trust_env=False：本地回环服务不走系统代理（代理会拦截 localhost 请求）
+        self._client = httpx.Client(
+            timeout=HTTP_TIMEOUT, transport=transport, trust_env=False
+        )
 
     def start_summarize(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/api/summarize", json=payload)
@@ -85,7 +88,7 @@ def _discover_backend_url(current: str) -> str:
         if url == current:
             continue
         try:
-            response = httpx.get(f"{url}/api/health", timeout=1.0)
+            response = httpx.get(f"{url}/api/health", timeout=1.0, trust_env=False)
             if response.status_code == 200 and response.json().get("status") == "ok":
                 return url
         except Exception:
@@ -93,24 +96,54 @@ def _discover_backend_url(current: str) -> str:
     return current
 
 
-def configure_backend_url(base_url: str) -> None:
-    """由 main.py 在挂载 SSE 端点时注入实际端口，保证自调命中当前服务。"""
-    global _client
-    _client = BackendClient(base_url)
+class InProcessBackend:
+    """SSE 挂载在 FastAPI 进程内时使用：直接调用同进程端点函数。
+
+    HTTP 自调会被 uvicorn 的 SSE 长连接占用事件循环而互相等待（自调死锁），
+    因此挂载模式不走 HTTP，改为进程内调用。任务状态天然与网页端一致。
+    """
+
+    async def start_summarize(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .main import SummarizeRequest, start_summarize
+
+        request = SummarizeRequest(**payload)
+        return await start_summarize(request)
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        from .main import get_task_status
+
+        return await get_task_status(task_id)
+
+    async def whisper_models(self) -> dict[str, Any]:
+        from .main import whisper_models_status
+
+        return await whisper_models_status()
 
 
-def _get_client() -> BackendClient:
-    global _client
-    if _client is None:
-        _client = BackendClient(os.getenv("VIDEOTONOTES_BACKEND_URL", ""))
-    return _client
+_backend: BackendClient | InProcessBackend | None = None
 
 
-_client: BackendClient | None = None
+def use_http_backend(base_url: str = "") -> None:
+    """stdio 模式：通过 HTTP 调用本地后端（支持端口自动发现）。"""
+    global _backend
+    _backend = BackendClient(base_url or os.getenv("VIDEOTONOTES_BACKEND_URL", ""))
+
+
+def use_in_process_backend() -> None:
+    """SSE 挂载模式：由 main.py 调用，直接使用同进程端点函数。"""
+    global _backend
+    _backend = InProcessBackend()
+
+
+def _get_backend() -> BackendClient | InProcessBackend:
+    global _backend
+    if _backend is None:
+        use_http_backend()
+    return _backend
 
 
 @mcp.tool()
-def summarize_video(
+async def summarize_video(
     video_url: str,
     api_key: str,
     model_type: str = "deepseek",
@@ -174,7 +207,7 @@ def summarize_video(
             "buvid3": bilibili_buvid3 or "",
         }
 
-    data = _get_client().start_summarize(payload)
+    data = await _get_backend().start_summarize(payload)
     task_id = data.get("task_id")
     if not task_id:
         raise RuntimeError(f"后端未返回任务 ID：{data}")
@@ -185,14 +218,14 @@ def summarize_video(
 
 
 @mcp.tool()
-def get_task_status(task_id: str, include_markdown: bool = True) -> dict[str, Any]:
+async def get_task_status(task_id: str, include_markdown: bool = True) -> dict[str, Any]:
     """查询视频总结任务的进度与结果。
 
     Args:
         task_id: summarize_video 返回的任务 ID。
         include_markdown: 为 False 时省略笔记正文，只返回状态概要（减少输出量）。
     """
-    data = _get_client().get_task(task_id)
+    data = await _get_backend().get_task(task_id)
     if not include_markdown and data.get("result") and "markdown" in data["result"]:
         data = {
             **data,
@@ -202,9 +235,9 @@ def get_task_status(task_id: str, include_markdown: bool = True) -> dict[str, An
 
 
 @mcp.tool()
-def list_whisper_models() -> dict[str, Any]:
+async def list_whisper_models() -> dict[str, Any]:
     """列出 Whisper 语音模型在本机的缓存状态（cached 已缓存 / incomplete 不完整 / missing 未下载）。"""
-    return _get_client().whisper_models()
+    return await _get_backend().whisper_models()
 
 
 def main() -> None:

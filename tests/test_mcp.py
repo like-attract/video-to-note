@@ -5,27 +5,28 @@ import pytest
 from backend import mcp_server
 
 
-class FakeClient:
+class FakeBackend:
     def __init__(self, response=None, captured=None):
         self.response = response or {"ok": True, "task_id": "task-1", "reused_task_id": None}
         self.captured = captured or {}
 
-    def start_summarize(self, payload):
+    async def start_summarize(self, payload):
         self.captured["payload"] = payload
         return self.response
 
-    def get_task(self, task_id):
+    async def get_task(self, task_id):
         return {"status": "completed", "result": {"title": "T", "markdown": "# 笔记"}}
 
-    def whisper_models(self):
+    async def whisper_models(self):
         return {"models": [{"id": "base", "status": "cached"}]}
 
 
-def test_summarize_video_builds_payload_with_optional_fields(monkeypatch) -> None:
-    fake = FakeClient()
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: fake)
+@pytest.mark.asyncio
+async def test_summarize_video_builds_payload_with_optional_fields(monkeypatch) -> None:
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
-    result = mcp_server.summarize_video(
+    result = await mcp_server.summarize_video(
         "https://www.bilibili.com/video/BV1xx",
         "sk-test",
         model_type="custom",
@@ -57,11 +58,12 @@ def test_summarize_video_builds_payload_with_optional_fields(monkeypatch) -> Non
     }
 
 
-def test_summarize_video_omits_optional_keys_when_unset(monkeypatch) -> None:
-    fake = FakeClient()
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: fake)
+@pytest.mark.asyncio
+async def test_summarize_video_omits_optional_keys_when_unset(monkeypatch) -> None:
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
-    mcp_server.summarize_video("https://www.youtube.com/watch?v=abc", "sk-test")
+    await mcp_server.summarize_video("https://www.youtube.com/watch?v=abc", "sk-test")
 
     payload = fake.captured["payload"]
     assert "base_url" not in payload["llm_config"]
@@ -69,23 +71,25 @@ def test_summarize_video_omits_optional_keys_when_unset(monkeypatch) -> None:
     assert "bilibili_cookie" not in payload
 
 
-def test_summarize_video_raises_when_backend_misses_task_id(monkeypatch) -> None:
-    fake = FakeClient(response={"ok": False})
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: fake)
+@pytest.mark.asyncio
+async def test_summarize_video_raises_when_backend_misses_task_id(monkeypatch) -> None:
+    fake = FakeBackend(response={"ok": False})
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
     with pytest.raises(RuntimeError, match="未返回任务 ID"):
-        mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx", "sk-test")
+        await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx", "sk-test")
 
 
-def test_get_task_status_strips_markdown_when_requested(monkeypatch) -> None:
-    fake = FakeClient()
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: fake)
+@pytest.mark.asyncio
+async def test_get_task_status_strips_markdown_when_requested(monkeypatch) -> None:
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
-    summary = mcp_server.get_task_status("task-1", include_markdown=False)
+    summary = await mcp_server.get_task_status("task-1", include_markdown=False)
     assert summary["result"]["title"] == "T"
     assert "markdown" not in summary["result"]
 
-    full = mcp_server.get_task_status("task-1")
+    full = await mcp_server.get_task_status("task-1")
     assert full["result"]["markdown"] == "# 笔记"
 
 
