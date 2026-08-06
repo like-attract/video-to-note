@@ -987,6 +987,11 @@ function showResult(result) {
         : '';
     byId('outputPath').textContent = outputDirectory;
     byId('outputNotice').hidden = !outputDirectory;
+    const archivedPath = typeof result.archived_path === 'string'
+        ? result.archived_path.trim()
+        : '';
+    byId('archivedPath').textContent = archivedPath;
+    byId('archivedNotice').hidden = !archivedPath;
     return true;
 }
 

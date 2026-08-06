@@ -170,6 +170,55 @@ async def test_save_tools_store_config_and_get_saved_config_masks_secrets(
     assert status["bilibili_credentials"]["sessdata_masked"] == "sess****"
 
 
+class WaitingBackend(FakeBackend):
+    def __init__(self, terminal_status="completed", calls_to_terminal=3):
+        super().__init__()
+        self.calls = 0
+        self.terminal_status = terminal_status
+        self.calls_to_terminal = calls_to_terminal
+
+    async def get_task(self, task_id):
+        self.calls += 1
+        if self.calls < self.calls_to_terminal:
+            return {"status": "processing", "progress": 30}
+        return {
+            "status": self.terminal_status,
+            "result": {"title": "T", "markdown": "# 笔记"},
+        }
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_polls_until_terminal(monkeypatch) -> None:
+    fake = WaitingBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    result = await mcp_server.wait_for_task("task-1", timeout_seconds=10)
+    assert result["status"] == "completed"
+    assert result["result"]["markdown"] == "# 笔记"
+    assert result["waited_seconds"] > 0
+    assert fake.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_times_out_with_hint(monkeypatch) -> None:
+    fake = WaitingBackend(calls_to_terminal=999)
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    result = await mcp_server.wait_for_task("task-1", timeout_seconds=5)
+    assert result["status"] == "processing"
+    assert "再次调用 wait_for_task" in result["hint"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_strips_markdown_when_requested(monkeypatch) -> None:
+    fake = WaitingBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    result = await mcp_server.wait_for_task("task-1", timeout_seconds=10, include_markdown=False)
+    assert result["status"] == "completed"
+    assert "markdown" not in result["result"]
+
+
 @pytest.mark.asyncio
 async def test_get_task_status_strips_markdown_when_requested(monkeypatch) -> None:
     fake = FakeBackend()

@@ -758,6 +758,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         task_dir = WORKSPACE_DIR / task_id
         (task_dir / "notes.md").write_text(summary, encoding="utf-8")
+        archived_path = archive_note(title, summary)
+        if archived_path:
+            task["logs"].append(f"笔记已归档：{archived_path}")
         elapsed = finish_task_timing(task)
         task["result"] = {
             "title": title,
@@ -770,6 +773,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             "segment_count": len(segments),
             "transcript_quality": quality,
             "output_directory": str(task_dir),
+            "archived_path": str(archived_path) if archived_path else None,
             "processing_seconds": elapsed,
         }
         task.update(
@@ -817,6 +821,27 @@ def format_duration(seconds: float) -> str:
     if not seconds:
         return "未知"
     return format_timestamp(float(seconds))
+
+
+def archive_note(title: str, content: str) -> Path | None:
+    """把笔记归档到 workspace/notes/ 下（按标题命名，重名自动加序号），便于集中回顾。
+
+    返回归档路径；写入失败时返回 None（不影响任务本身）。
+    """
+    notes_root = WORKSPACE_DIR / "notes"
+    try:
+        notes_root.mkdir(parents=True, exist_ok=True)
+        safe = "".join(char for char in title if char.isalnum() or char in " -_").strip()
+        safe = (safe or "video-notes")[:80]
+        candidate = notes_root / f"{safe}.md"
+        index = 2
+        while candidate.exists():
+            candidate = notes_root / f"{safe}-{index}.md"
+            index += 1
+        candidate.write_text(content, encoding="utf-8")
+        return candidate
+    except OSError:
+        return None
 
 
 # MCP 端点：SSE 传输（/mcp/sse，供 Cherry Studio 等 MCP 客户端接入）

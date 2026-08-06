@@ -37,6 +37,27 @@ def test_image_route_requires_a_known_task() -> None:
     assert response.status_code in {404, 405}
 
 
+def test_archive_note_deduplicates_names(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+
+    first = main.archive_note("测试 视频", "# 一")
+    second = main.archive_note("测试 视频", "# 二")
+    third = main.archive_note("测试/视频:非法字符?", "# 三")
+
+    assert first.name == "测试 视频.md"
+    assert second.name == "测试 视频-2.md"
+    assert third.parent == tmp_path / "notes"
+    assert first.read_text(encoding="utf-8") == "# 一"
+    assert (tmp_path / "notes").is_dir()
+
+
+def test_archive_note_ignored_by_task_discovery(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.archive_note("某个视频", "# 笔记")
+
+    assert main.find_reusable_task("https://www.bilibili.com/video/BV1xx") is None
+
+
 def test_download_returns_markdown_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -33,7 +33,9 @@ mcp = FastMCP(
         "（视频处理通常需要 1-10 分钟）。\n"
         "LLM 配置与 B 站凭据支持保存到本机（save_llm_config / save_bilibili_credentials），"
         "保存后调用 summarize_video 时无需再传 api_key 或 bilibili_* 参数；"
-        "可通过 get_saved_config 查看保存状态。若用户已保存过配置，不要重复索要。"
+        "可通过 get_saved_config 查看保存状态。若用户已保存过配置，不要重复索要。\n"
+        "提交任务后请调用 wait_for_task 等待终态（每次最多等待 45 秒，可重复调用），"
+        "不要频繁轮询 get_task_status（仅在需要中间进度时用它）。"
     ),
 )
 
@@ -314,6 +316,47 @@ async def summarize_video(
     if data.get("reused_task_id"):
         hint += f"（复用任务 {data['reused_task_id']} 的转录）"
     return {"ok": True, "task_id": task_id, "hint": hint + "，请用 get_task_status 轮询进度。"}
+
+
+@mcp.tool()
+async def wait_for_task(
+    task_id: str,
+    timeout_seconds: int = 45,
+    include_markdown: bool = True,
+) -> dict[str, Any]:
+    """等待视频总结任务达到终态（completed / failed / cancelled），最长等待 timeout_seconds 秒。
+
+    任务仍在处理中时本工具会持续等待，到终态或超时才返回；
+    建议用它代替频繁轮询 get_task_status（一次等待最多 45 秒，可重复调用）。
+
+    Args:
+        task_id: summarize_video 返回的任务 ID。
+        timeout_seconds: 最长等待秒数（5-60）。
+        include_markdown: 为 False 时省略笔记正文。
+    """
+    timeout_seconds = max(5, min(timeout_seconds, 60))
+    backend = _get_backend()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    waited = 0.0
+    while True:
+        data = await backend.get_task(task_id)
+        if data.get("status") in {"completed", "failed", "cancelled"}:
+            break
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(2.0, remaining))
+        waited += min(2.0, remaining)
+    data["waited_seconds"] = round(waited, 1)
+    if data.get("status") not in {"completed", "failed", "cancelled"}:
+        data["hint"] = "任务仍在处理中，可再次调用 wait_for_task 继续等待。"
+    if not include_markdown and data.get("result") and "markdown" in data["result"]:
+        data = {
+            **data,
+            "result": {key: value for key, value in data["result"].items() if key != "markdown"},
+        }
+    return data
 
 
 @mcp.tool()

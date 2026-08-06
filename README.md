@@ -130,7 +130,7 @@ bash scripts/build_mac.sh
 
 ## 输出内容
 
-每个任务的文件保存在 `workspace/<task-id>/`，结果页会显示该目录的绝对路径。前端下载按钮只下载 `notes.md`；目录中还包含：
+每个任务的文件保存在 `workspace/<task-id>/`，结果页会显示该目录的绝对路径。**每次完成时笔记还会自动归档到 `workspace/notes/<视频标题>.md`**（重名自动加序号），便于集中回顾整理。前端下载按钮只下载 `notes.md`；目录中还包含：
 
 复用旧转录时仍会创建新的任务 ID，新 `notes.md` 写入新目录；旧任务的转录和笔记不会被覆盖。
 
@@ -156,12 +156,13 @@ bash scripts/build_mac.sh
 
 VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio、Codex 等 AI 客户端里直接输入视频链接生成笔记。**使用前请先启动 VideoToNo**（MCP 工具通过本地后端执行任务，Whisper 模型缓存、任务目录等全部复用本机资源，不会重复下载）。
 
-暴露 6 个工具：
+暴露 7 个工具：
 
 | 工具 | 说明 |
 |---|---|
 | `summarize_video` | 提交视频总结任务（视频链接；API Key / 模型 / B 站凭据均可省略，自动使用本机已保存的配置），返回任务 ID |
-| `get_task_status` | 查询任务进度；完成后 `result.markdown` 为笔记正文 |
+| `wait_for_task` | 等待任务达到终态（最长 45 秒，可重复调用），完成后返回笔记正文；用它代替频繁轮询 |
+| `get_task_status` | 查询任务中间进度（一般无需频繁调用） |
 | `list_whisper_models` | 查看 Whisper 模型的本地缓存状态 |
 | `save_llm_config` | 把大模型配置（Provider/模型/API Key）保存到本机，之后无需每次传入 |
 | `save_bilibili_credentials` | 把 B 站凭据（SESSDATA 等）保存到本机，处理 B 站视频时自动使用 |
