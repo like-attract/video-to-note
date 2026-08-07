@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Python = "",
     [switch]$SkipInstall
 )
@@ -17,6 +17,19 @@ $versionLine = Select-String -Path (Join-Path $projectRoot "launcher.py") -Patte
 if (-not $versionLine) { throw "无法从 launcher.py 读取 VERSION" }
 $version = $versionLine.Matches[0].Groups[1].Value
 Write-Host "打包版本: $version" -ForegroundColor Cyan
+
+# 版本元数据同步：从模板（scripts/version_info.txt.template）生成 version_info.txt，
+# 版本号取自 launcher.py 的 VERSION，避免 exe 属性页版本号滞后
+$versionInfoTemplate = Join-Path $projectRoot "scripts\version_info.txt.template"
+$versionInfoPath = Join-Path $projectRoot "scripts\version_info.txt"
+$templateText = Get-Content -LiteralPath $versionInfoTemplate -Raw -Encoding UTF8
+$cleanVersion = $version -replace '[^0-9.].*$', ''
+$versionParts = @(($cleanVersion -split '\.' | ForEach-Object { [int]$_ }) + @(0, 0, 0))[0..3]
+$fileVersion = $versionParts -join '.'
+$versionInfoText = $templateText `
+    -replace '__VERSION_PARTS__', ($versionParts -join ', ') `
+    -replace '__VERSION__', $fileVersion
+[System.IO.File]::WriteAllText($versionInfoPath, $versionInfoText, [System.Text.Encoding]::UTF8)
 
 if (-not $SkipInstall) {
     & $Python -m pip install --quiet pyinstaller
