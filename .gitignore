@@ -28,3 +28,5 @@ Thumbs.db
 
 # 开发文档（本地保留，不入库）
 /DEVELOPMENT.md
+# 旧图标备份（本地保留，不入库）
+/sources/icon_old.*
