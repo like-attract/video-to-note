@@ -40,7 +40,11 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败" }
 
 $target = Join-Path $projectRoot "dist\VideoToNo-$version-portable.exe"
 Copy-Item -LiteralPath (Join-Path $projectRoot "dist\VideoToNo.exe") -Destination $target -Force
+# 固定名副本：桌面快捷方式指向它，升级后无需改快捷方式目标
+$latest = Join-Path $projectRoot "dist\VideoToNo-portable.exe"
+Copy-Item -LiteralPath (Join-Path $projectRoot "dist\VideoToNo.exe") -Destination $latest -Force
 Remove-Item -LiteralPath (Join-Path $projectRoot "dist\VideoToNo.exe") -Force
 Write-Host ""
 Write-Host "构建完成: $target" -ForegroundColor Green
+Write-Host "固定名（快捷方式可指向此文件）: $latest" -ForegroundColor Cyan
 Write-Host "大小: $([math]::Round((Get-Item -LiteralPath $target).Length / 1MB, 1)) MB"

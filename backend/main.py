@@ -531,8 +531,8 @@ async def download_summary_markdown(task_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Markdown 笔记不存在")
 
     title = task["result"].get("title", "video-notes")
-    safe_name = "".join(char for char in title if char.isalnum() or char in " -_").strip()
-    encoded_name = quote(f"{safe_name or 'video-notes'}.md")
+    safe_name = _safe_filename(title)
+    encoded_name = quote(f"{safe_name}.md")
     return FileResponse(
         output_path,
         media_type="text/markdown; charset=utf-8",
@@ -823,6 +823,13 @@ def format_duration(seconds: float) -> str:
     return format_timestamp(float(seconds))
 
 
+def _safe_filename(value: str) -> str:
+    """把标题清洗为安全的文件名：只去掉 Windows 非法字符，保留中文标点。"""
+    invalid = set('\\/:*?"<>|')
+    cleaned = "".join(char for char in value if char not in invalid and ord(char) >= 32)
+    return (cleaned.strip() or "video-notes")[:80]
+
+
 def archive_note(title: str, content: str) -> Path | None:
     """把笔记归档到 workspace/notes/ 下（按标题命名，重名自动加序号），便于集中回顾。
 
@@ -831,8 +838,7 @@ def archive_note(title: str, content: str) -> Path | None:
     notes_root = WORKSPACE_DIR / "notes"
     try:
         notes_root.mkdir(parents=True, exist_ok=True)
-        safe = "".join(char for char in title if char.isalnum() or char in " -_").strip()
-        safe = (safe or "video-notes")[:80]
+        safe = _safe_filename(title)
         candidate = notes_root / f"{safe}.md"
         index = 2
         while candidate.exists():
