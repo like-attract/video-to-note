@@ -85,6 +85,9 @@ jobs:
     needs: build-windows
     runs-on: ubuntu-latest
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
