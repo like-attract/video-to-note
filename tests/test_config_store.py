@@ -53,14 +53,20 @@ def test_api_endpoints_roundtrip(monkeypatch, tmp_path) -> None:
     loaded = client.get("/api/llm-config").json()
     assert loaded["saved"] is True
     assert loaded["model_type"] == "qwen"
-    assert loaded["api_key"] == "sk-abc"
+    assert loaded["api_key_masked"] == "sk-a****"
+    assert "api_key" not in loaded
 
     saved_bili = client.post(
         "/api/bili-credentials", json={"sessdata": "s2", "bili_jct": "j2", "buvid3": "b2"}
     )
     assert saved_bili.status_code == 200
     loaded_bili = client.get("/api/bili-credentials").json()
-    assert loaded_bili == {"saved": True, "sessdata": "s2", "bili_jct": "j2", "buvid3": "b2"}
+    assert loaded_bili == {
+        "saved": True,
+        "sessdata_masked": "s2****",
+        "has_bili_jct": True,
+        "has_buvid3": True,
+    }
 
     assert client.delete("/api/llm-config").json() == {"saved": False}
     assert client.delete("/api/bili-credentials").json() == {"saved": False}

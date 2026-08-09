@@ -6,11 +6,13 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 前端页面和 API 由同一个 FastAPI 服务提供，默认地址为 <http://127.0.0.1:8000>。
 
-## What's New（v0.2.4）
+## VideoToNo 1.0.0
 
-- **MCP 轮询优化**：新增 `wait_for_task` 工具，一次等待最长 45 秒，任务完成才返回，AI 客户端不再高频轮询 `get_task_status`
-- **笔记自动归档**：任务完成后笔记自动保存到 `workspace/notes/<视频标题>.md`（重名自动加序号），历史笔记集中一处，便于回顾整理
-- 上一版（v0.2.2/0.2.3）：MCP 接入（Cherry Studio / Codex）、LLM 配置与 B 站凭据可保存本机、扫码窗口稳定、点评聚焦视频内容
+- 建立完整的“平台字幕 / B 站 AI 字幕 → Whisper 兜底 → LLM 笔记”处理链，并保留真实时间轴。
+- 支持结构化转录复用、断点继续、任务取消、处理计时以及 Markdown 笔记自动归档。
+- 提供多 Provider / 自定义模型、三种笔记风格、推理强度和可选截图设置。
+- 提供本地 Web 界面与 MCP 接入；`wait_for_task` 可等待任务终态，减少 AI 客户端频繁轮询。
+- 明确个人桌面工具的安全边界：服务仅应监听回环地址，保存到本机的 API Key 与 B 站凭据需要按敏感明文文件保护。
 
 ## 界面预览
 
@@ -35,7 +37,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 - 短转录直接生成笔记；只有长转录才按完整分段切块并整合，避免不必要的多次调用。
 - 截图默认关闭；启用后按指定间隔提取低清预览帧并作为笔记附件，不参与视觉理解。
 - 前端可直接下载 Markdown 笔记；完整转录、任务清单和可选截图保留在本地任务目录。
-- API Key 和 B 站 Cookie 不写入输出文件或日志，只随当前请求在内存中使用。API Key 可选「记住 LLM 配置」保存到本机浏览器（默认不保存）。
+- Web 界面不会把 API Key 写入浏览器存储，扫码登录取得的 Cookie 也只保留在内存中；只有显式调用 MCP 的保存工具时，凭据才会明文写入本机 `workspace/`。
 
 ## 支持范围
 
@@ -54,7 +56,12 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 1. 读取链接元数据，或接收本地媒体上传。
 2. 对在线视频优先查找中文或英文人工字幕，其次查找自动字幕。
-3. 如果字幕不存在、不可访问或无法解析，下载 `b## 环境要求
+3. 如果字幕不存在、不可访问或无法解析，下载 `bestaudio/best` 音轨并使用 `faster-whisper` 转写；本地文件直接进入转写流程。
+4. 保存字幕或转写分段及其真实起止时间。
+5. 长转录按分段边界切块，分别处理后整合为最终笔记。
+6. 根据设置提取预览帧，并输出 Markdown 笔记、转录文件和可选截图。
+
+## 环境要求
 
 - Windows + PowerShell（其他系统可手动运行 Uvicorn）、Python 3.11
 - 网络：可访问视频来源、Whisper 模型下载地址与所选大模型 API
@@ -67,31 +74,31 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 ```powershell
 py -3.11 -m venv .venv
-\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
 ## 启动
 
 ```powershell
-\start.ps1                  # 后台启动（自动检查端口与健康状态）
-\stop.ps1                   # 关闭
-\restart.ps1                # 重启
-\start.ps1 -Foreground      # 前台调试，Ctrl+C 退出
+.\start.ps1                  # 后台启动（自动检查端口与健康状态）
+.\stop.ps1                   # 关闭
+.\restart.ps1                # 重启
+.\start.ps1 -Foreground      # 前台调试，Ctrl+C 退出
 ```
 
 `HOST`、`PORT`、`RELOAD` 可写入根目录 `.env`。也可以手动运行：
 
 ```powershell
-\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 打开 <http://127.0.0.1:8000> 即可使用（前端与 API 共用此端口）；健康检查地址为 <http://127.0.0.1:8000/api/health>。
 
 ## 便携版（Windows exe）
 
-不需要 Python 环境，从 GitHub Releases 下载 `VideoToNo-0.1.0-portable.exe`（单文件）后双击即可运行：
+不需要 Python 环境。请先查看 [GitHub Releases 的最新版本](https://github.com/like-attract/video-to-note/releases/latest)；如果发布页附带 `VideoToNo-1.0.0-portable.exe`，下载后双击即可运行。仓库源码本身不代表发布页一定已有便携资产。
 
-- 自动在本地启动服务并打开默认浏览器，控制台窗口显示界面地址与工作目录；关闭窗口或按 `Ctrl+C` 退出。
+- 便携版没有控制台窗口，会自动在本机启动服务、打开默认浏览器并驻留系统托盘；通过托盘菜单打开界面、查看日志或退出。
 - 端口 8000 被占用时自动顺延；若服务已在运行，再次双击只会打开浏览器，不会重复启动。
 - 输出目录（视频、转录、截图、笔记）默认放在 exe 同目录的 `workspace\`；exe 所在目录不可写时回退到 `%LOCALAPPDATA%\VideoToNo\workspace`。可用环境变量 `VIDEOTONOTES_WORKSPACE`、`WHISPER_CACHE_DIR` 覆盖。
 - 首次使用 Whisper 转写时会联网下载模型到工作目录，请保持网络通畅。
@@ -102,17 +109,9 @@ py -3.11 -m venv .venv
 .\scripts\build_exe.ps1
 ```
 
-产物为 `dist\VideoToNo-<版本>-portable.exe`（约 115 MB），无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标来自 `sources/icon.ico`（由 `sources/icon_ico.png` 生成）。
+产物为 `dist\VideoToNo-1.0.0-portable.exe`，无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标来自 `sources/icon.ico`（由 `sources/icon_ico.png` 生成）。
 
-**macOS 构建**（需在 Mac 上执行，PyInstaller 不支持交叉编译；托盘与扫码登录均已适配）：
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r backend/requirements.txt
-bash scripts/build_mac.sh
-```
-
-产物为 `dist/VideoToNo-<版本>-macos.app`。首次运行需在「系统设置 → 隐私与安全性」中允许，或执行 `xattr -dr com.apple.quarantine <app>` 解除隔离。
+1.0 当前只发布和维护 Windows 便携版；macOS 暂不提供构建产物和兼容性承诺。
 
 ## 使用方法
 
@@ -123,7 +122,7 @@ bash scripts/build_mac.sh
 5. 粘贴视频链接，或切换到本地文件并上传媒体。
 6. `复用转录` 会自动查找同一链接的 `transcript.json`，失败页的“从断点继续”和结果页的“基于转录重新生成”也会显式复用旧任务；选择 `从头处理` 才会重新读取字幕、音频和 Whisper。
 7. B 站公开访问受限时，可临时填写 `SESSDATA`、`bili_jct` 和 `buvid3`。
-8. 点击开始生成，等待任务完成后预览或下载 Markdown。处理中可以取消任务，已生成的中间文件会保留以供后续复用。
+8. 点击开始生成，等待任务完成后预览或下载 Markdown。处理中可以请求取消；当前下载、Whisper 或模型调用返回后任务会停止，已生成的中间文件会保留以供后续复用。
 
 截图选项默认关闭。启用后，在线链接会额外下载低清视频并定时取帧，因此处理时间、网络流量和磁盘占用都会增加。当前截图仅作为附件插入笔记，不会发送给多模态模型进行画面分析。
 
@@ -144,12 +143,11 @@ bash scripts/build_mac.sh
 
 ## 隐私与安全
 
-- API Key 默认只随当前页面提交的请求发送到本机后端，不写入 `localStorage`、任务文件或日志；若勾选「记住 LLM 配置」，API Key 会随其他偏好一起写入本机浏览器的 `localStorage`（仅限本机使用，可随时取消勾选保存清除）。
-- B 站 Cookie 始终只保存在内存中，不落盘。
+- 本项目仅按个人桌面工具设计。服务必须保持监听 `127.0.0.1`；不要设置为 `0.0.0.0`、不要做公网端口映射，也不要部署到共享主机。当前应用没有面向公网所需的身份认证或租户隔离。
+- Web 界面中的 API Key 仅保留在当前页面内存，不写入浏览器存储；扫码登录取得的 Cookie 也只保留在当前进程内存中。显式调用 MCP 的保存工具后，相关凭据会以明文保存在本机 `workspace/` 配置文件中；它们并未由系统凭据库加密，请保护本机账户及工作目录，不要同步、分享或提交这些文件。读取配置的 API 只返回脱敏状态，不会把完整凭据传回前端。
 - 后端使用 API Key 调用所选大模型服务，转录文本会被发送给该服务。请根据对应服务的隐私政策决定是否处理敏感内容。
 - 媒体下载、字幕解析、Whisper 转写和文件生成均在本机完成；在线视频本身仍需从来源平台下载。
-- 服务默认只监听 `127.0.0.1`，请不要将它改为 `0.0.0.0` 后暴露到公网。当前项目没有身份认证、租户隔离或面向公网部署所需的防护。
-- Cookie 相当于登录凭据。仅在确有需要时填写，不要分享给他人；使用结束后关闭或刷新页面。
+- Cookie 相当于登录凭据，只能用于账号本身有权访问的内容。通过 MCP 保存的凭据不再需要时，请删除相应本地配置文件或调用本地配置清除 API。
 
 ## MCP 接入（在 AI 客户端中调用）
 
@@ -194,7 +192,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 从任意目录运行时，MCP server 会自动扫描 8000-8019 端口找到正在运行的 VideoToNo 服务；也可用 `VIDEOTONOTES_BACKEND_URL` 环境变量显式指定。
 
-> 隐私说明：`save_llm_config` / `save_bilibili_credentials` 保存的内容为明文，存放在本机工作目录（`workspace/llm_config.json`、`workspace/bili_credentials.json`，权限 600），仅本机可读，请勿分享这些文件；调用方未显式保存时，凭据不会落盘。工作目录整体已被 `.gitignore` 排除，这些文件不会进入 Git 仓库。
+> 隐私说明：`save_llm_config` / `save_bilibili_credentials` 保存的内容为明文，存放在本机工作目录（`workspace/llm_config.json`、`workspace/bili_credentials.json`）。程序会在系统支持时尝试限制文件权限，但实际访问控制仍取决于操作系统与本机账户配置；请勿分享这些文件。调用方未显式保存时，凭据不会落盘。工作目录整体已被 `.gitignore` 排除，这些文件不会进入 Git 仓库。
 
 ## 配置
 
@@ -205,10 +203,12 @@ HOST=127.0.0.1
 PORT=8000
 RELOAD=false
 MAX_UPLOAD_MB=500
+MAX_CONCURRENT_TASKS=1
+TASK_HISTORY_LIMIT=100
 # VIDEOTONOTES_WORKSPACE=D:\path\to\workspace
 ```
 
-为了保持个人桌面使用的安全边界，建议保留 `HOST=127.0.0.1`。前端只持久化模型选择、Whisper 设置和截图设置等非敏感偏好。
+为了保持个人桌面使用的安全边界，必须保留 `HOST=127.0.0.1`。`MAX_CONCURRENT_TASKS` 控制同时执行的任务数，默认 `1` 可避免多个 Whisper 任务争抢内存；其余任务会排队。`TASK_HISTORY_LIMIT` 控制启动时最多恢复多少条历史任务。通过 MCP 显式保存的 API Key 与 B 站凭据位于本地工作目录，请按敏感文件保护。
 
 ## 测试
 
@@ -276,9 +276,9 @@ VideoToNo/
 
 公开且可直接访问的视频通常不需要 Cookie。部分播放器可见的中文 AI 字幕也只会在登录态字幕接口中返回；未填写凭据时，程序会记录提示并回退到 Whisper。登录可见、访问受限或字幕接口受限的视频可能需要当前账号凭据，但 Cookie 不能绕过账号本身没有的权限。凭据过期后需重新获取，且平台策略变化仍可能导致解析失败。
 
-### 重启服务后为什么找不到任务？
+### 重启服务后任务会怎样？
 
-任务状态保存在后端进程内存中，服务重启后任务列表会清空。已经生成的文件仍保留在 `workspace/<task-id>/`；旧状态不能再通过 API 查询，但重新提交同一链接时可以自动复用其中的转录，并在新任务目录生成新笔记。
+1.0 会从 `workspace/<task-id>/task.json` 恢复最近的任务。已完成任务可继续预览和下载；上传后尚未开始的任务可重新提交；重启时仍在运行的任务会标记为失败，因为外部下载、Whisper 或大模型请求无法跨进程续跑，但已生成的字幕、转录和音频仍可供重新提交时复用。
 
 ### 为什么某个链接无法处理？
 

@@ -39,8 +39,12 @@ class FakeBackend:
         return {"saved": True}
 
 
-SAVED_LLM = {"saved": True, "model_type": "deepseek", "api_key": "sk-saved-key"}
-SAVED_BILI = {"saved": True, "sessdata": "sess-saved", "bili_jct": "jct", "buvid3": "buvid"}
+SAVED_LLM = {
+    "saved": True,
+    "model_type": "deepseek",
+    "api_key_masked": "sk-s****",
+}
+SAVED_BILI = {"saved": True, "sessdata_masked": "sess****"}
 
 
 @pytest.mark.asyncio
@@ -112,12 +116,8 @@ async def test_summarize_video_uses_saved_llm_config_when_api_key_omitted(
     await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx")
 
     payload = fake.captured["payload"]
-    assert payload["llm_config"] == {"model_type": "deepseek", "api_key": "sk-saved-key"}
-    assert payload["bilibili_cookie"] == {
-        "sessdata": "sess-saved",
-        "bili_jct": "jct",
-        "buvid3": "buvid",
-    }
+    assert payload["llm_config"] == {"model_type": "deepseek", "api_key": ""}
+    assert "bilibili_cookie" not in payload
 
 
 @pytest.mark.asyncio
@@ -132,7 +132,7 @@ async def test_summarize_video_explicit_args_override_saved_config(monkeypatch) 
     payload = fake.captured["payload"]
     assert payload["llm_config"] == {
         "model_type": "glm",
-        "api_key": "sk-saved-key",
+        "api_key": "",
         "model": "glm-5.2",
     }
 

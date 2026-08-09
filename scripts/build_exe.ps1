@@ -41,6 +41,7 @@ Set-Location -LiteralPath $projectRoot
     --name "VideoToNo" `
     --add-data "frontend;frontend" `
     --add-data "sources/icon.png;sources" `
+    --add-data "sources/icon.ico;sources" `
     --collect-data faster_whisper `
     --collect-submodules mcp.server `
     --collect-data mcp `

@@ -9,8 +9,6 @@ const PREFERENCE_KEYS = [
     'llm_model',
     'custom_base_url',
     'custom_model_name',
-    'save_api_key',
-    'llm_api_key',
     'whisper_model',
     'screenshot_interval',
     'include_screenshots',
@@ -29,7 +27,9 @@ const LEGACY_SENSITIVE_KEYS = [
     'openai_api_key',
     'qwen_api_key',
     'zhipu_api_key',
-    'moonshot_api_key'
+    'moonshot_api_key',
+    'save_api_key',
+    'llm_api_key'
 ];
 
 const PROVIDER_CONFIG = {
@@ -118,6 +118,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPreferences();
     bindEvents();
     toggleSourceType();
+    loadRecentTasks(true);
 });
 
 function bindEvents() {
@@ -129,6 +130,11 @@ function bindEvents() {
     byId('regenerateBtn').addEventListener('click', () => startSummary({ resumeCurrent: true }));
     byId('cancelTaskBtn').addEventListener('click', cancelCurrentTask);
     byId('downloadMdBtn').addEventListener('click', downloadSummary);
+    byId('refreshRecentTasksBtn').addEventListener('click', () => loadRecentTasks());
+    byId('recentTaskList').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-task-id]');
+        if (button) openRecentTask(button.dataset.taskId);
+    });
     byId('llmProvider').addEventListener('change', handleProviderChange);
     byId('llmModel').addEventListener('change', toggleCustomConfig);
     byId('sourceType').addEventListener('change', toggleSourceType);
@@ -156,6 +162,133 @@ function byId(id) {
     return document.getElementById(id);
 }
 
+const TASK_STATUS_LABELS = {
+    uploaded: '待处理',
+    pending: '准备中',
+    queued: '排队中',
+    processing: '处理中',
+    cancelling: '取消中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消'
+};
+
+async function loadRecentTasks(silent = false) {
+    const refreshButton = byId('refreshRecentTasksBtn');
+    refreshButton.disabled = true;
+    try {
+        const response = await fetch(`${API_BASE}/tasks`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取最近任务失败');
+        renderRecentTasks(Array.isArray(data.tasks) ? data.tasks : []);
+    } catch (error) {
+        if (!silent) showToast(error.message, 'error');
+    } finally {
+        refreshButton.disabled = false;
+    }
+}
+
+function renderRecentTasks(tasks) {
+    const panel = byId('recentTasksPanel');
+    const list = byId('recentTaskList');
+    list.replaceChildren();
+    panel.hidden = tasks.length === 0;
+    tasks.forEach((task) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'recent-task-item';
+        button.dataset.taskId = task.task_id;
+
+        const title = document.createElement('strong');
+        title.textContent = task.title || '未命名任务';
+        const meta = document.createElement('span');
+        const elapsed = formatElapsedCompact(task.elapsed_seconds);
+        const created = formatTaskDate(task.created_at);
+        meta.textContent = [created, elapsed].filter(Boolean).join(' · ');
+        const status = document.createElement('em');
+        status.className = `recent-task-status ${task.status || ''}`;
+        status.textContent = TASK_STATUS_LABELS[task.status] || task.step_name || '未知';
+
+        const text = document.createElement('span');
+        text.className = 'recent-task-text';
+        text.append(title, meta);
+        button.append(text, status);
+        list.append(button);
+    });
+}
+
+function formatTaskDate(value) {
+    const date = new Date(value || '');
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    }).format(date);
+}
+
+function formatElapsedCompact(value) {
+    const total = Math.max(0, Math.floor(Number(value) || 0));
+    if (!total) return '';
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    if (hours) return `${hours}时${minutes}分`;
+    if (minutes) return `${minutes}分${seconds}秒`;
+    return `${seconds}秒`;
+}
+
+async function openRecentTask(taskId) {
+    try {
+        const response = await fetch(`${API_BASE}/task/${encodeURIComponent(taskId)}`, {
+            cache: 'no-store'
+        });
+        const task = await readResponse(response, '读取任务失败');
+        resetTaskView();
+        currentTaskId = taskId;
+        if (task.source_url) {
+            byId('sourceType').value = 'url';
+            byId('videoUrl').value = task.source_url;
+        } else if (task.uploaded_filename) {
+            byId('sourceType').value = 'local';
+        }
+        toggleSourceType();
+        updateProgress(task.progress || 0);
+        updateStep(task.step || 0);
+        if (Array.isArray(task.logs)) updateLogs(task.logs);
+
+        if (task.status === 'completed') {
+            completeTask(task.result, task.elapsed_seconds);
+        } else if (['queued', 'processing', 'cancelling'].includes(task.status)) {
+            setTaskActive(true);
+            startElapsedTimer(task.elapsed_seconds);
+            setTaskState('processing', TASK_STATUS_LABELS[task.status]);
+            byId('networkState').textContent = task.status === 'cancelling'
+                ? '等待当前步骤停止'
+                : '已连接到运行任务';
+            schedulePoll(taskId, 0);
+        } else {
+            showStoppedTask(task);
+        }
+        byId('progressArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+        showToast(error.message, 'error');
+        loadRecentTasks(true);
+    }
+}
+
+function showStoppedTask(task) {
+    stopElapsedTimer(task.elapsed_seconds);
+    setTaskActive(false);
+    const cancelled = task.status === 'cancelled';
+    setTaskState(cancelled ? 'cancelled' : 'failed', TASK_STATUS_LABELS[task.status] || '已停止');
+    byId('taskError').hidden = false;
+    byId('taskErrorMessage').textContent = task.error || (cancelled
+        ? '任务已取消；可以复用已有中间文件重新生成。'
+        : '任务未完成；可以从已有中间文件继续。');
+    byId('retryBtn').disabled = false;
+    byId('restartBtn').disabled = false;
+    byId('networkState').textContent = '历史任务';
+    setSubmitButton(false, '重新提交');
+}
+
 function removeLegacySecrets() {
     LEGACY_SENSITIVE_KEYS.forEach((key) => localStorage.removeItem(key));
 }
@@ -167,11 +300,6 @@ function loadPreferences() {
     byId('customBaseUrl').value = localStorage.getItem('custom_base_url') || '';
     byId('customModelName').value = localStorage.getItem('custom_model_name') || '';
     populateModelOptions(localStorage.getItem('llm_model_id'));
-    byId('saveApiKey').checked = localStorage.getItem('save_api_key') === 'true';
-    if (byId('saveApiKey').checked) {
-        const savedApiKey = localStorage.getItem('llm_api_key');
-        if (savedApiKey) byId('apiKey').value = savedApiKey;
-    }
     byId('whisperModel').value = localStorage.getItem('whisper_model') || 'base';
     snapshotWhisperLabels();
     refreshWhisperModelHints();
@@ -206,17 +334,6 @@ function applyTheme(theme) {
     });
 }
 
-function persistApiKeyIfRequested() {
-    const remember = byId('saveApiKey').checked;
-    localStorage.setItem('save_api_key', String(remember));
-    if (remember) {
-        const apiKey = byId('apiKey').value.trim();
-        if (apiKey) localStorage.setItem('llm_api_key', apiKey);
-    } else {
-        localStorage.removeItem('llm_api_key');
-    }
-}
-
 function savePreferences() {
     const interval = normalizeScreenshotInterval();
     localStorage.setItem('llm_provider', byId('llmProvider').value);
@@ -234,11 +351,7 @@ function savePreferences() {
         'processing_mode',
         document.querySelector('input[name="processingMode"]:checked')?.value || 'reuse'
     );
-    persistApiKeyIfRequested();
-    showToast(
-        byId('saveApiKey').checked ? '偏好与 LLM 配置（含 API Key）已保存' : '非敏感偏好已保存',
-        'success'
-    );
+    showToast('非敏感偏好已保存', 'success');
 }
 
 function resetPreferences() {
@@ -593,8 +706,8 @@ async function startSummary(options = {}) {
         const data = await readResponse(response, '提交任务失败');
 
         if (!data.task_id) throw new Error('后端未返回任务 ID');
-        persistApiKeyIfRequested();
         currentTaskId = data.task_id;
+        loadRecentTasks(true);
         if (data.reused_task_id) addLog(`已复用任务 ${data.reused_task_id} 的中间结果`, 'success');
         addLog(`任务已创建：${currentTaskId}`, 'success');
         setTaskActive(true);
@@ -815,13 +928,14 @@ function completeTask(result, elapsedSeconds = null) {
     if (!showResult(result)) return;
     setTaskActive(false);
     updateProgress(100);
-    updateStep(6);
+    updateStep(7);
     byId('regenerateBtn').disabled = false;
     setTaskState('completed', '已完成');
     byId('networkState').textContent = '任务完成';
     addLog('视频笔记已生成', 'success');
     setSubmitButton(false, '再次生成');
     showToast('视频笔记已生成', 'success');
+    loadRecentTasks(true);
 }
 
 function failTask(message, elapsedSeconds = null) {
@@ -835,6 +949,7 @@ function failTask(message, elapsedSeconds = null) {
     addLog(`任务失败：${message}`, 'error');
     setSubmitButton(false, '重新提交');
     showToast(message, 'error');
+    loadRecentTasks(true);
 }
 
 async function cancelCurrentTask() {
@@ -850,16 +965,23 @@ async function cancelCurrentTask() {
             method: 'POST'
         });
         const data = await readResponse(response, '取消任务失败');
-        markTaskCancelled(
-            '任务已取消；已生成的中间文件仍保留在工作目录',
-            data.elapsed_seconds
-        );
+        if (data.status === 'cancelled') {
+            markTaskCancelled(
+                '任务已取消；已生成的中间文件仍保留在工作目录',
+                data.elapsed_seconds
+            );
+        } else {
+            setTaskState('processing', '取消中');
+            byId('networkState').textContent = '等待当前步骤停止';
+            addLog('取消请求已发送；当前下载、转写或模型调用返回后将停止', 'warning');
+            showToast('取消请求已发送', 'info');
+        }
     } catch (error) {
         showToast(`取消失败：${error.message}`, 'error');
         button.disabled = false;
     } finally {
         isCancelling = false;
-        button.textContent = '取消任务';
+        button.textContent = isTaskActive ? '取消请求已发送' : '取消任务';
     }
 }
 
@@ -873,6 +995,7 @@ function markTaskCancelled(message, elapsedSeconds = null) {
     addLog(message, 'warning');
     setSubmitButton(false, '重新开始');
     showToast('任务已取消', 'info');
+    loadRecentTasks(true);
 }
 
 function setSubmitting(active, label = '开始生成') {
@@ -929,7 +1052,7 @@ function updateStep(rawStep) {
     const activeStep = Number(rawStep) || 0;
     document.querySelectorAll('.progress-steps .step').forEach((step, index) => {
         const number = index + 1;
-        step.classList.toggle('completed', number < activeStep || activeStep > 5);
+        step.classList.toggle('completed', number < activeStep || activeStep > 6);
         step.classList.toggle('active', number === activeStep);
     });
 }
@@ -973,13 +1096,7 @@ function showResult(result) {
     currentMarkdown = result.markdown;
     currentHtml = replaceImagePaths(result.markdown);
     const content = byId('markdownContent');
-    if (typeof marked !== 'undefined') {
-        content.innerHTML = marked.parse(currentHtml);
-    } else {
-        const pre = document.createElement('pre');
-        pre.textContent = currentHtml;
-        content.replaceChildren(pre);
-    }
+    content.innerHTML = renderMarkdown(currentHtml);
     byId('resultArea').hidden = false;
     byId('downloadMdBtn').disabled = false;
     const outputDirectory = typeof result.output_directory === 'string'
@@ -1001,6 +1118,20 @@ function replaceImagePaths(markdown) {
         /!\[([^\]]*)\]\(\.\/images\/([^)]+)\)/g,
         `![$1](${API_BASE}/image/${encodeURIComponent(currentTaskId)}/$2)`
     );
+}
+
+function renderMarkdown(markdown) {
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+        return `<pre>${escapeHtml(markdown)}</pre>`;
+    }
+    return DOMPurify.sanitize(marked.parse(markdown), {
+        USE_PROFILES: { html: true },
+        FORBID_TAGS: [
+            'button', 'embed', 'form', 'iframe', 'input', 'math', 'object',
+            'option', 'select', 'style', 'svg', 'textarea'
+        ],
+        FORBID_ATTR: ['style']
+    });
 }
 
 async function downloadSummary() {
@@ -1056,7 +1187,7 @@ function triggerBlobDownload(blob, extension) {
 }
 
 function convertToHtml(markdown) {
-    const body = typeof marked !== 'undefined' ? marked.parse(markdown) : `<pre>${escapeHtml(markdown)}</pre>`;
+    const body = renderMarkdown(markdown);
     return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频笔记</title></head><body><main>${body}</main></body></html>`;
 }
 

@@ -6,11 +6,13 @@ VideoToNo is a local video-to-notes tool intended for personal use. It reads a v
 
 The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 
-## What's New (v0.2.4)
+## VideoToNo 1.0.0
 
-- **MCP polling improvement**: new `wait_for_task` tool waits up to 45 seconds and returns only when the task finishes — AI clients no longer poll `get_task_status` aggressively
-- **Auto-archived notes**: finished notes are saved to `workspace/notes/<video-title>.md` (auto-numbered on duplicates) so all history is easy to review
-- Previous releases (v0.2.2/0.2.3): MCP integration (Cherry Studio / Codex), local LLM config & Bilibili credentials storage, stable scan-to-login window, content-focused analysis
+- Establishes a complete platform captions / Bilibili AI captions → Whisper fallback → LLM notes pipeline with real timestamps.
+- Supports reusable structured transcripts, resume workflows, task cancellation, elapsed-time reporting, and automatic Markdown note archiving.
+- Provides multiple providers, custom model IDs, three note styles, reasoning-effort controls, and optional screenshots.
+- Includes a local web interface and MCP integration; `wait_for_task` waits for terminal task states without aggressive polling.
+- Defines the personal-desktop security boundary: listen only on loopback and treat locally saved API keys and Bilibili credentials as sensitive plaintext.
 
 ## Screenshots
 
@@ -35,7 +37,7 @@ The web interface and API are served by the same FastAPI process at <http://127.
 - Sends short transcripts directly to the model and only uses chunking plus integration for long transcripts.
 - Keeps screenshots disabled by default. When enabled, low-resolution preview frames are attached to the notes but are not analyzed by a vision model.
 - Downloads the Markdown note directly while keeping transcripts and optional images in the local task directory.
-- Uses API keys and Bilibili cookies only for the current request; they are not written to persistent browser storage or task output files.
+- Never writes API keys or Bilibili cookies to note output or logs. The web UI keeps them in memory only, including cookies obtained by QR sign-in; credentials are written as plaintext under `workspace/` only when an MCP save tool is called explicitly.
 
 ## Supported inputs
 
@@ -73,31 +75,31 @@ Platform APIs, sign-in requirements, and anti-automation measures change over ti
 
 ```powershell
 py -3.11 -m venv .venv
-\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
 ## Running the app
 
 ```powershell
-\start.ps1                  # Start in the background (checks port and health)
-\stop.ps1                   # Stop
-\restart.ps1                # Restart
-\start.ps1 -Foreground      # Foreground debugging; stop with Ctrl+C
+.\start.ps1                  # Start in the background (checks port and health)
+.\stop.ps1                   # Stop
+.\restart.ps1                # Restart
+.\start.ps1 -Foreground      # Foreground debugging; stop with Ctrl+C
 ```
 
 `HOST`, `PORT`, and `RELOAD` can be set in the project-root `.env`. Or run manually:
 
 ```powershell
-\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 Open <http://127.0.0.1:8000> to use the app (frontend and API share this port); the health endpoint is <http://127.0.0.1:8000/api/health>.
 
 ## Portable build (Windows exe)
 
-No Python installation is required: download `VideoToNo-0.1.0-portable.exe` (single file) from GitHub Releases and double-click it:
+No Python installation is required. Check the [latest GitHub Release](https://github.com/like-attract/video-to-note/releases/latest) first. If that release includes `VideoToNo-1.0.0-portable.exe`, download it and double-click it. The source repository itself does not imply that a portable asset is currently available.
 
-- It starts the local backend automatically, opens the default browser, and shows the URL and workspace in a console window; close the window or press `Ctrl+C` to exit.
+- The portable build has no console window. It starts the local backend, opens the default browser, and remains in the system tray; use the tray menu to open the interface, view logs, or exit.
 - If port 8000 is busy it picks the next free port; if the service is already running, a second launch just opens the browser.
 - Outputs (videos, transcripts, screenshots, notes) go to `workspace\` next to the exe by default; when the exe directory is not writable it falls back to `%LOCALAPPDATA%\VideoToNo\workspace`. Override with the `VIDEOTONOTES_WORKSPACE` / `WHISPER_CACHE_DIR` environment variables.
 - The first Whisper transcription downloads the model into the workspace, so network access is required.
@@ -108,7 +110,9 @@ To build it yourself (needs Python 3.11 with installed dependencies):
 .\scripts\build_exe.ps1
 ```
 
-The artifact is `dist\VideoToNo-<version>-portable.exe` (~110 MB). The app icon is generated from `sources/icon_ico.png` (`sources/icon.ico`).
+The artifact is `dist\VideoToNo-1.0.0-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app icon is generated from `sources/icon_ico.png` (`sources/icon.ico`).
+
+Version 1.0 currently ships and maintains only the Windows portable build; no macOS artifact or compatibility guarantee is provided.
 
 ## Usage
 
@@ -119,7 +123,7 @@ The artifact is `dist\VideoToNo-<version>-portable.exe` (~110 MB). The app icon 
 5. Paste a video URL, or switch to local-file mode and upload media.
 6. Reuse mode finds an existing `transcript.json` for the same URL. The failure and result actions can explicitly resume an old task; restart mode repeats caption, audio, and Whisper processing.
 7. If a Bilibili video cannot be accessed publicly, optionally enter `SESSDATA`, `bili_jct`, and `buvid3` for the current session.
-8. Start the job, then preview or download the Markdown note. Active jobs can be cancelled while preserving completed intermediate files for later reuse.
+8. Start the job, then preview or download the Markdown note. A cancellation request takes effect after the current download, Whisper, or model call returns, while preserving completed intermediate files for later reuse.
 
 Screenshots are disabled by default. Enabling them makes online jobs download an additional low-resolution video and extract frames at the selected interval, increasing runtime, bandwidth, and disk use. Screenshots are currently attached as reference files only; they are not sent to a multimodal model for visual analysis.
 
@@ -140,11 +144,11 @@ For longer media, the application stops before the language-model call when both
 
 ## Privacy and security
 
-- API keys and Bilibili cookies are sent only with the current request to the local backend. They are not stored in `localStorage`, task files, or logs.
+- This project is designed only as a personal desktop tool. Keep the service bound to `127.0.0.1`; do not bind it to `0.0.0.0`, forward its port to the internet, or deploy it on a shared host. It has no authentication or tenant isolation for public deployment.
+- The web UI keeps an API key only in the current page's memory and does not write it to browser storage; cookies obtained by QR sign-in remain in process memory. Calling an MCP save tool explicitly persists credentials as plaintext files under `workspace/`; they are not protected by an operating-system credential vault. Protect the local account and workspace, and never sync, share, or commit these files. Configuration read APIs return masked status only, never complete credentials.
 - The backend uses the API key to call the selected language-model service, so transcript text is sent to that provider. Review the provider's privacy policy before processing sensitive material.
 - Media download, subtitle parsing, Whisper transcription, and file generation run locally. Online media still has to be downloaded from its source platform.
-- The server listens on `127.0.0.1` by default. Do not switch it to `0.0.0.0` and expose it to the public internet. The application has no authentication, tenant isolation, or public-deployment hardening.
-- Treat cookies as login credentials. Enter them only when needed, never share them, and close or refresh the page after use.
+- Treat cookies as login credentials that can access only what the account is already permitted to view. Remove MCP-saved credentials through the local clear-config API or delete the corresponding local configuration files when they are no longer needed.
 
 ## MCP integration (call from AI clients)
 
@@ -188,7 +192,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 When run from any directory, the MCP server auto-scans ports 8000-8019 for a running VideoToNo instance; set `VIDEOTONOTES_BACKEND_URL` to override.
 
-> Privacy: `save_llm_config` / `save_bilibili_credentials` store plaintext files in the local workspace (`workspace/llm_config.json`, `workspace/bili_credentials.json`, mode 600), readable only on this machine — don't share them. Nothing is persisted unless you explicitly save.
+> Privacy: `save_llm_config` / `save_bilibili_credentials` store plaintext files in the local workspace (`workspace/llm_config.json`, `workspace/bili_credentials.json`). The application attempts to restrict file permissions where the operating system supports it, but effective access control still depends on the OS and local account configuration. Do not share these files. Nothing is persisted unless you explicitly save.
 
 ## Configuration
 
@@ -199,10 +203,12 @@ HOST=127.0.0.1
 PORT=8000
 RELOAD=false
 MAX_UPLOAD_MB=500
+MAX_CONCURRENT_TASKS=1
+TASK_HISTORY_LIMIT=100
 # VIDEOTONOTES_WORKSPACE=D:\path\to\workspace
 ```
 
-Keep `HOST=127.0.0.1` to preserve the intended personal-desktop security boundary. The frontend persists only non-sensitive preferences such as model selection, Whisper settings, and screenshot settings.
+Keep `HOST=127.0.0.1` to preserve the required personal-desktop security boundary. `MAX_CONCURRENT_TASKS` defaults to `1` so concurrent Whisper jobs do not compete for memory; additional jobs wait in the queue. `TASK_HISTORY_LIMIT` controls how many recent jobs are restored at startup. API keys and Bilibili credentials explicitly saved through MCP remain sensitive plaintext files in the local workspace.
 
 ## Tests
 
@@ -272,7 +278,7 @@ Publicly accessible videos usually do not require one. Videos or captions restri
 
 ### Why did my job disappear after restarting the server?
 
-Job status is held in process memory. Restarting the server clears the job registry. Generated files normally remain under `workspace/<task-id>/`, but the old job can no longer be queried through the API or downloaded through its button. Retrieve the files manually or submit the job again.
+VideoToNo 1.0 restores recent jobs from `workspace/<task-id>/task.json`. Completed notes remain available for preview and download, and uploaded jobs that have not started can be submitted again. A job that was running during restart is marked failed because external downloads, Whisper, and LLM requests cannot resume across processes; its existing subtitles, transcript, and audio remain available for reuse when the source is submitted again.
 
 ### Why can a particular URL not be processed?
 

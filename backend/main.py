@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import ipaddress
 import json
 import os
 import shutil
@@ -15,9 +16,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiofiles
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
@@ -44,7 +44,10 @@ WHISPER_CACHE_DIR = Path(
     os.getenv("WHISPER_CACHE_DIR", str(WORKSPACE_DIR / "_model_cache"))
 ).resolve()
 FRONTEND_DIR = BASE_DIR / "frontend"
+FAVICON_PATH = BASE_DIR / "sources" / "icon.ico"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
+MAX_CONCURRENT_TASKS = max(1, int(os.getenv("MAX_CONCURRENT_TASKS", "1")))
+TASK_HISTORY_LIMIT = max(10, int(os.getenv("TASK_HISTORY_LIMIT", "100")))
 ALLOWED_MEDIA_SUFFIXES = {
     ".mp3",
     ".m4a",
@@ -64,14 +67,39 @@ DOUYIN_HINT = (
     "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
 )
 
-app = FastAPI(title="VideoToNotes API", version="3.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type"],
-)
+app = FastAPI(title="VideoToNo API", version="1.0.0")
+
+
+def is_loopback_client(host: str | None) -> bool:
+    if not host or host == "testclient":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host.lower() == "localhost"
+    if address.is_loopback:
+        return True
+    return bool(address.version == 6 and address.ipv4_mapped and address.ipv4_mapped.is_loopback)
+
+
+@app.middleware("http")
+async def enforce_local_security(request: Request, call_next):
+    """VideoToNo is a desktop app; reject remote clients even after a bad HOST override."""
+    client_host = request.client.host if request.client else None
+    if not is_loopback_client(client_host):
+        return JSONResponse(status_code=403, content={"detail": "VideoToNo 仅允许本机访问"})
+    response = await call_next(request)
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return response
 
 video_processor = VideoProcessor(WORKSPACE_DIR)
 transcriber = WhisperTranscriber(WHISPER_CACHE_DIR)
@@ -79,6 +107,7 @@ bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
+task_slots = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 
 class BilibiliCookie(BaseModel):
@@ -102,7 +131,7 @@ class BiliCredentialsPayload(BaseModel):
 
 class LLMConfig(BaseModel):
     model_type: str = "deepseek"
-    api_key: SecretStr
+    api_key: SecretStr = SecretStr("")
     base_url: str | None = None
     model: str | None = None
     custom_base_url: str | None = None
@@ -125,7 +154,7 @@ class SummarizeRequest(BaseModel):
     llm_config: LLMConfig
 
 
-def new_task(status: str = "pending") -> dict[str, Any]:
+def new_task(status: str = "pending", task_id: str | None = None) -> dict[str, Any]:
     return {
         "status": status,
         "step": 0,
@@ -137,6 +166,8 @@ def new_task(status: str = "pending") -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "finished_at": None,
         "elapsed_seconds": 0.0,
+        "_task_id": task_id,
+        "_cancel_requested": False,
         "_started_monotonic": time.monotonic(),
     }
 
@@ -160,6 +191,9 @@ def set_progress(
 ) -> None:
     task.update(step=step, step_name=name, progress=progress)
     task["logs"].append(message)
+    task_id = task.get("_task_id")
+    if task_id:
+        persist_task_runtime(str(task_id))
 
 
 def task_directory(task_id: str) -> Path:
@@ -167,6 +201,45 @@ def task_directory(task_id: str) -> Path:
     if candidate.parent != WORKSPACE_DIR:
         raise ValueError("非法任务 ID")
     return candidate
+
+
+def persist_task_runtime(task_id: str) -> None:
+    """Persist non-secret runtime state atomically beside task artifacts."""
+    task = tasks.get(task_id)
+    if not task:
+        return
+    directory = task_directory(task_id)
+    if not directory.is_dir():
+        return
+    path = directory / "task.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError, TypeError):
+        payload = {"task_id": task_id}
+    result = task.get("result")
+    result_metadata = None
+    if isinstance(result, dict):
+        result_metadata = {key: value for key, value in result.items() if key != "markdown"}
+    payload["runtime"] = {
+        "status": task.get("status"),
+        "step": task.get("step", 0),
+        "step_name": task.get("step_name", ""),
+        "progress": task.get("progress", 0),
+        "logs": list(task.get("logs", []))[-200:],
+        "error": task.get("error"),
+        "created_at": task.get("created_at"),
+        "finished_at": task.get("finished_at"),
+        "elapsed_seconds": task_elapsed_seconds(task),
+        "result": result_metadata,
+    }
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def raise_if_cancel_requested(task: dict[str, Any]) -> None:
+    if task.get("_cancel_requested"):
+        raise asyncio.CancelledError
 
 
 def normalize_source_url(value: str) -> str:
@@ -295,16 +368,43 @@ def update_task_manifest(task_id: str, info: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def read_task_manifest(task_id: str) -> dict[str, Any]:
+    path = task_directory(task_id) / "task.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def write_task_manifest(task_id: str, request: SummarizeRequest, reused_task_id: str | None) -> None:
+    uploaded_filename = tasks.get(task_id, {}).get("uploaded_filename")
     payload = {
         "task_id": task_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source_url": request.video_url or None,
-        "normalized_source_url": normalize_source_url(request.video_url) if request.video_url else None,
+        "source_url": request.video_url if request.video_url and not uploaded_filename else None,
+        "normalized_source_url": (
+            normalize_source_url(request.video_url)
+            if request.video_url and not uploaded_filename
+            else None
+        ),
+        "uploaded_filename": uploaded_filename,
         "processing_mode": request.processing_mode,
         "summary_style": request.summary_style,
         "reasoning_effort": request.reasoning_effort,
         "reused_task_id": reused_task_id,
+    }
+    (task_directory(task_id) / "task.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def write_upload_manifest(task_id: str, filename: str) -> None:
+    payload = {
+        "task_id": task_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_url": None,
+        "uploaded_filename": filename,
     }
     (task_directory(task_id) / "task.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -335,7 +435,7 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
         if not existing or existing.get("status") != "uploaded":
             raise HTTPException(status_code=400, detail="上传任务不存在或已经处理")
         uploaded_path = existing.get("uploaded_file_path")
-        tasks[task_id] = new_task()
+        tasks[task_id] = new_task(task_id=task_id)
         tasks[task_id]["uploaded_file_path"] = uploaded_path
         tasks[task_id]["uploaded_filename"] = existing.get("uploaded_filename")
     else:
@@ -346,7 +446,7 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         elif not reused_task_id:
             raise HTTPException(status_code=422, detail="请提供视频链接、上传文件或可继续的任务")
-        tasks[task_id] = new_task()
+        tasks[task_id] = new_task(task_id=task_id)
         task_directory(task_id).mkdir(parents=True, exist_ok=False)
 
     tasks[task_id]["resume_task_id"] = reused_task_id
@@ -357,21 +457,58 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
             tasks[task_id]["uploaded_filename"] = old_task.get("uploaded_filename")
         tasks[task_id]["logs"].append(f"将从任务 {reused_task_id} 复用已有产物")
     write_task_manifest(task_id, request, reused_task_id)
+    persist_task_runtime(task_id)
 
-    job = asyncio.create_task(process_video_task(task_id, request))
+    job = asyncio.create_task(run_queued_video_task(task_id, request))
     running_jobs[task_id] = job
     job.add_done_callback(lambda _job, current_id=task_id: running_jobs.pop(current_id, None))
     return {"task_id": task_id, "reused_task_id": reused_task_id}
+
+
+def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    payload = {key: value for key, value in task.items() if not key.startswith("_")}
+    payload["elapsed_seconds"] = task_elapsed_seconds(task)
+    manifest = read_task_manifest(task_id)
+    source_url = str(manifest.get("source_url") or "")
+    payload["source_url"] = source_url if source_url.startswith(("http://", "https://")) else None
+    payload["uploaded_filename"] = payload.get("uploaded_filename") or manifest.get(
+        "uploaded_filename"
+    )
+    return payload
+
+
+@app.get("/api/tasks")
+async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
+    ordered = sorted(
+        tasks.items(),
+        key=lambda item: str(item[1].get("created_at") or ""),
+        reverse=True,
+    )[:20]
+    summaries: list[dict[str, Any]] = []
+    for task_id, task in ordered:
+        manifest = read_task_manifest(task_id)
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        summaries.append(
+            {
+                "task_id": task_id,
+                "status": task.get("status"),
+                "step_name": task.get("step_name"),
+                "progress": task.get("progress", 0),
+                "title": result.get("title") or manifest.get("title") or manifest.get("uploaded_filename") or "未命名任务",
+                "created_at": task.get("created_at"),
+                "finished_at": task.get("finished_at"),
+                "elapsed_seconds": task_elapsed_seconds(task),
+            }
+        )
+    return {"tasks": summaries}
 
 
 @app.get("/api/task/{task_id}")
 async def get_task_status(task_id: str) -> dict[str, Any]:
     task = tasks.get(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在，服务重启后内存任务会清空")
-    payload = {key: value for key, value in task.items() if not key.startswith("_")}
-    payload["elapsed_seconds"] = task_elapsed_seconds(task)
-    return payload
+        raise HTTPException(status_code=404, detail="任务不存在或已被清理")
+    return task_status_payload(task_id, task)
 
 
 @app.get("/api/whisper-models")
@@ -389,11 +526,18 @@ async def whisper_models_status() -> dict[str, Any]:
 
 @app.get("/api/llm-config")
 async def get_llm_config() -> dict[str, Any]:
-    """读取本机保存的 LLM 配置（明文返回；仅监听 127.0.0.1，供 MCP 等本地调用方使用）。"""
+    """Return saved configuration metadata without exposing the API key."""
     config = config_store.load_llm_config()
     if not config:
         return {"saved": False}
-    return {"saved": True, **config}
+    api_key = str(config.get("api_key") or "")
+    return {
+        "saved": True,
+        "model_type": config.get("model_type"),
+        "model": config.get("model"),
+        "base_url": config.get("base_url"),
+        "api_key_masked": f"{api_key[:4]}****" if api_key else None,
+    }
 
 
 @app.post("/api/llm-config")
@@ -418,11 +562,17 @@ async def clear_llm_config() -> dict[str, bool]:
 
 @app.get("/api/bili-credentials")
 async def get_bili_credentials() -> dict[str, Any]:
-    """读取本机保存的 B 站凭据状态（明文返回；供 MCP 等本地调用方使用）。"""
+    """Return saved Bilibili credential status without exposing cookie values."""
     credentials = config_store.load_bili_credentials()
     if not credentials:
         return {"saved": False}
-    return {"saved": True, **credentials}
+    sessdata = str(credentials.get("sessdata") or "")
+    return {
+        "saved": True,
+        "sessdata_masked": f"{sessdata[:4]}****" if sessdata else None,
+        "has_bili_jct": bool(credentials.get("bili_jct")),
+        "has_buvid3": bool(credentials.get("buvid3")),
+    }
 
 
 @app.post("/api/bili-credentials")
@@ -443,6 +593,7 @@ async def clear_bili_credentials() -> dict[str, bool]:
 async def health_check() -> dict[str, Any]:
     return {
         "status": "ok",
+        "service": "VideoToNo",
         "version": app.version,
         "dependencies": {
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
@@ -492,12 +643,14 @@ async def upload_video(file: UploadFile = File(...)) -> dict[str, str]:
     finally:
         await file.close()
 
-    tasks[task_id] = new_task(status="uploaded")
+    tasks[task_id] = new_task(status="uploaded", task_id=task_id)
     tasks[task_id].update(
         uploaded_file_path=str(file_path),
         uploaded_filename=filename,
         logs=[f"文件已上传：{filename}"],
     )
+    write_upload_manifest(task_id, filename)
+    persist_task_runtime(task_id)
     return {"task_id": task_id, "file_path": str(file_path), "filename": filename}
 
 
@@ -549,33 +702,60 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     if task["status"] in {"completed", "failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="任务已经结束")
 
-    elapsed = finish_task_timing(task)
-    task.update(status="cancelled", step_name="已取消", error=None)
-    task["logs"].append("用户已取消任务；已生成的中间文件将保留")
-    job = running_jobs.get(task_id)
-    if job and not job.done():
-        job.cancel()
-    return {"cancelled": True, "status": task["status"], "elapsed_seconds": elapsed}
+    task["_cancel_requested"] = True
+    task.update(status="cancelling", step_name="取消中", error=None)
+    task["logs"].append("已收到取消请求；当前阻塞步骤结束后将停止任务")
+    persist_task_runtime(task_id)
+    return {
+        "cancelled": False,
+        "status": task["status"],
+        "elapsed_seconds": task_elapsed_seconds(task),
+    }
 
 
 @app.delete("/api/task/{task_id}")
 async def delete_task(task_id: str) -> dict[str, bool]:
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
-    job = running_jobs.pop(task_id, None)
+    job = running_jobs.get(task_id)
     if job and not job.done():
-        job.cancel()
+        raise HTTPException(status_code=409, detail="任务仍在运行，请先取消并等待其停止")
+    running_jobs.pop(task_id, None)
     await video_processor.cleanup(task_id)
     tasks.pop(task_id, None)
     return {"deleted": True}
 
 
+async def run_queued_video_task(task_id: str, request: SummarizeRequest) -> None:
+    task = tasks[task_id]
+    task.update(status="queued", step_name="等待执行", progress=0)
+    task["logs"].append(
+        f"任务已进入队列；当前最多同时处理 {MAX_CONCURRENT_TASKS} 个任务"
+    )
+    persist_task_runtime(task_id)
+    try:
+        async with task_slots:
+            raise_if_cancel_requested(task)
+            await process_video_task(task_id, request)
+    except asyncio.CancelledError:
+        finish_task_timing(task)
+        task.update(status="cancelled", step_name="已取消", error=None)
+        task["logs"].append("任务已取消；已生成的中间文件将保留")
+        persist_task_runtime(task_id)
+
+
 async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     task = tasks[task_id]
     task["status"] = "processing"
-    cookie = request.bilibili_cookie.model_dump() if request.bilibili_cookie else None
+    persist_task_runtime(task_id)
+    cookie = (
+        request.bilibili_cookie.model_dump()
+        if request.bilibili_cookie
+        else config_store.load_bili_credentials()
+    )
 
     try:
+        raise_if_cancel_requested(task)
         resume_task_id = task.get("resume_task_id")
         resume_dir = task_directory(resume_task_id) if resume_task_id else None
         source_url = request.video_url or (source_url_from_task(resume_dir) if resume_dir else None)
@@ -597,6 +777,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             info = await video_processor.get_video_info(
                 media_input, cookie, allow_local=is_local
             )
+        raise_if_cancel_requested(task)
         title = info["title"]
         update_task_manifest(task_id, info)
         task["logs"].append(f"标题：{title}")
@@ -647,6 +828,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         )
                     task["logs"].append("未找到可用平台字幕，将进行语音转写")
 
+        raise_if_cancel_requested(task)
         if transcript_result is None:
             set_progress(task, 3, "准备音频", 40, "正在准备音频")
             reused_audio = None
@@ -663,6 +845,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 media_path = await video_processor.download_audio(
                     source_url or "", task_id, cookie
                 )
+            raise_if_cancel_requested(task)
             set_progress(
                 task,
                 4,
@@ -676,6 +859,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 request.use_gpu,
                 initial_prompt=title,
             )
+            raise_if_cancel_requested(task)
             transcript_result = {
                 "segments": whisper_result["segments"],
                 "language": whisper_result["language"],
@@ -720,19 +904,26 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             screenshots = await video_processor.extract_frames(
                 video_path, task_id, request.screenshot_interval
             )
+            raise_if_cancel_requested(task)
             task["logs"].append(f"已提取 {len(screenshots)} 张截图")
 
         set_progress(task, 6, "生成笔记", 82, "正在分块生成结构化笔记")
         config = request.llm_config
         base_url = config.base_url or config.custom_base_url
         model = config.model or config.custom_model_name
+        api_key = config.api_key.get_secret_value().strip()
+        if not api_key:
+            saved_config = config_store.load_llm_config() or {}
+            api_key = str(saved_config.get("api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("未提供 API Key，且本机没有已保存的 LLM 配置")
         task["logs"].append(
             f"调用模型：Provider={config.model_type}，Model={model}，Base URL={base_url}"
         )
         task["logs"].append(f"推理强度：{request.reasoning_effort}（auto 会按笔记风格分配）")
         summarizer = LLMSummarizer(
             model_type=config.model_type,
-            api_key=config.api_key.get_secret_value(),
+            api_key=api_key,
             base_url=base_url,
             model=model,
         )
@@ -747,6 +938,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             style=request.summary_style,
             reasoning_effort=request.reasoning_effort,
         )
+        raise_if_cancel_requested(task)
         task["logs"].extend(getattr(summarizer, "warnings", []))
         if screenshots:
             summary += "\n\n## 视频截图\n\n" + "\n\n".join(
@@ -780,16 +972,19 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             status="completed", step=7, step_name="完成", progress=100, error=None
         )
         task["logs"].append("视频笔记生成完成")
+        persist_task_runtime(task_id)
     except asyncio.CancelledError:
         finish_task_timing(task)
         task.update(status="cancelled", step_name="已取消", error=None)
         if not task["logs"] or "用户已取消任务" not in task["logs"][-1]:
             task["logs"].append("任务已取消；已生成的中间文件将保留")
+        persist_task_runtime(task_id)
     except Exception as exc:
         finish_task_timing(task)
         message = friendly_task_error(str(exc))
         task.update(status="failed", error=message)
         task["logs"].append(f"处理失败：{message}")
+        persist_task_runtime(task_id)
 
 
 async def write_transcript_files(
@@ -850,6 +1045,85 @@ def archive_note(title: str, content: str) -> Path | None:
         return None
 
 
+def restore_tasks_from_workspace() -> None:
+    """Rebuild recent task status from manifests after a service restart."""
+    try:
+        candidates = sorted(
+            (
+                path
+                for path in WORKSPACE_DIR.iterdir()
+                if path.is_dir() and (path / "task.json").is_file()
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:TASK_HISTORY_LIMIT]
+    except OSError:
+        return
+
+    for task_dir in candidates:
+        try:
+            manifest = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        task_id = task_dir.name
+        runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+        notes_path = task_dir / "notes.md"
+        uploaded_media = next(
+            (path for path in task_dir.glob("input.*") if path.is_file()), None
+        )
+        status = str(runtime.get("status") or "")
+        interrupted = status in {"pending", "queued", "processing", "cancelling"}
+        if notes_path.is_file():
+            status = "completed"
+        elif interrupted:
+            status = "failed"
+        elif status not in {"failed", "cancelled", "uploaded"}:
+            status = "uploaded" if uploaded_media else "failed"
+
+        task = new_task(status=status, task_id=task_id)
+        task["_started_monotonic"] = None
+        task.update(
+            step=int(runtime.get("step") or 0),
+            step_name=str(runtime.get("step_name") or "已恢复"),
+            progress=int(runtime.get("progress") or (100 if status == "completed" else 0)),
+            logs=list(runtime.get("logs") or []),
+            error=runtime.get("error"),
+            created_at=runtime.get("created_at") or manifest.get("created_at"),
+            finished_at=runtime.get("finished_at"),
+            elapsed_seconds=float(runtime.get("elapsed_seconds") or 0),
+        )
+        if interrupted:
+            task.update(
+                step_name="服务已重启",
+                error="任务因服务重启而中断；已有转录和音频仍可复用",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            task["logs"].append("服务重启时任务尚未结束，已标记为中断")
+        if status == "uploaded" and uploaded_media:
+            task["uploaded_file_path"] = str(uploaded_media)
+            task["uploaded_filename"] = manifest.get("uploaded_filename") or uploaded_media.name
+        if status == "completed":
+            try:
+                markdown = notes_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            result = dict(runtime.get("result") or {})
+            result.update(
+                title=result.get("title") or manifest.get("title") or "video-notes",
+                markdown=markdown,
+                output_directory=str(task_dir),
+                processing_seconds=task["elapsed_seconds"],
+            )
+            task["result"] = result
+            task["finished_at"] = task["finished_at"] or datetime.now(timezone.utc).isoformat()
+        tasks[task_id] = task
+        if interrupted:
+            persist_task_runtime(task_id)
+
+
+restore_tasks_from_workspace()
+
+
 # MCP 端点：SSE 传输（/mcp/sse，供 Cherry Studio 等 MCP 客户端接入）
 try:
     from .mcp_server import use_in_process_backend, mcp as mcp_app
@@ -859,6 +1133,14 @@ try:
 except ImportError:
     # mcp 依赖未安装时跳过，不影响主服务
     pass
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    if not FAVICON_PATH.is_file():
+        raise HTTPException(status_code=404, detail="应用图标不存在")
+    return FileResponse(FAVICON_PATH, media_type="image/x-icon")
+
 
 if FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

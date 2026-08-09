@@ -36,18 +36,18 @@ if ($launcher) {
 }
 
 $listenerPid = $recordedPid
-try {
-    $stateUri = [Uri]$state.url
-    $listenerPattern = "^\s*TCP\s+\S+:$($stateUri.Port)\s+\S+\s+LISTENING\s+(\d+)\s*$"
-    foreach ($line in netstat -ano) {
-        if ($line -match $listenerPattern) {
-            $listenerPid = [int]$matches[1]
-            break
-        }
-    }
-} catch { }
-
 $listener = Get-Process -Id $listenerPid -ErrorAction SilentlyContinue
+if ($listener) {
+    $listenerInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
+    $commandLine = if ($listenerInfo) { [string]$listenerInfo.CommandLine } else { "" }
+    $hasExpectedCommand = $commandLine.IndexOf("backend.main:app", [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    $hasProjectPath = $commandLine.IndexOf($projectRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    $isVerifiedChild = $listenerInfo -and [int]$listenerInfo.ParentProcessId -eq $launcherPid -and $launcher
+    $belongsToProject = $hasExpectedCommand -and ($hasProjectPath -or $isVerifiedChild -or $listenerPid -eq $launcherPid)
+    if (-not $belongsToProject) {
+        throw "Listener PID $listenerPid cannot be verified as this VideoToNo instance; refusing to stop it."
+    }
+}
 if (-not $launcher -and -not $listener) {
     Remove-Item -LiteralPath $statePath -Force
     if (-not $Quiet) { Write-Host "Removed stale VideoToNo PID state." -ForegroundColor DarkGray }

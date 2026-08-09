@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Verify tag and application version
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          source = Path("launcher.py").read_text(encoding="utf-8")
+          match = re.search(r'^VERSION = "([^"]+)"', source, re.MULTILINE)
+          if match is None:
+              raise SystemExit("Could not read VERSION from launcher.py")
+          version = match.group(1)
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} does not match launcher version {version!r}")
+
+      - name: Run tests
+        run: python -m pytest
+
+  build-windows:
+    name: Build Windows x64
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -r backend/requirements.txt pyinstaller
+
+      - name: Build portable executable
+        shell: pwsh
+        run: .\scripts\build_exe.ps1 -Python ((Get-Command python).Source) -SkipInstall
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path launcher.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Upload Windows asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/VideoToNo-${{ env.VERSION }}-portable.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum VideoToNo-* > SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "VideoToNo $GITHUB_REF_NAME"

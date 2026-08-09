@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +18,7 @@ class WhisperTranscriber:
     def __init__(self, download_root: Path | None = None) -> None:
         self._models: dict[tuple[str, str], Any] = {}
         self._actual_models: dict[tuple[str, str], str] = {}
+        self._model_lock = threading.Lock()
         self.download_root = download_root.resolve() if download_root else None
         if self.download_root:
             self.download_root.mkdir(parents=True, exist_ok=True)
@@ -51,35 +53,10 @@ class WhisperTranscriber:
                 "faster-whisper is not installed. Run pip install -r backend/requirements.txt"
             ) from exc
 
-        device = "cuda" if use_gpu else "cpu"
-        compute_type = "float16" if use_gpu else "int8"
-        cache_key = (model_name, device)
         model_to_load = self._preferred_model(model_name)
-        if cache_key not in self._models:
-            try:
-                self._models[cache_key] = self._load_model(
-                    WhisperModel, model_to_load, device, compute_type
-                )
-                self._actual_models[cache_key] = model_to_load
-            except Exception as gpu_error:
-                if not use_gpu:
-                    self._load_cached_base_or_raise(
-                        WhisperModel, cache_key, model_name, device, gpu_error
-                    )
-                else:
-                    device = "cpu"
-                    compute_type = "int8"
-                    cache_key = (model_name, device)
-                    if cache_key not in self._models:
-                        try:
-                            self._models[cache_key] = self._load_model(
-                                WhisperModel, model_to_load, device, compute_type
-                            )
-                            self._actual_models[cache_key] = model_to_load
-                        except Exception as cpu_error:
-                            self._load_cached_base_or_raise(
-                                WhisperModel, cache_key, model_name, device, cpu_error
-                            )
+        cache_key, device = self._ensure_model(
+            WhisperModel, model_name, model_to_load, use_gpu
+        )
 
         model = self._models[cache_key]
         raw_segments, info = model.transcribe(
@@ -109,6 +86,45 @@ class WhisperTranscriber:
             "duration": float(info.duration or 0),
             "duration_after_vad": float(info.duration_after_vad or 0),
         }
+
+    def _ensure_model(
+        self,
+        model_class: Any,
+        model_name: str,
+        model_to_load: str,
+        use_gpu: bool,
+    ) -> tuple[tuple[str, str], str]:
+        """Load each shared model once, including first-download and GPU fallback."""
+        device = "cuda" if use_gpu else "cpu"
+        compute_type = "float16" if use_gpu else "int8"
+        cache_key = (model_name, device)
+        with self._model_lock:
+            if cache_key in self._models:
+                return cache_key, device
+            try:
+                self._models[cache_key] = self._load_model(
+                    model_class, model_to_load, device, compute_type
+                )
+                self._actual_models[cache_key] = model_to_load
+            except Exception as gpu_error:
+                if not use_gpu:
+                    self._load_cached_base_or_raise(
+                        model_class, cache_key, model_name, device, gpu_error
+                    )
+                else:
+                    device = "cpu"
+                    cache_key = (model_name, device)
+                    if cache_key not in self._models:
+                        try:
+                            self._models[cache_key] = self._load_model(
+                                model_class, model_to_load, device, "int8"
+                            )
+                            self._actual_models[cache_key] = model_to_load
+                        except Exception as cpu_error:
+                            self._load_cached_base_or_raise(
+                                model_class, cache_key, model_name, device, cpu_error
+                            )
+        return cache_key, device
 
     def _load_model(
         self,
@@ -142,7 +158,7 @@ class WhisperTranscriber:
         endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
         repo = f"Systran/faster-whisper-{model_name}"
         base_url = f"{endpoint}/{repo}/resolve/main"
-        headers = {"User-Agent": "VideoToNo/2.0", "Accept-Encoding": "identity"}
+        headers = {"User-Agent": "VideoToNo/1.0", "Accept-Encoding": "identity"}
 
         # 从 307 重定向响应头取 commit hash（目录命名用）
         commit = "main"

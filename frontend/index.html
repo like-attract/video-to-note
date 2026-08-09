@@ -3,19 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
     <title>VideoToNo - 本地视频笔记</title>
-    <script>
-        (function () {
-            var theme = 'system';
-            try {
-                var saved = localStorage.getItem('theme');
-                if (saved === 'light' || saved === 'dark' || saved === 'system') theme = saved;
-            } catch (e) { /* 隐私模式等场景忽略 */ }
-            document.documentElement.dataset.theme = theme;
-        })();
-    </script>
+    <link rel="icon" href="/favicon.ico">
+    <script src="theme-bootstrap.js"></script>
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="vendor/marked-18.0.9.umd.js"></script>
+    <script src="vendor/dompurify-3.4.13.min.js"></script>
 </head>
 <body>
 <div class="app-shell">
@@ -72,11 +66,7 @@
             <label class="field">
                 <span>API Key</span>
                 <input type="password" id="apiKey" autocomplete="off" placeholder="仅在本次页面会话中使用">
-                <small>默认不保存；勾选下方选项后，保存偏好时一并存到本机浏览器。</small>
-            </label>
-            <label class="check-field">
-                <input type="checkbox" id="saveApiKey">
-                <span>记住 LLM 配置（含 API Key，仅保存在本机）</span>
+                <small>只保留在当前页面内存中，刷新或关闭页面后需重新填写。</small>
             </label>
 
             <div id="customApiConfig" class="custom-config" hidden>
@@ -146,7 +136,7 @@
         <div class="sidebar-actions">
             <button id="saveConfigBtn" class="button secondary" type="button">保存偏好</button>
             <button id="resetConfigBtn" class="button ghost" type="button">恢复默认</button>
-            <p>保存模型选择、识别参数等非敏感偏好；勾选「记住 LLM 配置」时一并保存 API Key（仅存本机浏览器）。</p>
+            <p>只保存模型选择、识别参数和主题等非敏感偏好，不保存 API Key。</p>
         </div>
     </aside>
 
@@ -233,6 +223,17 @@
             </div>
         </section>
 
+        <section id="recentTasksPanel" class="recent-panel" aria-labelledby="recentTasksTitle" hidden>
+            <div class="section-heading recent-heading">
+                <div>
+                    <span class="section-kicker">历史</span>
+                    <h3 id="recentTasksTitle">最近任务</h3>
+                </div>
+                <button id="refreshRecentTasksBtn" class="button ghost compact-button" type="button">刷新</button>
+            </div>
+            <div id="recentTaskList" class="recent-task-list"></div>
+        </section>
+
         <section id="progressArea" class="task-panel" aria-labelledby="progressTitle" hidden>
             <div class="section-heading progress-heading">
                 <div>
@@ -309,6 +310,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260803-5"></script>
+<script src="script.js?v=20260809-2"></script>
 </body>
 </html>

@@ -30,6 +30,9 @@ if (Test-Path -LiteralPath $envPath) {
 if (-not $BindHost) {
     $BindHost = if ($env:HOST) { $env:HOST } elseif ($fileConfig.HOST) { $fileConfig.HOST } else { "127.0.0.1" }
 }
+if ($BindHost -notin @("127.0.0.1", "localhost", "::1")) {
+    throw "VideoToNo 1.0 is local-only. BindHost must be 127.0.0.1, localhost, or ::1."
+}
 if ($null -eq $Port) {
     $portValue = if ($env:PORT) { $env:PORT } elseif ($fileConfig.PORT) { $fileConfig.PORT } else { "8000" }
     $Port = [int]$portValue

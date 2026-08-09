@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -13,10 +14,62 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.0.0"
+    assert health.json()["version"] == "1.0.0"
+    assert health.json()["service"] == "VideoToNo"
     page = client.get("/")
     assert page.status_code == 200
     assert "VideoToNo" in page.text
+    assert "cdn.jsdelivr.net" not in page.text
+    assert "vendor/marked-18.0.9.umd.js" in page.text
+    assert "vendor/dompurify-3.4.13.min.js" in page.text
+    assert 'id="recentTaskList"' in page.text
+    assert "记住 LLM 配置" not in page.text
+    assert "default-src 'self'" in page.headers["content-security-policy"]
+    favicon = client.get("/favicon.ico")
+    assert favicon.status_code == 200
+    assert favicon.headers["content-type"].startswith("image/x-icon")
+
+
+def test_frontend_sanitizes_generated_markdown() -> None:
+    script = (main.FRONTEND_DIR / "script.js").read_text(encoding="utf-8")
+    assert "DOMPurify.sanitize" in script
+    assert "content.innerHTML = marked.parse" not in script
+    assert "const body = renderMarkdown(markdown);" in script
+    assert "const body = typeof marked" not in script
+    assert "persistApiKeyIfRequested" not in script
+
+
+def test_recent_tasks_are_compact_and_do_not_include_markdown(monkeypatch) -> None:
+    task = main.new_task(status="completed", task_id="recent-task")
+    task.update(
+        created_at="2026-08-09T12:00:00+00:00",
+        result={"title": "示例笔记", "markdown": "# private body"},
+    )
+    monkeypatch.setattr(main, "tasks", {"recent-task": task})
+
+    response = TestClient(main.app).get("/api/tasks")
+
+    assert response.status_code == 200
+    item = response.json()["tasks"][0]
+    assert item["task_id"] == "recent-task"
+    assert item["title"] == "示例笔记"
+    assert "result" not in item
+    assert "markdown" not in json.dumps(item)
+
+
+@pytest.mark.parametrize(
+    ("host", "allowed"),
+    [
+        ("127.0.0.1", True),
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),
+        ("localhost", True),
+        ("192.168.1.20", False),
+        ("example.com", False),
+    ],
+)
+def test_loopback_client_detection(host: str, allowed: bool) -> None:
+    assert main.is_loopback_client(host) is allowed
 
 
 def test_summarize_rejects_local_path_in_url_field() -> None:
@@ -81,21 +134,58 @@ def test_download_returns_markdown_file(
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_cancels_running_job_and_keeps_task_record() -> None:
+async def test_cancel_task_requests_cooperative_stop_and_keeps_task_record() -> None:
     task_id = "cancel-task"
     main.tasks[task_id] = main.new_task("processing")
     job = asyncio.create_task(asyncio.sleep(30))
     main.running_jobs[task_id] = job
 
     result = await main.cancel_task(task_id)
-    await asyncio.sleep(0)
-
-    assert result["cancelled"] is True
-    assert main.tasks[task_id]["status"] == "cancelled"
-    assert job.cancelled()
-    assert any("中间文件将保留" in log for log in main.tasks[task_id]["logs"])
+    assert result["cancelled"] is False
+    assert result["status"] == "cancelling"
+    assert main.tasks[task_id]["_cancel_requested"] is True
+    assert not job.done()
+    assert any("当前阻塞步骤结束后" in log for log in main.tasks[task_id]["logs"])
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
     main.running_jobs.pop(task_id, None)
     main.tasks.pop(task_id, None)
+
+
+@pytest.mark.asyncio
+async def test_task_queue_respects_concurrency_limit(monkeypatch) -> None:
+    active = 0
+    maximum_active = 0
+    release = asyncio.Event()
+
+    async def fake_process(task_id, request):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await release.wait()
+        active -= 1
+
+    monkeypatch.setattr(main, "task_slots", asyncio.Semaphore(1))
+    monkeypatch.setattr(main, "process_video_task", fake_process)
+    request = main.SummarizeRequest(
+        video_url="https://example.com/video",
+        llm_config={"model_type": "deepseek", "api_key": "test-key"},
+    )
+    for task_id in ("queued-one", "queued-two"):
+        main.tasks[task_id] = main.new_task(task_id=task_id)
+
+    jobs = [
+        asyncio.create_task(main.run_queued_video_task(task_id, request))
+        for task_id in ("queued-one", "queued-two")
+    ]
+    await asyncio.sleep(0.01)
+    assert maximum_active == 1
+    release.set()
+    await asyncio.gather(*jobs)
+    assert maximum_active == 1
+    main.tasks.pop("queued-one", None)
+    main.tasks.pop("queued-two", None)
 
 
 @pytest.mark.asyncio
@@ -114,6 +204,49 @@ async def test_task_status_reports_and_freezes_elapsed_time() -> None:
     finished = await main.get_task_status(task_id)
     assert finished["elapsed_seconds"] == pytest.approx(frozen)
     main.tasks.pop(task_id, None)
+
+
+def test_restore_tasks_marks_interrupted_and_loads_completed(monkeypatch, tmp_path) -> None:
+    interrupted_id = "interrupted-task"
+    interrupted_dir = tmp_path / interrupted_id
+    interrupted_dir.mkdir()
+    (interrupted_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "task_id": interrupted_id,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "runtime": {"status": "processing", "logs": ["处理中"]},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    completed_id = "completed-task"
+    completed_dir = tmp_path / completed_id
+    completed_dir.mkdir()
+    (completed_dir / "notes.md").write_text("# 已恢复笔记", encoding="utf-8")
+    (completed_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "task_id": completed_id,
+                "title": "恢复测试",
+                "runtime": {"status": "completed", "elapsed_seconds": 12.5},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.restore_tasks_from_workspace()
+
+    assert main.tasks[interrupted_id]["status"] == "failed"
+    assert "服务重启" in main.tasks[interrupted_id]["error"]
+    assert main.tasks[completed_id]["status"] == "completed"
+    assert main.tasks[completed_id]["result"]["markdown"] == "# 已恢复笔记"
+    main.tasks.pop(interrupted_id, None)
+    main.tasks.pop(completed_id, None)
 
 
 @pytest.mark.asyncio

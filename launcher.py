@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -23,7 +24,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.4"
+VERSION = "1.0.0"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
@@ -64,7 +65,10 @@ def configure_runtime_dirs() -> None:
 def server_alive(url: str) -> bool:
     try:
         with urllib.request.urlopen(f"{url}/api/health", timeout=1.5) as response:
-            return response.status == 200
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+            return payload.get("status") == "ok" and payload.get("service") == "VideoToNo"
     except Exception:
         return False
 

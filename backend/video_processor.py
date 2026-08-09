@@ -395,7 +395,7 @@ class VideoProcessor:
             subtitle_url = "https:" + subtitle_url
         headers = {
             "Referer": referer,
-            "User-Agent": "Mozilla/5.0 VideoToNotes/2.0",
+            "User-Agent": "Mozilla/5.0 VideoToNo/1.0",
         }
         if extra_headers:
             headers.update(extra_headers)
@@ -408,7 +408,7 @@ class VideoProcessor:
 
     @staticmethod
     def _base_ydl_options(cookie: dict[str, str] | None) -> dict[str, Any]:
-        headers = {"User-Agent": "Mozilla/5.0 VideoToNotes/2.0"}
+        headers = {"User-Agent": "Mozilla/5.0 VideoToNo/1.0"}
         cookie_header = VideoProcessor._cookie_header(cookie)
         if cookie_header:
             headers["Cookie"] = cookie_header

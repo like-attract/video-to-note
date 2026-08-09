@@ -204,14 +204,16 @@ async def _resolve_llm_config(
             config["model"] = model
         return config
     saved = await backend.get_llm_config()
-    if not saved.get("saved") or not saved.get("api_key"):
+    if not saved.get("saved"):
         raise RuntimeError(
             "未提供 api_key，且本机未保存 LLM 配置。"
             "请先调用 save_llm_config 保存配置，或在调用中传入 api_key。"
         )
     config = {
         "model_type": saved.get("model_type") or "deepseek",
-        "api_key": saved["api_key"],
+        # The HTTP status endpoint never returns the secret. An empty value tells
+        # the local backend to resolve it from ConfigStore at execution time.
+        "api_key": "",
     }
     if saved.get("base_url"):
         config["base_url"] = saved["base_url"]
@@ -241,11 +243,8 @@ async def _resolve_bili_cookie(
         }
     saved = await backend.get_bili_credentials()
     if saved.get("saved"):
-        return {
-            "sessdata": str(saved.get("sessdata") or ""),
-            "bili_jct": str(saved.get("bili_jct") or ""),
-            "buvid3": str(saved.get("buvid3") or ""),
-        }
+        # Omitting the cookie lets the local backend resolve its private copy.
+        return None
     return None
 
 
@@ -434,15 +433,11 @@ async def get_saved_config() -> dict[str, Any]:
             "saved": bool(llm.get("saved")),
             "model_type": llm.get("model_type"),
             "model": llm.get("model"),
-            "api_key_masked": (
-                str(llm.get("api_key", ""))[:4] + "****" if llm.get("saved") else None
-            ),
+            "api_key_masked": llm.get("api_key_masked"),
         },
         "bilibili_credentials": {
             "saved": bool(bili.get("saved")),
-            "sessdata_masked": (
-                str(bili.get("sessdata", ""))[:4] + "****" if bili.get("saved") else None
-            ),
+            "sessdata_masked": bili.get("sessdata_masked"),
         },
     }
 

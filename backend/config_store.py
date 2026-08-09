@@ -1,7 +1,8 @@
 """本地配置文件存储：LLM 配置与 B 站凭据。
 
-服务于 MCP 客户端与未来的手机 APP / 小程序：调用方无需每次提供 API Key 或
-B 站凭据，由后端统一保管（明文保存在工作目录，仅本机可读，chmod 600）。
+服务于 MCP 客户端：调用方无需每次提供 API Key 或 B 站凭据，由后端统一保管。
+当前格式仍是工作目录中的明文 JSON；API 只返回掩码，且整个服务强制仅限回环地址。
+Windows 的 chmod 不提供等价于 Unix ACL 的隔离，因此只应在个人账户下选择性使用。
 
 文件位置：
 - workspace/llm_config.json      大模型服务配置（provider/model/api_key）
@@ -36,11 +37,16 @@ class ConfigStore:
 
     def _write(self, filename: str, payload: dict[str, Any]) -> None:
         path = self.workspace / filename
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         try:
-            path.chmod(0o600)
+            temporary.chmod(0o600)
         except OSError:
             pass
+        temporary.replace(path)
 
     def _clear(self, filename: str) -> None:
         try:
