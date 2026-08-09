@@ -91,11 +91,26 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Generate checksums
-        working-directory: release-assets
-        run: sha256sum VideoToNo-* > SHA256SUMS.txt
-
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "VideoToNo $GITHUB_REF_NAME"
+        run: |
+          NOTES=$(cat <<EOF
+          ## VideoToNo $GITHUB_REF_NAME
+
+          ### 功能
+          - 完整的“平台字幕 / B 站 AI 字幕 → Whisper 兜底 → LLM 笔记”处理链，保留真实时间轴
+          - 结构化转录复用、断点继续、任务取消、处理计时，笔记自动归档到 workspace/notes
+          - 多 Provider / 自定义模型、三种笔记风格、推理强度、可选定时截图
+          - MCP 接入：Cherry Studio（SSE）与 Codex（stdio）；wait_for_task 等待终态，减少轮询
+          - MCP 配置持久化：LLM 配置与 B 站凭据保存一次后免传参（明文存 workspace，仅本机可读）
+          - 前端依赖本地化（marked / DOMPurify），界面不依赖外网 CDN
+          - 亮暗主题、扫码登录导入 B 站凭据、Whisper 模型缓存三态标注
+
+          ### 安全边界
+          - 服务默认仅监听回环地址，请勿暴露到公网
+          - API Key 默认不落盘；仅显式调用 MCP 保存工具时明文写入 workspace（已 gitignore）
+          - B 站扫码登录 Cookie 仅存内存，不落盘
+          EOF
+          )
+          gh release create "$GITHUB_REF_NAME" release-assets/* --notes "$NOTES" --title "VideoToNo $GITHUB_REF_NAME"
