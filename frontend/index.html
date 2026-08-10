@@ -3,13 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
     <title>VideoToNo - 本地视频笔记</title>
     <link rel="icon" href="/favicon.ico">
     <script src="theme-bootstrap.js"></script>
     <link rel="stylesheet" href="style.css">
     <script src="vendor/marked-18.0.9.umd.js"></script>
     <script src="vendor/dompurify-3.4.13.min.js"></script>
+    <script src="vendor/html2canvas-1.4.1.min.js"></script>
 </head>
 <body>
 <div class="app-shell">
@@ -17,7 +18,7 @@
         <div class="brand">
             <div class="brand-mark" aria-hidden="true">VN</div>
             <div>
-                <h1>VideoToNo</h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.1.0</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
@@ -260,6 +261,8 @@
                 <li class="step" data-step="6"><span>6</span><em>生成笔记</em></li>
             </ol>
 
+            <div id="taskAdvisory" class="task-advisory" hidden></div>
+
             <div id="taskError" class="error-panel" role="alert" hidden>
                 <strong>任务未完成</strong>
                 <p id="taskErrorMessage"></p>
@@ -286,12 +289,19 @@
                 </div>
                 <div class="result-actions">
                     <button id="regenerateBtn" class="button ghost" type="button" disabled>基于转录重新生成</button>
+                    <button id="copyNoteBtn" class="button ghost" type="button" disabled>复制笔记</button>
                     <label class="sr-only" for="formatSelect">下载格式</label>
                     <select id="formatSelect">
                         <option value="markdown">Markdown 文件</option>
                         <option value="html">HTML</option>
                         <option value="json">JSON</option>
                         <option value="txt">纯文本</option>
+                        <option value="png">PNG 图片</option>
+                    </select>
+                    <label class="sr-only" for="imageLayoutSelect">图片版式</label>
+                    <select id="imageLayoutSelect" hidden>
+                        <option value="long">长图</option>
+                        <option value="portrait">3:4 分页</option>
                     </select>
                     <button id="downloadMdBtn" class="button secondary" type="button" disabled>
                         <span class="button-spinner" aria-hidden="true"></span>
@@ -310,6 +320,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260809-2"></script>
+<script src="script.js?v=20260810-1"></script>
 </body>
 </html>

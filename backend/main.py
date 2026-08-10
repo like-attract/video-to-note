@@ -67,7 +67,7 @@ DOUYIN_HINT = (
     "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.0.0")
+app = FastAPI(title="VideoToNo API", version="1.1.0")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -91,7 +91,8 @@ async def enforce_local_security(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "default-src 'self'; script-src 'self'; "
+        "style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; "
         "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
         "base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     )
@@ -159,10 +160,12 @@ def new_task(status: str = "pending", task_id: str | None = None) -> dict[str, A
         "status": status,
         "step": 0,
         "step_name": "初始化",
+        "progress_message": "等待任务开始",
         "progress": 0,
         "logs": [],
         "result": None,
         "error": None,
+        "advisory": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "finished_at": None,
         "elapsed_seconds": 0.0,
@@ -189,7 +192,7 @@ def finish_task_timing(task: dict[str, Any]) -> float:
 def set_progress(
     task: dict[str, Any], step: int, name: str, progress: int, message: str
 ) -> None:
-    task.update(step=step, step_name=name, progress=progress)
+    task.update(step=step, step_name=name, progress=progress, progress_message=message)
     task["logs"].append(message)
     task_id = task.get("_task_id")
     if task_id:
@@ -769,11 +772,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         transcript_result = load_transcript_result(resume_dir) if resume_dir else None
 
         if transcript_result:
-            set_progress(task, 1, "恢复任务信息", 10, "正在读取已有任务信息")
+            set_progress(task, 1, "恢复任务信息", 8, "正在读取已有任务信息")
             info = load_reused_video_info(resume_dir, transcript_result, source_url)
         else:
             media_input = uploaded_path or source_url or ""
-            set_progress(task, 1, "读取视频信息", 10, "正在读取视频信息")
+            set_progress(task, 1, "读取视频信息", 8, "正在读取视频信息")
             info = await video_processor.get_video_info(
                 media_input, cookie, allow_local=is_local
             )
@@ -785,12 +788,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             task["logs"].append(f"时长：{format_duration(info['duration'])}")
 
         if transcript_result:
-            set_progress(task, 4, "复用转录", 68, "已读取已有转录，跳过字幕、音频和 Whisper")
+            set_progress(task, 4, "复用转录", 48, "已读取已有转录，跳过字幕、音频和 Whisper")
             task["logs"].append(
                 f"复用任务 {resume_task_id} 的 {len(transcript_result['segments'])} 个转录分段"
             )
         elif request.prefer_subtitles and not is_local:
-            set_progress(task, 2, "查找平台字幕", 25, "正在查找平台字幕")
+            set_progress(task, 2, "查找平台字幕", 16, "正在查找平台字幕")
             subtitle = await video_processor.fetch_subtitles(source_url or "", info, cookie)
             if subtitle:
                 transcript_result = {
@@ -830,7 +833,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         raise_if_cancel_requested(task)
         if transcript_result is None:
-            set_progress(task, 3, "准备音频", 40, "正在准备音频")
+            set_progress(task, 3, "准备音频", 25, "正在准备音频")
             reused_audio = None
             if resume_dir:
                 reused_audio = next(
@@ -850,7 +853,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 task,
                 4,
                 "语音转写",
-                60,
+                38,
                 f"正在加载 faster-whisper {request.whisper_model}（未缓存时可能下载模型）",
             )
             whisper_result = await transcriber.transcribe(
@@ -893,7 +896,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         screenshots: list[Path] = []
         if request.include_screenshots:
-            set_progress(task, 5, "提取截图", 72, "正在提取低清预览截图")
+            set_progress(task, 5, "提取截图", 50, "正在提取低清预览截图")
             video_path = (
                 Path(uploaded_path)
                 if is_local
@@ -907,7 +910,15 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             raise_if_cancel_requested(task)
             task["logs"].append(f"已提取 {len(screenshots)} 张截图")
 
-        set_progress(task, 6, "生成笔记", 82, "正在分块生成结构化笔记")
+        transcript_characters = int(quality.get("characters") or 0)
+        duration_seconds = float(info.get("duration") or 0)
+        if transcript_characters >= 9_000 or duration_seconds >= 1_800:
+            task["advisory"] = (
+                "这段内容较长，将通过多轮整理生成完整笔记，耗时和 Token 消耗会相应增加。"
+                "上下文容量较大、指令理解能力较强的模型通常更稳定；免费或轻量模型可能出现遗漏或截断。"
+            )
+            task["logs"].append(task["advisory"])
+        set_progress(task, 6, "生成笔记", 55, "正在规划笔记生成流程")
         config = request.llm_config
         base_url = config.base_url or config.custom_base_url
         model = config.model or config.custom_model_name
@@ -927,6 +938,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             base_url=base_url,
             model=model,
         )
+
+        async def report_llm_progress(progress: int, message: str) -> None:
+            raise_if_cancel_requested(task)
+            mapped = 55 + round(max(0, min(100, progress)) * 0.44)
+            set_progress(task, 6, "生成笔记", mapped, message)
+
         summary = await summarizer.generate_summary(
             title,
             segments,
@@ -937,6 +954,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             },
             style=request.summary_style,
             reasoning_effort=request.reasoning_effort,
+            progress_callback=report_llm_progress,
         )
         raise_if_cancel_requested(task)
         task["logs"].extend(getattr(summarizer, "warnings", []))

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import launcher
 from backend import main
 from backend.transcript import TranscriptSegment
 from backend.video_processor import SubtitleResult, VideoProcessor
@@ -14,7 +15,8 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.0.0"
+    assert health.json()["version"] == "1.1.0"
+    assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     page = client.get("/")
     assert page.status_code == 200
@@ -22,7 +24,10 @@ def test_health_and_frontend_are_served() -> None:
     assert "cdn.jsdelivr.net" not in page.text
     assert "vendor/marked-18.0.9.umd.js" in page.text
     assert "vendor/dompurify-3.4.13.min.js" in page.text
+    assert "vendor/html2canvas-1.4.1.min.js" in page.text
     assert 'id="recentTaskList"' in page.text
+    assert 'id="copyNoteBtn"' in page.text
+    assert 'value="png"' in page.text
     assert "记住 LLM 配置" not in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     favicon = client.get("/favicon.ico")
@@ -154,6 +159,25 @@ async def test_cancel_task_requests_cooperative_stop_and_keeps_task_record() -> 
 
 
 @pytest.mark.asyncio
+async def test_delete_failed_task_removes_record_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "failed-task"
+    cleaned: list[str] = []
+
+    class FakeProcessor:
+        async def cleanup(self, value: str) -> None:
+            cleaned.append(value)
+
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    main.tasks[task_id] = main.new_task("failed", task_id)
+
+    assert await main.delete_task(task_id) == {"deleted": True}
+    assert cleaned == [task_id]
+    assert task_id not in main.tasks
+
+
+@pytest.mark.asyncio
 async def test_task_queue_respects_concurrency_limit(monkeypatch) -> None:
     active = 0
     maximum_active = 0
@@ -276,8 +300,11 @@ async def test_pipeline_uses_platform_subtitles_without_downloading_audio(
             pass
 
         async def generate_summary(
-            self, title, segments, metadata, style="detailed", reasoning_effort="auto"
+            self, title, segments, metadata, style="detailed", reasoning_effort="auto",
+            progress_callback=None,
         ):
+            if progress_callback:
+                await progress_callback(78, "正在生成完整笔记")
             return "# 测试笔记\n\n[00:00] 字幕摘要"
 
     monkeypatch.setattr(processor, "get_video_info", fake_info)
@@ -345,7 +372,8 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
             pass
 
         async def generate_summary(
-            self, title, segments, metadata, style="detailed", reasoning_effort="auto"
+            self, title, segments, metadata, style="detailed", reasoning_effort="auto",
+            progress_callback=None,
         ):
             assert title == "旧任务标题"
             assert style == "detailed"

@@ -118,8 +118,19 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPreferences();
     bindEvents();
     toggleSourceType();
+    loadAppVersion();
     loadRecentTasks(true);
 });
+
+async function loadAppVersion() {
+    try {
+        const response = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取版本失败');
+        if (data.version) byId('appVersion').textContent = `v${data.version}`;
+    } catch {
+        // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
+    }
+}
 
 function bindEvents() {
     byId('saveConfigBtn').addEventListener('click', savePreferences);
@@ -130,8 +141,15 @@ function bindEvents() {
     byId('regenerateBtn').addEventListener('click', () => startSummary({ resumeCurrent: true }));
     byId('cancelTaskBtn').addEventListener('click', cancelCurrentTask);
     byId('downloadMdBtn').addEventListener('click', downloadSummary);
+    byId('copyNoteBtn').addEventListener('click', copyFullNote);
+    byId('formatSelect').addEventListener('change', toggleImageLayout);
     byId('refreshRecentTasksBtn').addEventListener('click', () => loadRecentTasks());
     byId('recentTaskList').addEventListener('click', (event) => {
+        const deleteButton = event.target.closest('[data-delete-task-id]');
+        if (deleteButton) {
+            deleteFailedTask(deleteButton.dataset.deleteTaskId);
+            return;
+        }
         const button = event.target.closest('[data-task-id]');
         if (button) openRecentTask(button.dataset.taskId);
     });
@@ -193,6 +211,8 @@ function renderRecentTasks(tasks) {
     list.replaceChildren();
     panel.hidden = tasks.length === 0;
     tasks.forEach((task) => {
+        const row = document.createElement('div');
+        row.className = 'recent-task-row';
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'recent-task-item';
@@ -212,8 +232,38 @@ function renderRecentTasks(tasks) {
         text.className = 'recent-task-text';
         text.append(title, meta);
         button.append(text, status);
-        list.append(button);
+        row.append(button);
+        if (task.status === 'failed') {
+            const deleteButton = document.createElement('button');
+            deleteButton.type = 'button';
+            deleteButton.className = 'recent-task-delete';
+            deleteButton.dataset.deleteTaskId = task.task_id;
+            deleteButton.title = '删除失败任务';
+            deleteButton.setAttribute('aria-label', `删除失败任务：${task.title || '未命名任务'}`);
+            deleteButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg>';
+            row.append(deleteButton);
+        }
+        list.append(row);
     });
+}
+
+async function deleteFailedTask(taskId) {
+    if (!window.confirm('将删除该失败任务及其音频、转录和截图，删除后无法继续复用。确定删除吗？')) return;
+    try {
+        const response = await fetch(`${API_BASE}/task/${encodeURIComponent(taskId)}`, {
+            method: 'DELETE'
+        });
+        await readResponse(response, '删除任务失败');
+        if (currentTaskId === taskId) {
+            resetTaskView();
+            byId('progressArea').hidden = true;
+        }
+        await loadRecentTasks(true);
+        showToast('失败任务已删除', 'success');
+    } catch (error) {
+        showToast(`删除失败：${error.message}`, 'error');
+        loadRecentTasks(true);
+    }
 }
 
 function formatTaskDate(value) {
@@ -252,6 +302,7 @@ async function openRecentTask(taskId) {
         toggleSourceType();
         updateProgress(task.progress || 0);
         updateStep(task.step || 0);
+        renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs)) updateLogs(task.logs);
 
         if (task.status === 'completed') {
@@ -814,11 +865,14 @@ async function pollTask(taskId) {
         const task = await readResponse(response, '读取任务状态失败');
         pollErrorCount = 0;
         syncElapsedTimer(task.elapsed_seconds);
-        byId('networkState').textContent = '连接正常';
+        byId('networkState').textContent = task.step === 6
+            ? task.progress_message || '模型正在生成笔记'
+            : '连接正常';
         byId('networkState').classList.remove('network-warning');
 
         updateProgress(task.progress);
         updateStep(task.step);
+        renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs) && task.logs.length) updateLogs(task.logs);
 
         if (task.status === 'completed') {
@@ -911,9 +965,11 @@ function resetTaskView() {
     byId('resultArea').hidden = true;
     byId('taskError').hidden = true;
     byId('downloadMdBtn').disabled = true;
+    byId('copyNoteBtn').disabled = true;
     byId('regenerateBtn').disabled = true;
     byId('outputNotice').hidden = true;
     byId('outputPath').textContent = '';
+    renderTaskAdvisory(null);
     byId('networkState').textContent = '准备提交';
     byId('networkState').classList.remove('network-warning');
     clearLogs();
@@ -1055,6 +1111,13 @@ function updateStep(rawStep) {
         step.classList.toggle('completed', number < activeStep || activeStep > 6);
         step.classList.toggle('active', number === activeStep);
     });
+    byId('progressArea').classList.toggle('llm-active', activeStep === 6 && isTaskActive);
+}
+
+function renderTaskAdvisory(message) {
+    const advisory = byId('taskAdvisory');
+    advisory.textContent = typeof message === 'string' ? message : '';
+    advisory.hidden = !advisory.textContent;
 }
 
 function clearLogs() {
@@ -1099,6 +1162,7 @@ function showResult(result) {
     content.innerHTML = renderMarkdown(currentHtml);
     byId('resultArea').hidden = false;
     byId('downloadMdBtn').disabled = false;
+    byId('copyNoteBtn').disabled = false;
     const outputDirectory = typeof result.output_directory === 'string'
         ? result.output_directory.trim()
         : '';
@@ -1137,6 +1201,10 @@ function renderMarkdown(markdown) {
 async function downloadSummary() {
     if (isDownloading || !currentMarkdown) return;
     const format = byId('formatSelect').value;
+    if (format === 'png') {
+        await exportSummaryImage();
+        return;
+    }
     if (format === 'markdown') {
         await downloadMarkdownFile();
         return;
@@ -1150,6 +1218,148 @@ async function downloadSummary() {
     const selected = formats[format] || { content: currentMarkdown, extension: '.md', mime: 'text/markdown' };
     triggerBlobDownload(new Blob([selected.content], { type: selected.mime }), selected.extension);
     showToast('下载已开始', 'success');
+}
+
+function toggleImageLayout() {
+    byId('imageLayoutSelect').hidden = byId('formatSelect').value !== 'png';
+}
+
+async function copyFullNote() {
+    if (!currentMarkdown) return validationError('没有可复制的笔记');
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(currentMarkdown);
+        } else {
+            copyTextFallback(currentMarkdown);
+        }
+        showToast('完整笔记已复制', 'success');
+    } catch {
+        try {
+            copyTextFallback(currentMarkdown);
+            showToast('完整笔记已复制', 'success');
+        } catch (error) {
+            showToast(`复制失败：${error.message}`, 'error');
+        }
+    }
+}
+
+function copyTextFallback(value) {
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.className = 'clipboard-fallback';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) throw new Error('浏览器未授予剪贴板权限');
+}
+
+async function exportSummaryImage() {
+    if (typeof html2canvas === 'undefined') {
+        showToast('图片导出组件未加载，请刷新页面后重试', 'error');
+        return;
+    }
+    setDownloading(true);
+    const stage = document.createElement('div');
+    stage.className = 'image-export-stage';
+    const sheet = document.createElement('article');
+    sheet.className = 'image-export-sheet';
+    sheet.innerHTML = renderMarkdown(currentHtml || currentMarkdown);
+    stage.append(sheet);
+    document.body.append(stage);
+    try {
+        if (document.fonts?.ready) await document.fonts.ready;
+        await waitForExportImages(sheet);
+        const width = sheet.scrollWidth;
+        const height = sheet.scrollHeight;
+        const areaScale = Math.sqrt(40_000_000 / Math.max(1, width * height));
+        const heightScale = 30_000 / Math.max(1, height);
+        const scale = Math.min(2, areaScale, heightScale);
+        if (scale < 0.75) {
+            throw new Error('笔记内容过长，暂时无法稳定导出图片，请改用 HTML 或 Markdown');
+        }
+        const canvas = await html2canvas(sheet, {
+            backgroundColor: '#ffffff',
+            scale,
+            useCORS: true,
+            logging: false,
+            width,
+            height,
+            windowWidth: width
+        });
+        const requestedLayout = byId('imageLayoutSelect').value;
+        const paginate = requestedLayout === 'portrait' || canvas.height > 16_000;
+        if (paginate) {
+            if (requestedLayout === 'long') {
+                showToast('笔记较长，已自动改为 3:4 分页图片', 'info');
+            }
+            await downloadCanvasPages(canvas);
+        } else {
+            triggerBlobDownload(await canvasToBlob(canvas), '.png');
+        }
+        showToast('图片导出已完成', 'success');
+    } catch (error) {
+        showToast(`图片导出失败：${error.message}`, 'error');
+    } finally {
+        stage.remove();
+        setDownloading(false);
+    }
+}
+
+async function waitForExportImages(root) {
+    const images = Array.from(root.querySelectorAll('img'));
+    await Promise.all(images.map((img) => {
+        if (img.complete) return Promise.resolve();
+        return new Promise((resolve) => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+            window.setTimeout(resolve, 5000);
+        });
+    }));
+}
+
+async function downloadCanvasPages(source) {
+    const pageHeight = Math.round(source.width * 4 / 3);
+    const pagePadding = Math.max(32, Math.round(source.width * 0.055));
+    const contentHeight = pageHeight - pagePadding * 2;
+    const overlap = Math.max(24, Math.round(source.width * 0.025));
+    const pageAdvance = contentHeight - overlap;
+    const pages = source.height <= contentHeight
+        ? 1
+        : 1 + Math.ceil((source.height - contentHeight) / pageAdvance);
+    for (let index = 0; index < pages; index += 1) {
+        const page = document.createElement('canvas');
+        page.width = source.width;
+        page.height = pageHeight;
+        const context = page.getContext('2d');
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, page.width, page.height);
+        const sourceY = index * pageAdvance;
+        const sliceHeight = Math.min(contentHeight, source.height - sourceY);
+        context.drawImage(
+            source,
+            0,
+            sourceY,
+            source.width,
+            sliceHeight,
+            0,
+            pagePadding,
+            source.width,
+            sliceHeight
+        );
+        const suffix = `.page-${String(index + 1).padStart(3, '0')}.png`;
+        triggerBlobDownload(await canvasToBlob(page), suffix);
+    }
+}
+
+function canvasToBlob(canvas) {
+    return new Promise((resolve, reject) => {
+        canvas.toBlob(
+            (blob) => blob ? resolve(blob) : reject(new Error('无法生成 PNG 文件')),
+            'image/png'
+        );
+    });
 }
 
 async function downloadMarkdownFile() {

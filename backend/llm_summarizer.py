@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any, Sequence
 
 from .transcript import TranscriptSegment, chunk_segments, segments_to_prompt
@@ -17,6 +19,10 @@ PROVIDER_DEFAULTS = {
     "glm": ("https://open.bigmodel.cn/api/paas/v4", "glm-4.5-flash"),
     "moonshot": ("https://api.moonshot.cn/v1", "kimi-k3"),
 }
+
+SUMMARY_CHUNK_CHARACTERS = 9_000
+MERGE_INPUT_CHARACTERS = 14_000
+ProgressCallback = Callable[[int, str], Awaitable[None] | None]
 
 
 class LLMSummarizer:
@@ -58,6 +64,7 @@ class LLMSummarizer:
         metadata: dict[str, Any] | None = None,
         style: str = "detailed",
         reasoning_effort: str = "auto",
+        progress_callback: ProgressCallback | None = None,
     ) -> str:
         if not segments:
             raise ValueError("Cannot summarize an empty transcript")
@@ -66,38 +73,115 @@ class LLMSummarizer:
         if reasoning_effort not in {"auto", "off", "low", "medium", "high", "max"}:
             raise ValueError(f"Unsupported reasoning effort: {reasoning_effort}")
 
-        chunks = chunk_segments(segments)
+        await self._report_progress(progress_callback, 2, "正在分析转录内容")
+        chunks = chunk_segments(segments, max_characters=SUMMARY_CHUNK_CHARACTERS)
         if len(chunks) == 1:
             source = segments_to_prompt(chunks[0])
         else:
-            condensed_chunks = []
+            condensed_chunks: list[str] = []
             for index, chunk in enumerate(chunks, start=1):
+                await self._report_progress(
+                    progress_callback,
+                    5 + int(52 * (index - 1) / len(chunks)),
+                    f"正在整理第 {index}/{len(chunks)} 个转录片段",
+                )
                 condensed_chunks.append(
                     await self._complete(
                         self._chunk_prompt(title, index, len(chunks), chunk),
-                        max_tokens=2_200,
+                        max_tokens=1_200,
                         effort=self._stage_effort(reasoning_effort, style, "notes"),
                     )
                 )
+            await self._report_progress(
+                progress_callback, 60, f"已整理 {len(chunks)} 个转录片段"
+            )
+            condensed_chunks = await self._reduce_chunks(
+                title,
+                condensed_chunks,
+                reasoning_effort,
+                style,
+                progress_callback,
+            )
             source = "\n\n".join(
                 f"### 片段 {index}\n{note}"
                 for index, note in enumerate(condensed_chunks, start=1)
             )
 
         max_tokens = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}[style]
+        await self._report_progress(progress_callback, 78, "正在生成完整笔记")
         draft = await self._complete(
             self._note_prompt(title, source, metadata or {}, style),
             max_tokens=max_tokens,
             effort=self._stage_effort(reasoning_effort, style, "notes"),
         )
+        await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
         if style == "detailed":
+            await self._report_progress(progress_callback, 93, "正在补充点评与分析")
             analysis = await self._complete(
                 self._analysis_prompt(title, draft),
                 max_tokens=3_200,
                 effort=self._stage_effort(reasoning_effort, style, "analysis"),
             )
             draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
+        await self._report_progress(progress_callback, 99, "正在保存笔记")
         return self._strip_code_fence(draft)
+
+    async def _reduce_chunks(
+        self,
+        title: str,
+        notes: list[str],
+        reasoning_effort: str,
+        style: str,
+        progress_callback: ProgressCallback | None,
+    ) -> list[str]:
+        level = 0
+        while sum(len(note) for note in notes) > MERGE_INPUT_CHARACTERS:
+            groups = self._group_notes(notes, MERGE_INPUT_CHARACTERS)
+            if len(groups) >= len(notes):
+                break
+            level += 1
+            merged: list[str] = []
+            for index, group in enumerate(groups, start=1):
+                await self._report_progress(
+                    progress_callback,
+                    min(75, 61 + level * 4 + int(4 * index / len(groups))),
+                    f"正在归并第 {level} 层内容 {index}/{len(groups)}",
+                )
+                merged.append(
+                    await self._complete(
+                        self._merge_prompt(title, level, index, len(groups), group),
+                        max_tokens=1_400,
+                        effort=self._stage_effort(reasoning_effort, style, "notes"),
+                    )
+                )
+            notes = merged
+        return notes
+
+    @staticmethod
+    def _group_notes(notes: Sequence[str], max_characters: int) -> list[list[str]]:
+        groups: list[list[str]] = []
+        current: list[str] = []
+        size = 0
+        for note in notes:
+            if current and size + len(note) > max_characters:
+                groups.append(current)
+                current = []
+                size = 0
+            current.append(note)
+            size += len(note)
+        if current:
+            groups.append(current)
+        return groups
+
+    @staticmethod
+    async def _report_progress(
+        callback: ProgressCallback | None, progress: int, message: str
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(progress, message)
+        if inspect.isawaitable(result):
+            await result
 
     @staticmethod
     def _stage_effort(selected: str, style: str, stage: str) -> str:
@@ -189,6 +273,24 @@ class LLMSummarizer:
 
 转录：
 {segments_to_prompt(segments)}"""
+
+    @staticmethod
+    def _merge_prompt(
+        title: str,
+        level: int,
+        index: int,
+        total: int,
+        notes: Sequence[str],
+    ) -> str:
+        material = "\n\n".join(notes)
+        return f"""视频标题：{title}
+这是长视频内容的第 {level} 层归并，第 {index}/{total} 组。
+
+请合并以下连续片段笔记，去除重复但保留观点、依据、例子、时间点和前后关系。
+不要评价，不补充外部知识，只输出供最终成稿使用的连续材料。
+
+片段笔记：
+{material}"""
 
     @staticmethod
     def _note_prompt(

@@ -93,6 +93,40 @@ async def test_short_transcript_uses_one_call_or_two_focused_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_transcript_uses_hierarchical_reduction_and_reports_progress() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    calls: list[str] = []
+    progress: list[int] = []
+
+    async def complete(prompt, max_tokens, effort="auto", retry_empty=True):
+        calls.append(prompt)
+        if "这是第" in prompt and "个连续片段" in prompt:
+            return "片段材料" * 1_500
+        if "这是长视频内容的第" in prompt:
+            return "归并材料" * 150
+        return "# 长视频笔记"
+
+    def report(value, message):
+        progress.append(value)
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(index, index + 1, f"第{index}段" + "内容" * 4_500)
+        for index in range(4)
+    ]
+
+    result = await summarizer.generate_summary(
+        "长视频", segments, style="faithful", progress_callback=report
+    )
+
+    assert result == "# 长视频笔记"
+    assert sum("归并" in prompt for prompt in calls) >= 2
+    assert progress == sorted(progress)
+    assert progress[-1] == 99
+
+
+@pytest.mark.asyncio
 async def test_gpt5_chat_completion_uses_supported_token_parameter() -> None:
     captured: dict = {}
 

@@ -6,8 +6,12 @@ VideoToNo is a local video-to-notes tool intended for personal use. It reads a v
 
 The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 
-## VideoToNo 1.0.0
+## VideoToNo 1.1.0
 
+- Shows the current version in the UI and lets users delete failed history entries together with their local artifacts.
+- Copies complete notes in one action and exports white-background PNGs as a long image or paginated 3:4 images.
+- Uses smaller chunks and hierarchical reduction for long transcripts, reducing final context pressure.
+- Reports chunking, reduction, drafting, and analysis progress, with a model-capability and token-cost advisory for long content.
 - Establishes a complete platform captions / Bilibili AI captions → Whisper fallback → LLM notes pipeline with real timestamps.
 - Supports reusable structured transcripts, resume workflows, task cancellation, elapsed-time reporting, and automatic Markdown note archiving.
 - Provides multiple providers, custom model IDs, three note styles, reasoning-effort controls, and optional screenshots.
@@ -34,9 +38,9 @@ The web interface and API are served by the same FastAPI process at <http://127.
 - Tries manual and automatic platform captions first, including Bilibili `ai-zh` tracks, then falls back to the `bestaudio/best` stream from `yt-dlp` and `faster-whisper`.
 - Preserves real segment start and end times from captions or Whisper instead of asking the language model to invent timestamps.
 - Checks transcript size and speech coverage before calling the language model. Muted, replaced, or outro-only sources stop early instead of producing misleading notes.
-- Sends short transcripts directly to the model and only uses chunking plus integration for long transcripts.
+- Sends short transcripts directly to the model; long transcripts are chunked and reduced hierarchically when the intermediate material is still too large.
 - Keeps screenshots disabled by default. When enabled, low-resolution preview frames are attached to the notes but are not analyzed by a vision model.
-- Downloads the Markdown note directly while keeping transcripts and optional images in the local task directory.
+- Copies complete notes and exports Markdown, HTML, JSON, plain text, or PNG while keeping transcripts and optional images in the local task directory.
 - Never writes API keys or Bilibili cookies to note output or logs. The web UI keeps them in memory only, including cookies obtained by QR sign-in; credentials are written as plaintext under `workspace/` only when an MCP save tool is called explicitly.
 
 ## Supported inputs
@@ -97,7 +101,7 @@ Open <http://127.0.0.1:8000> to use the app (frontend and API share this port); 
 
 ## Portable build (Windows exe)
 
-No Python installation is required. Check the [latest GitHub Release](https://github.com/like-attract/video-to-note/releases/latest) first. If that release includes `VideoToNo-1.0.0-portable.exe`, download it and double-click it. The source repository itself does not imply that a portable asset is currently available.
+No Python installation is required. Check the [latest GitHub Release](https://github.com/like-attract/video-to-note/releases/latest) first. If that release includes `VideoToNo-1.1.0-portable.exe`, download it and double-click it. The source repository itself does not imply that a portable asset is currently available.
 
 - The portable build has no console window. It starts the local backend, opens the default browser, and remains in the system tray; use the tray menu to open the interface, view logs, or exit.
 - If port 8000 is busy it picks the next free port; if the service is already running, a second launch just opens the browser.
@@ -110,7 +114,7 @@ To build it yourself (needs Python 3.11 with installed dependencies):
 .\scripts\build_exe.ps1
 ```
 
-The artifact is `dist\VideoToNo-1.0.0-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app icon is generated from `sources/icon_ico.png` (`sources/icon.ico`).
+The artifact is `dist\VideoToNo-1.1.0-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app icon is generated from `sources/icon_ico.png` (`sources/icon.ico`).
 
 Version 1.0 currently ships and maintains only the Windows portable build; no macOS artifact or compatibility guarantee is provided.
 
