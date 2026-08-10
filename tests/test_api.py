@@ -217,7 +217,8 @@ async def test_task_status_reports_and_freezes_elapsed_time() -> None:
     task_id = "timing-task"
     task = main.new_task("processing")
     main.tasks[task_id] = task
-    await asyncio.sleep(0.01)
+    # Windows 上 time.monotonic() 分辨率约 15.6ms，sleep 过短会得到 0.0
+    await asyncio.sleep(0.1)
 
     active = await main.get_task_status(task_id)
     assert active["elapsed_seconds"] > 0
