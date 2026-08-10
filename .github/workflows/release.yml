@@ -105,9 +105,12 @@ jobs:
           - 完整的“平台字幕 / B 站 AI 字幕 → Whisper 兜底 → LLM 笔记”处理链，保留真实时间轴
           - 结构化转录复用、断点继续、任务取消、处理计时，笔记自动归档到 workspace/notes
           - 多 Provider / 自定义模型、三种笔记风格、推理强度、可选定时截图
+          - 长转录细粒度分块与分层归并，降低上下文压力；生成阶段展示逐段进度
+          - 笔记一键复制，导出 Markdown / HTML / JSON / 纯文本 / PNG 长图或分页图片
+          - 页面显示当前版本；最近任务可删除失败记录及其本地产物
           - MCP 接入：Cherry Studio（SSE）与 Codex（stdio）；wait_for_task 等待终态，减少轮询
           - MCP 配置持久化：LLM 配置与 B 站凭据保存一次后免传参（明文存 workspace，仅本机可读）
-          - 前端依赖本地化（marked / DOMPurify），界面不依赖外网 CDN
+          - 前端依赖本地化（marked / DOMPurify / html2canvas），界面不依赖外网 CDN
           - 亮暗主题、扫码登录导入 B 站凭据、Whisper 模型缓存三态标注
 
           ### 安全边界
