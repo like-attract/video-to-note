@@ -114,9 +114,9 @@ To build it yourself (needs Python 3.11 with installed dependencies):
 .\scripts\build_exe.ps1
 ```
 
-The artifact is `dist\VideoToNo-1.1.0-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app icon is generated from `sources/icon_ico.png` (`sources/icon.ico`).
+The artifact is `dist\VideoToNo-1.1.0-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app uses `sources/icon.ico`, which can be regenerated from `sources/icon.png` with `scripts/make_icon.py`.
 
-Version 1.0 currently ships and maintains only the Windows portable build; no macOS artifact or compatibility guarantee is provided.
+Only the Windows portable build is currently released and maintained; no macOS artifact or compatibility guarantee is provided.
 
 ## Usage
 

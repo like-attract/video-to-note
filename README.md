@@ -113,9 +113,9 @@ py -3.11 -m venv .venv
 .\scripts\build_exe.ps1
 ```
 
-产物为 `dist\VideoToNo-1.1.0-portable.exe`，无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标来自 `sources/icon.ico`（由 `sources/icon_ico.png` 生成）。
+产物为 `dist\VideoToNo-1.1.0-portable.exe`，无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标使用 `sources/icon.ico`，可通过 `scripts/make_icon.py` 从 `sources/icon.png` 重新生成。
 
-1.0 当前只发布和维护 Windows 便携版；macOS 暂不提供构建产物和兼容性承诺。
+当前只发布和维护 Windows 便携版；macOS 暂不提供构建产物和兼容性承诺。
 
 ## 使用方法
 
