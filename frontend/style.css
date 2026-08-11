@@ -130,14 +130,10 @@ button, select { cursor: pointer; }
 .brand-mark {
     width: 40px;
     height: 40px;
-    display: grid;
-    place-items: center;
+    display: block;
     flex: none;
-    border: 1px solid rgba(69, 200, 144, 0.45);
-    border-radius: var(--radius);
-    background: var(--green-soft);
-    color: var(--green);
-    font: 700 13px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+    border-radius: 10px;
+    object-fit: contain;
 }
 
 .brand h1, .brand p, .workspace-header h2, .workspace-header p, .section-heading h3,
@@ -440,10 +436,10 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .progress-bar { height: 7px; overflow: hidden; border-radius: 4px; background: var(--surface-soft); }
 .progress-fill { width: 0; height: 100%; border-radius: inherit; background: var(--green); transition: width 250ms ease; }
 .llm-active .progress-fill { background: repeating-linear-gradient(110deg, var(--green) 0 18px, var(--blue) 18px 28px); background-size: 180% 100%; animation: progress-working 1.8s linear infinite; }
-.progress-steps { display: grid; grid-template-columns: .7fr .7fr .8fr 1.2fr .7fr 2.2fr; gap: 8px; margin: 18px 0 24px; padding: 0; list-style: none; }
-.step { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 11px; }
+.progress-steps { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 18px 0 24px; padding: 0; list-style: none; }
+.step { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--text-muted); font-size: 11px; }
 .step span { width: 22px; height: 22px; display: grid; place-items: center; flex: none; border: 1px solid var(--border-strong); border-radius: 50%; font: 700 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.step em { overflow: hidden; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.step em { min-width: 0; overflow: hidden; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
 .step.active { color: var(--blue); }
 .step.active span { border-color: var(--blue); background: var(--blue-soft); }
 .step.completed { color: var(--green); }

@@ -75,7 +75,7 @@ async def test_short_transcript_uses_one_call_or_two_focused_calls() -> None:
     summarizer.warnings = []
     calls: list[str] = []
 
-    async def complete(prompt, max_tokens, effort="auto", retry_empty=True):
+    async def complete(prompt, max_tokens, effort="auto", retry_empty=True, **kwargs):
         calls.append(effort)
         return "## 点评与分析" if "点评与分析" in prompt else "# 视频笔记"
 
@@ -99,7 +99,7 @@ async def test_long_transcript_uses_hierarchical_reduction_and_reports_progress(
     calls: list[str] = []
     progress: list[int] = []
 
-    async def complete(prompt, max_tokens, effort="auto", retry_empty=True):
+    async def complete(prompt, max_tokens, effort="auto", retry_empty=True, **kwargs):
         calls.append(prompt)
         if "这是第" in prompt and "个连续片段" in prompt:
             return "片段材料" * 1_500
@@ -152,6 +152,7 @@ async def test_gpt5_chat_completion_uses_supported_token_parameter() -> None:
 @pytest.mark.asyncio
 async def test_empty_thinking_response_retries_with_thinking_disabled() -> None:
     requests: list[dict] = []
+    progress: list[tuple[int, str]] = []
 
     async def create(**kwargs):
         requests.append(kwargs)
@@ -172,7 +173,25 @@ async def test_empty_thinking_response_retries_with_thinking_disabled() -> None:
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
 
-    assert await summarizer._complete("测试", 800, "high") == "重试成功"
+    def report(value: int, message: str) -> None:
+        progress.append((value, message))
+
+    assert (
+        await summarizer._complete(
+            "测试",
+            800,
+            "high",
+            progress_callback=report,
+            progress=93,
+            stage="正在补充点评与分析",
+        )
+        == "重试成功"
+    )
     assert requests[0]["extra_body"]["thinking"]["type"] == "enabled"
     assert requests[1]["extra_body"]["thinking"]["type"] == "disabled"
-    assert summarizer.warnings
+    assert progress == [
+        (93, "正在补充点评与分析：模型首次未返回正文，已关闭深度思考并重试")
+    ]
+    assert summarizer.warnings == [
+        "正在补充点评与分析：模型首次未返回正文，已关闭深度思考并重试"
+    ]

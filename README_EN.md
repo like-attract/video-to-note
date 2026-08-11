@@ -6,6 +6,13 @@ VideoToNo is a local video-to-notes tool intended for personal use. It reads a v
 
 The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
 
+## VideoToNo 1.1.1
+
+- Replaces the top-left product-page brand mark with the shared `sources/icon.png`, matching the desktop and tray icon.
+- Spaces the six processing stages evenly while keeping the two-column layout on narrow screens.
+- Shows empty-response retry messages immediately with the affected long-video stage, instead of appending a misleading warning after generation finishes.
+- Updates the configuration, processing-progress, and generated-note screenshots.
+
 ## VideoToNo 1.1.0
 
 - Shows the current version in the UI and lets users delete failed history entries together with their local artifacts.
@@ -101,7 +108,7 @@ Open <http://127.0.0.1:8000> to use the app (frontend and API share this port); 
 
 ## Portable build (Windows exe)
 
-No Python installation is required. Check the [latest GitHub Release](https://github.com/like-attract/video-to-note/releases/latest) first. If that release includes `VideoToNo-1.1.0-portable.exe`, download it and double-click it. The source repository itself does not imply that a portable asset is currently available.
+No Python installation is required. Check the [latest GitHub Release](https://github.com/like-attract/video-to-note/releases/latest) first. If that release includes `VideoToNo-1.1.1-portable.exe`, download it and double-click it. The source repository itself does not imply that a portable asset is currently available.
 
 - The portable build has no console window. It starts the local backend, opens the default browser, and remains in the system tray; use the tray menu to open the interface, view logs, or exit.
 - If port 8000 is busy it picks the next free port; if the service is already running, a second launch just opens the browser.
@@ -114,7 +121,7 @@ To build it yourself (needs Python 3.11 with installed dependencies):
 .\scripts\build_exe.ps1
 ```
 
-The artifact is `dist\VideoToNo-1.1.0-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app uses `sources/icon.ico`, which can be regenerated from `sources/icon.png` with `scripts/make_icon.py`.
+The artifact is `dist\VideoToNo-1.1.1-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app uses `sources/icon.ico`, which can be regenerated from `sources/icon.png` with `scripts/make_icon.py`.
 
 Only the Windows portable build is currently released and maintained; no macOS artifact or compatibility guarantee is provided.
 

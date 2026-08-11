@@ -44,6 +44,7 @@ WHISPER_CACHE_DIR = Path(
     os.getenv("WHISPER_CACHE_DIR", str(WORKSPACE_DIR / "_model_cache"))
 ).resolve()
 FRONTEND_DIR = BASE_DIR / "frontend"
+APP_ICON_PATH = BASE_DIR / "sources" / "icon.png"
 FAVICON_PATH = BASE_DIR / "sources" / "icon.ico"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("MAX_CONCURRENT_TASKS", "1")))
@@ -67,7 +68,7 @@ DOUYIN_HINT = (
     "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.0")
+app = FastAPI(title="VideoToNo API", version="1.1.1")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -957,7 +958,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             progress_callback=report_llm_progress,
         )
         raise_if_cancel_requested(task)
-        task["logs"].extend(getattr(summarizer, "warnings", []))
+        for warning in getattr(summarizer, "warnings", []):
+            if warning not in task["logs"]:
+                task["logs"].append(warning)
         if screenshots:
             summary += "\n\n## 视频截图\n\n" + "\n\n".join(
                 f"![截图 {index}](./images/{path.name})"
@@ -1151,6 +1154,13 @@ try:
 except ImportError:
     # mcp 依赖未安装时跳过，不影响主服务
     pass
+
+
+@app.get("/icon.png", include_in_schema=False)
+async def app_icon() -> FileResponse:
+    if not APP_ICON_PATH.is_file():
+        raise HTTPException(status_code=404, detail="应用图标不存在")
+    return FileResponse(APP_ICON_PATH, media_type="image/png")
 
 
 @app.get("/favicon.ico", include_in_schema=False)

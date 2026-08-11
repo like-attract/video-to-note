@@ -80,16 +80,21 @@ class LLMSummarizer:
         else:
             condensed_chunks: list[str] = []
             for index, chunk in enumerate(chunks, start=1):
+                chunk_progress = 5 + int(52 * (index - 1) / len(chunks))
+                chunk_stage = f"正在整理第 {index}/{len(chunks)} 个转录片段"
                 await self._report_progress(
                     progress_callback,
-                    5 + int(52 * (index - 1) / len(chunks)),
-                    f"正在整理第 {index}/{len(chunks)} 个转录片段",
+                    chunk_progress,
+                    chunk_stage,
                 )
                 condensed_chunks.append(
                     await self._complete(
                         self._chunk_prompt(title, index, len(chunks), chunk),
                         max_tokens=1_200,
                         effort=self._stage_effort(reasoning_effort, style, "notes"),
+                        progress_callback=progress_callback,
+                        progress=chunk_progress,
+                        stage=chunk_stage,
                     )
                 )
             await self._report_progress(
@@ -108,19 +113,29 @@ class LLMSummarizer:
             )
 
         max_tokens = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}[style]
-        await self._report_progress(progress_callback, 78, "正在生成完整笔记")
+        draft_progress = 78
+        draft_stage = "正在生成完整笔记"
+        await self._report_progress(progress_callback, draft_progress, draft_stage)
         draft = await self._complete(
             self._note_prompt(title, source, metadata or {}, style),
             max_tokens=max_tokens,
             effort=self._stage_effort(reasoning_effort, style, "notes"),
+            progress_callback=progress_callback,
+            progress=draft_progress,
+            stage=draft_stage,
         )
         await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
         if style == "detailed":
-            await self._report_progress(progress_callback, 93, "正在补充点评与分析")
+            analysis_progress = 93
+            analysis_stage = "正在补充点评与分析"
+            await self._report_progress(progress_callback, analysis_progress, analysis_stage)
             analysis = await self._complete(
                 self._analysis_prompt(title, draft),
                 max_tokens=3_200,
                 effort=self._stage_effort(reasoning_effort, style, "analysis"),
+                progress_callback=progress_callback,
+                progress=analysis_progress,
+                stage=analysis_stage,
             )
             draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
         await self._report_progress(progress_callback, 99, "正在保存笔记")
@@ -142,16 +157,21 @@ class LLMSummarizer:
             level += 1
             merged: list[str] = []
             for index, group in enumerate(groups, start=1):
+                merge_progress = min(75, 61 + level * 4 + int(4 * index / len(groups)))
+                merge_stage = f"正在归并第 {level} 层内容 {index}/{len(groups)} 组"
                 await self._report_progress(
                     progress_callback,
-                    min(75, 61 + level * 4 + int(4 * index / len(groups))),
-                    f"正在归并第 {level} 层内容 {index}/{len(groups)}",
+                    merge_progress,
+                    merge_stage,
                 )
                 merged.append(
                     await self._complete(
                         self._merge_prompt(title, level, index, len(groups), group),
                         max_tokens=1_400,
                         effort=self._stage_effort(reasoning_effort, style, "notes"),
+                        progress_callback=progress_callback,
+                        progress=merge_progress,
+                        stage=merge_stage,
                     )
                 )
             notes = merged
@@ -197,6 +217,9 @@ class LLMSummarizer:
         max_tokens: int,
         effort: str = "auto",
         retry_empty: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        progress: int = 0,
+        stage: str = "模型调用",
     ) -> str:
         request: dict[str, Any] = {
             "model": self.model,
@@ -221,8 +244,18 @@ class LLMSummarizer:
         content = response.choices[0].message.content if response.choices else None
         if not content:
             if retry_empty and effort != "off":
-                self.warnings.append("模型未返回正文，已关闭深度思考自动重试一次")
-                return await self._complete(prompt, max_tokens, "off", retry_empty=False)
+                warning = f"{stage}：模型首次未返回正文，已关闭深度思考并重试"
+                self.warnings.append(warning)
+                await self._report_progress(progress_callback, progress, warning)
+                return await self._complete(
+                    prompt,
+                    max_tokens,
+                    "off",
+                    retry_empty=False,
+                    progress_callback=progress_callback,
+                    progress=progress,
+                    stage=stage,
+                )
             finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
             raise RuntimeError(
                 f"模型未返回正文（finish_reason={finish_reason}）。"

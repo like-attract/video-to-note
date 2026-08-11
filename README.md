@@ -6,6 +6,13 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具。它在本机�
 
 前端页面和 API 由同一个 FastAPI 服务提供，默认地址为 <http://127.0.0.1:8000>。
 
+## VideoToNo 1.1.1
+
+- 产品页左上角品牌标记改用统一的 `sources/icon.png`，与桌面和托盘图标保持一致。
+- 处理进度的 6 个环节改为等距排列，窄屏继续采用两列布局。
+- 长视频分段、成稿和点评阶段的空正文自动重试提示会即时显示具体阶段，避免生成完成后才出现误导性日志。
+- 更新配置、处理进度和笔记输出的产品截图。
+
 ## VideoToNo 1.1.0
 
 - 页面显示当前版本；最近任务可直接删除失败记录及其本地产物。
@@ -100,7 +107,7 @@ py -3.11 -m venv .venv
 
 ## 便携版（Windows exe）
 
-不需要 Python 环境。请先查看 [GitHub Releases 的最新版本](https://github.com/like-attract/video-to-note/releases/latest)；如果发布页附带 `VideoToNo-1.1.0-portable.exe`，下载后双击即可运行。仓库源码本身不代表发布页一定已有便携资产。
+不需要 Python 环境。请先查看 [GitHub Releases 的最新版本](https://github.com/like-attract/video-to-note/releases/latest)；如果发布页附带 `VideoToNo-1.1.1-portable.exe`，下载后双击即可运行。仓库源码本身不代表发布页一定已有便携资产。
 
 - 便携版没有控制台窗口，会自动在本机启动服务、打开默认浏览器并驻留系统托盘；通过托盘菜单打开界面、查看日志或退出。
 - 端口 8000 被占用时自动顺延；若服务已在运行，再次双击只会打开浏览器，不会重复启动。
@@ -113,7 +120,7 @@ py -3.11 -m venv .venv
 .\scripts\build_exe.ps1
 ```
 
-产物为 `dist\VideoToNo-1.1.0-portable.exe`，无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标使用 `sources/icon.ico`，可通过 `scripts/make_icon.py` 从 `sources/icon.png` 重新生成。
+产物为 `dist\VideoToNo-1.1.1-portable.exe`，无控制台窗口，驻留系统托盘（右键菜单：打开界面 / 查看日志 / 退出），日志写入工作目录的 `_app.log`。程序图标使用 `sources/icon.ico`，可通过 `scripts/make_icon.py` 从 `sources/icon.png` 重新生成。
 
 当前只发布和维护 Windows 便携版；macOS 暂不提供构建产物和兼容性承诺。
 

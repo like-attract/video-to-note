@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.0"
+    assert health.json()["version"] == "1.1.1"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     page = client.get("/")
@@ -28,11 +28,15 @@ def test_health_and_frontend_are_served() -> None:
     assert 'id="recentTaskList"' in page.text
     assert 'id="copyNoteBtn"' in page.text
     assert 'value="png"' in page.text
+    assert 'class="brand-mark" src="/icon.png"' in page.text
     assert "记住 LLM 配置" not in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200
     assert favicon.headers["content-type"].startswith("image/x-icon")
+    app_icon = client.get("/icon.png")
+    assert app_icon.status_code == 200
+    assert app_icon.headers["content-type"].startswith("image/png")
 
 
 def test_frontend_sanitizes_generated_markdown() -> None:
