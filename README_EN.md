@@ -108,11 +108,45 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 <details>
 <summary>🤖 MCP / AI clients (advanced)</summary>
 
-After VideoToNo is running, connect an SSE-capable client such as Cherry Studio to:
+VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
+
+Available tools:
+
+| Tool | Description |
+|---|---|
+| `summarize_video` | Submit a video summarization task; URL, API key, model, and Bilibili credentials can be omitted when saved local config is available |
+| `wait_for_task` | Wait for a terminal task state for up to 45 seconds per call and return the note when complete; use it instead of aggressive polling |
+| `get_task_status` | Inspect intermediate task progress |
+| `list_whisper_models` | Show local Whisper model cache status |
+| `save_llm_config` | Save provider, model, and API key locally so they do not need to be passed again |
+| `save_bilibili_credentials` | Save Bilibili credentials such as SESSDATA for automatic use with Bilibili videos |
+| `get_saved_config` | View saved configuration status with secrets masked |
+
+### Cherry Studio (recommended; no local Python needed)
+
+1. Start VideoToNo, then open Cherry Studio **Settings → MCP Servers → Add**;
+2. Choose **Server-Sent Events (SSE)** and enter:
 
 ```text
 http://127.0.0.1:8000/mcp/sse
 ```
+
+Use the actual port if it is not 8000. Save and enable the server, then ask the AI client to use VideoToNo.
+
+For first-time use, ask the AI to save your configuration once. You will not need to repeat sensitive information in later conversations:
+
+```text
+Please call save_llm_config to save my configuration: my DeepSeek API key is sk-xxx.
+Then call save_bilibili_credentials to save: sessdata=xxx, bili_jct=xxx, buvid3=xxx.
+```
+
+Afterward, simply ask for what you need:
+
+```text
+Summarize this Bilibili video: https://www.bilibili.com/video/BV1xx
+```
+
+### Codex CLI
 
 For stdio clients such as Codex:
 
@@ -120,16 +154,46 @@ For stdio clients such as Codex:
 codex mcp add local videotono -- python -m backend.mcp_server
 ```
 
-MCP can submit video jobs, wait for completion, inspect Whisper model status, and optionally save local model/API configuration.
+The MCP server automatically scans ports 8000–8019 to locate a running VideoToNo service. Set `VIDEOTONOTES_BACKEND_URL` to explicitly choose the backend URL.
+
+> Privacy: `save_llm_config` and `save_bilibili_credentials` store plaintext files under the local workspace: `workspace/llm_config.json` and `workspace/bili_credentials.json`. Do not share them. Nothing is persisted unless you explicitly call a save tool; `workspace/` is excluded by `.gitignore` and is not committed to this repository.
 
 </details>
 
 <details>
 <summary>❓ FAQ</summary>
 
-- **Why is the first transcription slow?** The selected Whisper model is downloaded on first use and reused afterward.
-- **When is a Bilibili cookie needed?** Some signed-in videos or AI-caption endpoints require credentials for an account that already has access.
-- **Why did a video fail?** Paid content, DRM, CAPTCHAs, region restrictions, expired links, missing captions, and platform changes can all prevent extraction. Existing transcript files are kept when possible for reuse.
+### Why does the first transcription take so long?
+
+`faster-whisper` downloads a model the first time that model is used. Download time depends on model size and network conditions. The local cache is reused later, but choosing another model can trigger another download.
+
+Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk. Downloads use the **hf-mirror.com mirror** by default with resume and retry support; set `HF_ENDPOINT` to switch sources, for example `HF_ENDPOINT=https://huggingface.co` for the official host. If downloads still fail, check network connectivity, proxy settings, and write access to the cache directory.
+
+The app disables Hugging Face's Xet download backend by default and uses regular HTTP downloads to avoid CAS reconstruction failures on some Windows networks. If the selected model is incomplete but a usable `base` model is already cached, the job falls back to `base` and records that decision in the task log rather than waiting indefinitely for a weight download.
+
+### Why is CPU transcription slower than the video duration?
+
+Speed depends on CPU performance, media duration, and model size. CPU mode uses `int8` to reduce resource pressure, but `medium`, `large-v3`, and `turbo` can still be slow and memory-intensive. Start with `base` on a personal computer, and enable GPU mode only after confirming CUDA works correctly.
+
+### Why would I need a Bilibili cookie?
+
+Publicly accessible videos normally do not need one. Some visible Chinese AI captions are returned only by signed-in caption endpoints; without credentials, the app records the reason and falls back to Whisper. Signed-in, restricted, or caption-limited videos may need credentials for an account that already has access. A cookie cannot grant permissions the account does not have, can expire, and may stop working when the platform changes its rules.
+
+### What happens to tasks after restarting the service?
+
+VideoToNo restores recent tasks from `workspace/<task-id>/task.json`. Completed tasks remain available for preview and download, and uploaded tasks that have not started can be submitted again. A task that was running during restart is marked failed because external downloads, Whisper, and LLM requests cannot continue across processes; already generated captions, transcripts, and audio can still be reused on a later submission.
+
+### Why can a particular URL not be processed?
+
+First confirm that it plays in the current network and account, then update the project's `yt-dlp` dependency. Paid content, DRM, CAPTCHAs, region restrictions, expired signatures, and platform API changes can all prevent extraction. This project does not bypass platform access controls.
+
+### What happens when no captions are available?
+
+The app downloads the best available audio stream and runs `faster-whisper` locally. This takes longer than using captions and is affected by audio quality, accents, background noise, and domain-specific vocabulary.
+
+### Why does the log say that the model returned no body and reasoning was disabled for a retry?
+
+That message means the model actually returned an empty body; it is not merely a display issue. The app reports it immediately at the current generation stage and retries once with reasoning disabled. If the retry is also empty, the task follows its actual error path.
 
 </details>
 
