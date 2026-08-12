@@ -1,304 +1,138 @@
-# VideoToNo
+<p align="center">
+  <img src="sources/icon.png" width="96" alt="VideoToNo icon">
+</p>
 
-[简体中文](README.md) | [English](README_EN.md)
+<h1 align="center">VideoToNo v1.1.1</h1>
 
-VideoToNo is a local video-to-notes tool intended for personal use. It reads a video URL or local media file on your machine, prefers subtitles supplied by the platform, and is **deeply integrated with Bilibili** - besides regular subtitles it can fetch Bilibili AI subtitles directly (scan-to-login import makes credentials effortless). When no subtitles are available it falls back to local transcription with `faster-whisper`, and then asks the selected language model to produce timestamped Markdown notes.
+<p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
-The web interface and API are served by the same FastAPI process at <http://127.0.0.1:8000> by default.
+<p align="center">🌐 <a href="README.md">简体中文</a> · <a href="README_EN.md">English</a></p>
 
-## VideoToNo 1.1.1
+<p align="center"><span style="white-space: nowrap;"><a href="https://github.com/like-attract/video-to-note/releases/latest"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/v/release/like-attract/video-to-note?display_name=tag&style=flat-square&label=release&color=2563eb" alt="Latest release"></a>&nbsp;<a href="LICENSE"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/license/like-attract/video-to-note?style=flat-square&label=license&color=22c55e" alt="MIT License"></a>&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/frontend-Vanilla%20JS-E34F26?style=flat-square&logo=javascript&logoColor=white" alt="Frontend">&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="Backend">&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11"></span></p>
 
-- Replaces the top-left product-page brand mark with the shared `sources/icon.png`, matching the desktop and tray icon.
-- Spaces the six processing stages evenly while keeping the two-column layout on narrow screens.
-- Shows empty-response retry messages immediately with the affected long-video stage, instead of appending a misleading warning after generation finishes.
-- Updates the configuration, processing-progress, and generated-note screenshots.
+<p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ Download the Windows portable build</strong></a></p>
 
-## VideoToNo 1.1.0
+VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-- Shows the current version in the UI and lets users delete failed history entries together with their local artifacts.
-- Copies complete notes in one action and exports white-background PNGs as a long image or paginated 3:4 images.
-- Uses smaller chunks and hierarchical reduction for long transcripts, reducing final context pressure.
-- Reports chunking, reduction, drafting, and analysis progress, with a model-capability and token-cost advisory for long content.
-- Establishes a complete platform captions / Bilibili AI captions → Whisper fallback → LLM notes pipeline with real timestamps.
-- Supports reusable structured transcripts, resume workflows, task cancellation, elapsed-time reporting, and automatic Markdown note archiving.
-- Provides multiple providers, custom model IDs, three note styles, reasoning-effort controls, and optional screenshots.
-- Includes a local web interface and MCP integration; `wait_for_task` waits for terminal task states without aggressive polling.
-- Defines the personal-desktop security boundary: listen only on loopback and treat locally saved API keys and Bilibili credentials as sensitive plaintext.
+## 🆕 What's New (v1.1.0 → v1.1.1)
 
-## Screenshots
+- 🎬 **More reliable long-video generation**: transcripts are split at segment boundaries and reduced hierarchically, with live chunk, draft, and analysis progress.
+- 📝 **Smoother output workflow**: copy complete notes, export Markdown / HTML / JSON / plain text / PNG, delete failed tasks, resume from saved transcripts, cancel jobs, and archive notes automatically.
+- 🧠 **Clearer model status**: when a model returns an empty body, the affected stage reports it immediately and retries once with reasoning disabled.
+- 🎨 **More consistent UI**: the product page, desktop app, and tray use the shared `sources/icon.png` asset; the six progress stages are evenly spaced; product screenshots were refreshed.
+- 🔌 **Better local integration**: multiple providers, custom model IDs, note styles, reasoning controls, and MCP access for clients such as Cherry Studio and Codex.
 
-### Configuration and submission
+## 🖼️ Screenshots
 
-![VideoToNo configuration and video submission interface](sources/preview.png)
+### ⚙️ Configuration
 
-### Processing progress
+<p align="center"><img src="sources/preview.png" alt="VideoToNo configuration and video submission interface" width="100%"></p>
 
-![VideoToNo task progress and runtime log](sources/process.png)
+### ⏳ Processing
 
-### Generated notes
+<p align="center"><img src="sources/process.png" alt="VideoToNo task progress and runtime log" width="100%"></p>
 
-![Detailed video notes generated by VideoToNo](sources/output-public.png)
+### 📝 Generated note
 
-## Features
+<p align="center"><img src="sources/output-public.png" alt="Detailed video notes generated by VideoToNo" width="100%"></p>
 
-- Accepts video URLs and local audio or video files.
-- Tries manual and automatic platform captions first, including Bilibili `ai-zh` tracks, then falls back to the `bestaudio/best` stream from `yt-dlp` and `faster-whisper`.
-- Preserves real segment start and end times from captions or Whisper instead of asking the language model to invent timestamps.
-- Checks transcript size and speech coverage before calling the language model. Muted, replaced, or outro-only sources stop early instead of producing misleading notes.
-- Sends short transcripts directly to the model; long transcripts are chunked and reduced hierarchically when the intermediate material is still too large.
-- Keeps screenshots disabled by default. When enabled, low-resolution preview frames are attached to the notes but are not analyzed by a vision model.
-- Copies complete notes and exports Markdown, HTML, JSON, plain text, or PNG while keeping transcripts and optional images in the local task directory.
-- Never writes API keys or Bilibili cookies to note output or logs. The web UI keeps them in memory only, including cookies obtained by QR sign-in; credentials are written as plaintext under `workspace/` only when an MCP save tool is called explicitly.
+## 🚀 Portable build (recommended)
 
-## Supported inputs
+No Python or development setup is required. Download `VideoToNo-1.1.1-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
-The current implementation is primarily intended for:
+1. Download and double-click the exe;
+2. Wait for the local page to open in your browser;
+3. Enter a provider, model, and API key, then paste a video URL or upload a local file;
+4. Generate and review your note.
 
-- Bilibili video URLs;
-- YouTube video URLs;
-- other `http` or `https` video URLs that the installed version of `yt-dlp` can parse;
-- local media files with these extensions: `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.mp4`, `.mkv`, `.mov`, `.webm`, and `.avi`.
+The portable build starts the local service and stays in the system tray. The first Whisper transcription downloads a model, so keep the network available. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
 
-Platform APIs, sign-in requirements, and anti-automation measures change over time. This project does not guarantee that every video, format, or platform listed above will always work. Actual support depends on access permissions, caption availability, and `yt-dlp` support for the specific URL. Playlists are handled as a single video rather than as a batch.
+## ✨ Highlights
 
-**Platform adaptation notes**: Bilibili is deeply integrated - besides the human-made subtitles readable via yt-dlp, the app also queries Bilibili's own API for AI subtitles (ai-zh / ai-en / ai-ja, requires login credentials; the UI supports QR-code login import). Douyin, iQiyi, and Tencent Video are **not adapted** and not guaranteed to work (iQiyi and Tencent Video are not planned). For those platforms, prefer links with public subtitles or local files.
+- 🎥 **Flexible inputs**: Bilibili, YouTube, other URLs supported by the installed `yt-dlp`, and local audio/video files.
+- 🇨🇳 **Bilibili integration**: fetches Bilibili AI captions after sign-in, with QR-code credential import in the UI.
+- 🧾 **Real timestamps**: keeps segment start and end times from captions or Whisper instead of asking the model to invent them.
+- 🧠 **Long-transcript handling**: chunks, summarizes, and reduces long material while keeping context pressure under control.
+- 🖼️ **Multiple exports**: Markdown, HTML, JSON, plain text, and PNG, with optional video screenshots as note attachments.
+- 🛡️ **Local-first**: media downloads, transcription, and file generation happen locally; the service listens on `127.0.0.1` by default.
 
-## Pipeline
+## 🔁 Processing pipeline
 
-1. Read metadata from a URL, or accept a local media upload.
-2. For online videos, look for Chinese or English manual captions and then automatic captions.
-3. If captions are missing, inaccessible, or cannot be parsed, download the `bestaudio/best` stream and transcribe it with `faster-whisper`. Local files go directly to transcription.
-4. Save caption or transcription segments with their real start and end times.
-5. Split long transcripts at segment boundaries, summarize each chunk, and combine the results into final notes.
-6. Optionally extract frames at a fixed interval.
-7. Export Markdown notes, transcript files, and optional screenshots.
+```text
+Video URL / local file
+        ↓
+Platform captions (Bilibili AI captions first)
+        ↓ when unavailable
+Local faster-whisper transcription
+        ↓
+LLM-generated timestamped Markdown note
+```
 
-## Requirements
+## 🌍 Supported inputs
 
-- Windows + PowerShell (other OSes can run Uvicorn manually), Python 3.11
-- Network access to the video source, the Whisper model download host, and the selected LLM API
-- An API key for a supported language-model service
-- Optional: an NVIDIA GPU (CPU is used otherwise)
+- Bilibili, YouTube, and other `http` / `https` video URLs that the installed `yt-dlp` can parse;
+- local `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.mp4`, `.mkv`, `.mov`, `.webm`, and `.avi` files;
+- Douyin, iQiyi, and Tencent Video are not specially adapted, so support depends on access permissions, caption availability, and `yt-dlp` behavior.
 
-> The portable exe does not require a Python environment.
+## ⚙️ Use and configure
 
-## Installation
+After starting the app:
+
+1. Choose a provider and model, enter an API key, or provide a custom OpenAI-compatible endpoint;
+2. Choose a note style, reasoning effort, and Whisper model;
+3. Paste a video URL or upload a local file;
+4. Preview, copy, or download the generated note.
+
+API keys and QR-login Bilibili cookies stay in the current page/process by default. They are written as plaintext under the local `workspace/` only when an MCP save tool is explicitly used; do not share those files.
+
+<details>
+<summary>🧑‍💻 Source use and building (developers)</summary>
+
+If you want the source, use `git clone` or GitHub **Code → Download ZIP**. The project targets Windows + Python 3.11; install `backend/requirements.txt` and use `start.ps1` to run it:
 
 ```powershell
-py -3.11 -m venv .venv
+git clone https://github.com/like-attract/video-to-note.git
+cd video-to-note
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.\start.ps1
 ```
 
-## Running the app
+Build a Windows portable executable with:
 
 ```powershell
-.\start.ps1                  # Start in the background (checks port and health)
-.\stop.ps1                   # Stop
-.\restart.ps1                # Restart
-.\start.ps1 -Foreground      # Foreground debugging; stop with Ctrl+C
+powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 ```
 
-`HOST`, `PORT`, and `RELOAD` can be set in the project-root `.env`. Or run manually:
+</details>
 
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
+<details>
+<summary>🤖 MCP / AI clients (advanced)</summary>
 
-Open <http://127.0.0.1:8000> to use the app (frontend and API share this port); the health endpoint is <http://127.0.0.1:8000/api/health>.
-
-## Portable build (Windows exe)
-
-No Python installation is required. Check the [latest GitHub Release](https://github.com/like-attract/video-to-note/releases/latest) first. If that release includes `VideoToNo-1.1.1-portable.exe`, download it and double-click it. The source repository itself does not imply that a portable asset is currently available.
-
-- The portable build has no console window. It starts the local backend, opens the default browser, and remains in the system tray; use the tray menu to open the interface, view logs, or exit.
-- If port 8000 is busy it picks the next free port; if the service is already running, a second launch just opens the browser.
-- Outputs (videos, transcripts, screenshots, notes) go to `workspace\` next to the exe by default; when the exe directory is not writable it falls back to `%LOCALAPPDATA%\VideoToNo\workspace`. Override with the `VIDEOTONOTES_WORKSPACE` / `WHISPER_CACHE_DIR` environment variables.
-- The first Whisper transcription downloads the model into the workspace, so network access is required.
-
-To build it yourself (needs Python 3.11 with installed dependencies):
-
-```powershell
-.\scripts\build_exe.ps1
-```
-
-The artifact is `dist\VideoToNo-1.1.1-portable.exe`. It has no console window and remains in the system tray; logs are written to `_app.log` in the workspace. The app uses `sources/icon.ico`, which can be regenerated from `sources/icon.png` with `scripts/make_icon.py`.
-
-Only the Windows portable build is currently released and maintained; no macOS artifact or compatibility guarantee is provided.
-
-## Usage
-
-1. Select a provider, choose a preset model, and enter its API key. DeepSeek presets submit `deepseek-v4-flash` or `deepseek-v4-pro` verbatim; the job log shows the effective provider, model, and base URL.
-2. Select a note style. Concise and faithful modes use one call for short transcripts. Detailed notes with commentary first write faithful notes, then make a separate focused call for balanced commentary and analysis.
-3. Select reasoning effort. Auto disables thinking for concise notes, uses high effort for faithful notes, and maximum effort for analysis. The backend maps these choices to provider-specific parameters and retries an empty response once with thinking disabled.
-4. Select a Whisper model. `base` is the default because its download is smaller and startup is more reliable. `small` is generally more accurate for Chinese speech but needs more download time, memory, and processing time.
-5. Paste a video URL, or switch to local-file mode and upload media.
-6. Reuse mode finds an existing `transcript.json` for the same URL. The failure and result actions can explicitly resume an old task; restart mode repeats caption, audio, and Whisper processing.
-7. If a Bilibili video cannot be accessed publicly, optionally enter `SESSDATA`, `bili_jct`, and `buvid3` for the current session.
-8. Start the job, then preview or download the Markdown note. A cancellation request takes effect after the current download, Whisper, or model call returns, while preserving completed intermediate files for later reuse.
-
-Screenshots are disabled by default. Enabling them makes online jobs download an additional low-resolution video and extract frames at the selected interval, increasing runtime, bandwidth, and disk use. Screenshots are currently attached as reference files only; they are not sent to a multimodal model for visual analysis.
-
-## Output
-
-Each job writes its files under `workspace/<task-id>/`, and the result view shows the absolute directory path. The frontend downloads `notes.md` directly; the directory also contains:
-
-Reusing a transcript still creates a new task ID. The new `notes.md` is written to the new directory, so earlier transcripts and notes are not overwritten.
-
-- `notes.md`: the final structured video notes;
-- `transcript.md`: a readable timestamped transcript;
-- `transcript.json`: a structured transcript containing the language, source, and `start`, `end`, and `text` fields for every segment;
-- `images/*.jpg`: present only when screenshots were enabled.
-
-Caption accuracy depends on the platform source. Whisper can misrecognize names, numbers, and specialist terminology. Verify important claims against the source video at the corresponding timestamp.
-
-For longer media, the application stops before the language-model call when both speech coverage and text density are unusually low. The transcript is retained for inspection. Typical causes include moderation placeholders, muted or replaced audio, and music-led content.
-
-## Privacy and security
-
-- This project is designed only as a personal desktop tool. Keep the service bound to `127.0.0.1`; do not bind it to `0.0.0.0`, forward its port to the internet, or deploy it on a shared host. It has no authentication or tenant isolation for public deployment.
-- The web UI keeps an API key only in the current page's memory and does not write it to browser storage; cookies obtained by QR sign-in remain in process memory. Calling an MCP save tool explicitly persists credentials as plaintext files under `workspace/`; they are not protected by an operating-system credential vault. Protect the local account and workspace, and never sync, share, or commit these files. Configuration read APIs return masked status only, never complete credentials.
-- The backend uses the API key to call the selected language-model service, so transcript text is sent to that provider. Review the provider's privacy policy before processing sensitive material.
-- Media download, subtitle parsing, Whisper transcription, and file generation run locally. Online media still has to be downloaded from its source platform.
-- Treat cookies as login credentials that can access only what the account is already permitted to view. Remove MCP-saved credentials through the local clear-config API or delete the corresponding local configuration files when they are no longer needed.
-
-## MCP integration (call from AI clients)
-
-VideoToNo ships a built-in MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first** — tasks run in the local backend process, reusing your Whisper model cache and task directories (no duplicate downloads).
-
-Exposed tools:
-
-| Tool | Description |
-|---|---|
-| `summarize_video` | Submit a video summarization task (URL; API key/model/Bilibili credentials are all optional — saved local config is used automatically), returns a task ID |
-| `get_task_status` | Poll task progress; `result.markdown` holds the note when completed |
-| `list_whisper_models` | Show local cache status of Whisper models |
-| `save_llm_config` | Save provider/model/API key to this machine; no need to pass them again |
-| `save_bilibili_credentials` | Save Bilibili credentials (SESSDATA etc.) locally; used automatically for Bilibili videos |
-| `get_saved_config` | Show saved-config status (secrets masked) |
-
-### Cherry Studio (recommended, no local Python needed)
-
-1. Start VideoToNo, then open Cherry Studio "Settings → MCP Servers → Add";
-2. Choose **Server-Sent Events (SSE)** and set URL to `http://127.0.0.1:8000/mcp/sse` (use the actual port if not 8000);
-3. Save and enable it, then ask the assistant to summarize a video.
-
-**On first use, ask the assistant to save your config once** (then no sensitive info is needed again):
+After VideoToNo is running, connect an SSE-capable client such as Cherry Studio to:
 
 ```text
-Please call save_llm_config with my DeepSeek API key sk-xxx,
-then call save_bilibili_credentials with sessdata=xxx, bili_jct=xxx, buvid3=xxx.
+http://127.0.0.1:8000/mcp/sse
 ```
 
-After that, just describe the request:
-
-```text
-Summarize this Bilibili video: https://www.bilibili.com/video/BV1xx
-```
-
-### Codex CLI
+For stdio clients such as Codex:
 
 ```bash
 codex mcp add local videotono -- python -m backend.mcp_server
 ```
 
-When run from any directory, the MCP server auto-scans ports 8000-8019 for a running VideoToNo instance; set `VIDEOTONOTES_BACKEND_URL` to override.
+MCP can submit video jobs, wait for completion, inspect Whisper model status, and optionally save local model/API configuration.
 
-> Privacy: `save_llm_config` / `save_bilibili_credentials` store plaintext files in the local workspace (`workspace/llm_config.json`, `workspace/bili_credentials.json`). The application attempts to restrict file permissions where the operating system supports it, but effective access control still depends on the OS and local account configuration. Do not share these files. Nothing is persisted unless you explicitly save.
+</details>
 
-## Configuration
+<details>
+<summary>❓ FAQ</summary>
 
-The application reads optional settings from `.env` in the project root. See `.env.example`:
+- **Why is the first transcription slow?** The selected Whisper model is downloaded on first use and reused afterward.
+- **When is a Bilibili cookie needed?** Some signed-in videos or AI-caption endpoints require credentials for an account that already has access.
+- **Why did a video fail?** Paid content, DRM, CAPTCHAs, region restrictions, expired links, missing captions, and platform changes can all prevent extraction. Existing transcript files are kept when possible for reuse.
 
-```dotenv
-HOST=127.0.0.1
-PORT=8000
-RELOAD=false
-MAX_UPLOAD_MB=500
-MAX_CONCURRENT_TASKS=1
-TASK_HISTORY_LIMIT=100
-# VIDEOTONOTES_WORKSPACE=D:\path\to\workspace
-```
+</details>
 
-Keep `HOST=127.0.0.1` to preserve the required personal-desktop security boundary. `MAX_CONCURRENT_TASKS` defaults to `1` so concurrent Whisper jobs do not compete for memory; additional jobs wait in the queue. `TASK_HISTORY_LIMIT` controls how many recent jobs are restored at startup. API keys and Bilibili credentials explicitly saved through MCP remain sensitive plaintext files in the local workspace.
+## 📄 License
 
-## Tests
-
-Install the development dependencies and run the test suite:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest
-```
-
-You can also probe the online-media pipeline without making an LLM request:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL"
-.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL" --download-audio
-.\.venv\Scripts\python.exe scripts\smoke_video.py "VIDEO_URL" --transcribe --model base
-```
-
-The last two commands use real network bandwidth. The transcription command also downloads the selected Whisper model on first use.
-
-## Project structure
-
-```text
-VideoToNo/
-|-- backend/
-|   |-- main.py               # FastAPI routes, cancellable jobs, and file output
-|   |-- video_processor.py    # yt-dlp, caption selection, audio, and frames
-|   |-- whisper_asr.py        # faster-whisper transcription
-|   |-- transcript.py         # caption parsing, timestamps, and chunking
-|   |-- llm_summarizer.py     # chunk summaries and final notes
-|   |-- requirements.txt
-|   `-- requirements-dev.txt
-|-- frontend/
-|   |-- index.html
-|   |-- script.js
-|   `-- style.css
-|-- scripts/
-|   `-- smoke_video.py
-|-- tests/
-|-- workspace/                # Runtime job files; ignored by Git
-|-- .env.example
-|-- pyproject.toml
-|-- start.ps1
-|-- README.md
-`-- README_EN.md
-```
-
-## Troubleshooting
-
-### Why does the first transcription take so long to start?
-
-`faster-whisper` downloads a model the first time that model is used. Download time depends on model size and network conditions. The local cache is reused on later runs, but selecting another model can trigger another download.
-
-Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk.
-
-Downloads go through the **hf-mirror.com mirror** by default (directly reachable from mainland China) with built-in resume and retry. To switch, set `HF_ENDPOINT` in `.env` (e.g. `HF_ENDPOINT=https://huggingface.co` for the official source, or a self-hosted mirror). If downloads still fail, check network connectivity, proxy settings, and write access to the cache directory.
-The application disables Hugging Face's Xet download backend by default and uses regular HTTP downloads to avoid CAS reconstruction failures on some Windows networks.
-If the selected model is not fully cached but a usable `base` model is already available, the job falls back to `base` and records that decision in the task log instead of waiting on an unreliable weight download.
-
-### Why is CPU transcription slower than the video duration?
-
-Speed depends on the CPU, media duration, and model size. CPU mode uses `int8` to reduce resource pressure, but `medium`, `large-v3`, and `turbo` can still be slow and memory-intensive. Start with `base` on a personal computer, and enable GPU mode only after confirming that CUDA works correctly.
-
-### Why would I need a Bilibili cookie?
-
-Publicly accessible videos usually do not require one. Videos or captions restricted to signed-in users may need credentials for an account that already has access. A cookie cannot grant permissions the account does not have, can expire, and may stop working when the platform changes its access rules.
-
-### Why did my job disappear after restarting the server?
-
-VideoToNo 1.0 restores recent jobs from `workspace/<task-id>/task.json`. Completed notes remain available for preview and download, and uploaded jobs that have not started can be submitted again. A job that was running during restart is marked failed because external downloads, Whisper, and LLM requests cannot resume across processes; its existing subtitles, transcript, and audio remain available for reuse when the source is submitted again.
-
-### Why can a particular URL not be processed?
-
-First confirm that it plays in the current network and account, then update the project's `yt-dlp` dependency. Paid content, DRM, CAPTCHAs, region restrictions, expired signatures, and platform API changes can all prevent extraction. This project does not bypass platform access controls.
-
-### What happens when no captions are available?
-
-The application downloads the best available audio stream and runs `faster-whisper` locally. This takes longer than using captions and is affected by audio quality, accents, background noise, and domain-specific vocabulary.
-
-## Project status
-
-This is a local personal-use tool, not a multi-user service. The project is released under the [MIT License](LICENSE).
+This is a local personal-use tool released under the [MIT License](LICENSE).
