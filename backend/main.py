@@ -146,7 +146,7 @@ class SummarizeRequest(BaseModel):
     resume_task_id: str | None = None
     processing_mode: Literal["reuse", "restart"] = "reuse"
     summary_style: Literal["detailed", "faithful", "concise"] = "detailed"
-    reasoning_effort: Literal["auto", "off", "low", "medium", "high", "max"] = "auto"
+    reasoning_effort: Literal["auto", "off", "high", "max"] = "auto"
     prefer_subtitles: bool = True
     include_screenshots: bool = False
     screenshot_interval: int = Field(default=30, ge=5, le=300)
@@ -932,7 +932,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         task["logs"].append(
             f"调用模型：Provider={config.model_type}，Model={model}，Base URL={base_url}"
         )
-        task["logs"].append(f"推理强度：{request.reasoning_effort}（auto 会按笔记风格分配）")
+        task["logs"].append(f"推理设置：{request.reasoning_effort}（auto 使用模型默认）")
         summarizer = LLMSummarizer(
             model_type=config.model_type,
             api_key=api_key,

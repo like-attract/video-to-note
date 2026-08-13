@@ -358,7 +358,9 @@ function loadPreferences() {
     byId('includeScreenshots').checked = localStorage.getItem('include_screenshots') === 'true';
     byId('useGpu').checked = localStorage.getItem('use_gpu') === 'true';
     byId('summaryStyle').value = localStorage.getItem('summary_style') || 'detailed';
-    byId('reasoningEffort').value = localStorage.getItem('reasoning_effort') || 'auto';
+    const savedReasoning = localStorage.getItem('reasoning_effort') || 'auto';
+    byId('reasoningEffort').value = ['auto', 'off', 'high', 'max'].includes(savedReasoning)
+        ? savedReasoning : 'auto';
     const processingMode = localStorage.getItem('processing_mode') || 'restart';
     const processingModeInput = document.querySelector(`input[name="processingMode"][value="${processingMode}"]`);
     if (processingModeInput) processingModeInput.checked = true;

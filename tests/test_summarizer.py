@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.llm_summarizer import LLMSummarizer, PROVIDER_DEFAULTS
+from backend.llm_summarizer import (
+    LLM_MAX_RETRIES,
+    LLM_TIMEOUT_SECONDS,
+    LLMSummarizer,
+    PROVIDER_DEFAULTS,
+)
 from backend.transcript import TranscriptSegment
 
 
@@ -30,6 +35,11 @@ def test_provider_defaults_use_current_model_families() -> None:
     assert PROVIDER_DEFAULTS["moonshot"][1] == "kimi-k3"
 
 
+def test_llm_client_uses_bounded_timeout_without_hidden_retries() -> None:
+    assert LLM_TIMEOUT_SECONDS == 300
+    assert LLM_MAX_RETRIES == 0
+
+
 def test_note_and_analysis_prompts_are_focused() -> None:
     prompt = LLMSummarizer._note_prompt(
         "测试反讽视频",
@@ -52,13 +62,19 @@ def test_reasoning_effort_maps_by_provider() -> None:
     summarizer.warnings = []
 
     summarizer.model_type = "deepseek"
-    deepseek_request = {"temperature": 0.2}
+    summarizer.model = "deepseek-v4-flash"
+    summarizer.base_url = "https://api.deepseek.com"
+    deepseek_request = {}
     summarizer._apply_reasoning(deepseek_request, "max")
     assert deepseek_request["reasoning_effort"] == "max"
     assert deepseek_request["extra_body"]["thinking"]["type"] == "enabled"
-    assert "temperature" not in deepseek_request
+    default_request = {}
+    summarizer._apply_reasoning(default_request, "auto")
+    assert default_request == {}
 
     summarizer.model_type = "openai"
+    summarizer.model = "gpt-5.6-terra"
+    summarizer.base_url = "https://api.openai.com/v1"
     openai_request = {}
     summarizer._apply_reasoning(openai_request, "max")
     assert openai_request["reasoning_effort"] == "xhigh"
@@ -84,12 +100,12 @@ async def test_short_transcript_uses_one_call_or_two_focused_calls() -> None:
 
     faithful = await summarizer.generate_summary("标题", segments, style="faithful")
     assert faithful == "# 视频笔记"
-    assert calls == ["high"]
+    assert calls == ["auto"]
 
     calls.clear()
     detailed = await summarizer.generate_summary("标题", segments, style="detailed")
     assert detailed == "# 视频笔记\n\n## 点评与分析"
-    assert calls == ["high", "max"]
+    assert calls == ["auto", "auto"]
 
 
 @pytest.mark.asyncio
@@ -147,6 +163,52 @@ async def test_gpt5_chat_completion_uses_supported_token_parameter() -> None:
     assert captured["max_completion_tokens"] == 800
     assert "max_tokens" not in captured
     assert "temperature" not in captured
+
+
+@pytest.mark.asyncio
+async def test_custom_deepseek_uses_default_thinking_with_safe_output_budget() -> None:
+    captured: dict = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="摘要"))]
+        )
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "deepseek-ai/DeepSeek-R1"
+    summarizer.base_url = "https://gateway.example/v1"
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 800, "auto") == "摘要"
+    assert captured["max_tokens"] == 12_000
+    assert "temperature" not in captured
+    assert "reasoning_effort" not in captured
+    assert "extra_body" not in captured
+
+
+def test_auto_keeps_model_default_across_generation_stages() -> None:
+    assert LLMSummarizer._stage_effort("auto", "concise", "notes") == "auto"
+    assert LLMSummarizer._stage_effort("auto", "detailed", "analysis") == "auto"
+
+
+def test_unknown_custom_provider_does_not_receive_private_reasoning_fields() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "provider-model-alias"
+    summarizer.base_url = "https://gateway.example/v1"
+    summarizer.warnings = []
+    request = {}
+
+    summarizer._apply_reasoning(request, "max")
+
+    assert request == {}
+    assert summarizer.warnings == [
+        "custom 未配置通用推理强度映射，已使用模型默认设置"
+    ]
 
 
 @pytest.mark.asyncio

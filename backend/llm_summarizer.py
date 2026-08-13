@@ -22,6 +22,8 @@ PROVIDER_DEFAULTS = {
 
 SUMMARY_CHUNK_CHARACTERS = 9_000
 MERGE_INPUT_CHARACTERS = 14_000
+LLM_TIMEOUT_SECONDS = 300
+LLM_MAX_RETRIES = 0
 ProgressCallback = Callable[[int, str], Awaitable[None] | None]
 
 
@@ -52,8 +54,14 @@ class LLMSummarizer:
                 "openai is not installed. Run pip install -r backend/requirements.txt"
             ) from exc
 
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=120)
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=LLM_MAX_RETRIES,
+        )
         self.model_type = model_type
+        self.base_url = base_url or ""
         self.model = model
         self.warnings: list[str] = []
 
@@ -70,7 +78,7 @@ class LLMSummarizer:
             raise ValueError("Cannot summarize an empty transcript")
         if style not in {"detailed", "faithful", "concise"}:
             raise ValueError(f"Unsupported summary style: {style}")
-        if reasoning_effort not in {"auto", "off", "low", "medium", "high", "max"}:
+        if reasoning_effort not in {"auto", "off", "high", "max"}:
             raise ValueError(f"Unsupported reasoning effort: {reasoning_effort}")
 
         await self._report_progress(progress_callback, 2, "正在分析转录内容")
@@ -205,11 +213,8 @@ class LLMSummarizer:
 
     @staticmethod
     def _stage_effort(selected: str, style: str, stage: str) -> str:
-        if selected != "auto":
-            return selected
-        if style == "concise":
-            return "off"
-        return "max" if stage == "analysis" else "high"
+        # auto means provider/model default and must not inject private parameters.
+        return selected if selected in {"off", "high", "max"} else "auto"
 
     async def _complete(
         self,
@@ -237,13 +242,17 @@ class LLMSummarizer:
         if self.model_type == "openai" and self.model.startswith("gpt-5"):
             request["max_completion_tokens"] = max_tokens
         else:
-            request.update(temperature=0.2, max_tokens=max_tokens)
+            request["max_tokens"] = (
+                max(max_tokens * 3, 12_000)
+                if self._uses_deepseek_compatibility() and effort != "off"
+                else max_tokens
+            )
         self._apply_reasoning(request, effort)
 
         response = await self.client.chat.completions.create(**request)
         content = response.choices[0].message.content if response.choices else None
         if not content:
-            if retry_empty and effort != "off":
+            if retry_empty and effort != "off" and self._can_control_reasoning():
                 warning = f"{stage}：模型首次未返回正文，已关闭深度思考并重试"
                 self.warnings.append(warning)
                 await self._report_progress(progress_callback, progress, warning)
@@ -267,29 +276,34 @@ class LLMSummarizer:
         if effort == "auto":
             return
         enabled = effort != "off"
-        if self.model_type == "deepseek":
-            request.pop("temperature", None)
+        if self._uses_deepseek_compatibility():
             request["extra_body"] = {"thinking": {"type": "enabled" if enabled else "disabled"}}
             if enabled:
                 request["reasoning_effort"] = "max" if effort == "max" else "high"
         elif self.model_type == "glm":
             request["extra_body"] = {"thinking": {"type": "enabled" if enabled else "disabled"}}
         elif self.model_type == "qwen":
-            if enabled:
-                request["reasoning_effort"] = effort
-            else:
-                request["extra_body"] = {"enable_thinking": False}
+            request["extra_body"] = {"enable_thinking": enabled}
         elif self.model_type == "openai":
             request["reasoning_effort"] = {
                 "off": "none",
                 "max": "xhigh",
             }.get(effort, effort)
-        elif self.model_type == "custom":
-            request["reasoning_effort"] = "none" if effort == "off" else effort
         elif enabled:
             self.warnings.append(
                 f"{self.model_type} 未配置通用推理强度映射，已使用模型默认设置"
             )
+
+    def _uses_deepseek_compatibility(self) -> bool:
+        provider = str(getattr(self, "model_type", "")).lower()
+        model = str(getattr(self, "model", "")).lower()
+        base_url = str(getattr(self, "base_url", "")).lower()
+        return provider == "deepseek" or "deepseek" in model or "deepseek" in base_url
+
+    def _can_control_reasoning(self) -> bool:
+        return self._uses_deepseek_compatibility() or self.model_type in {
+            "openai", "glm", "qwen"
+        }
 
     @staticmethod
     def _chunk_prompt(

@@ -276,7 +276,7 @@ async def summarize_video(
         model: 模型 ID；省略时用已保存配置或服务商默认模型。
         base_url: 自定义 OpenAI 兼容接口地址（custom 必填）。
         summary_style: detailed=详细笔记+点评分析 / faithful=详细复原 / concise=精简摘要。
-        reasoning_effort: auto / off / low / medium / high / max。
+        reasoning_effort: auto（模型默认）/ off / high / max。
         whisper_model: 无字幕时的转写模型（tiny/base/small/medium/large-v3/turbo）。
         use_gpu: 是否启用 NVIDIA GPU 转写。
         include_screenshots: 是否附带定时截图。
