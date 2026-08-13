@@ -189,11 +189,11 @@ struct Index {
         }.width('100%')
       } else if (this.deleteId === note.id) {
         Text('确定删除这篇笔记吗？此操作无法撤销。')
-          .fontSize(13).fontColor('#C43131').width('100%')
+          .fontSize(13).fontColor(AppColor.Danger).width('100%')
         Row({ space: 8 }) {
           Button('取消').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => { this.deleteId = ''; })
-          Button('确认删除').layoutWeight(1).backgroundColor('#C43131')
+          Button('确认删除').layoutWeight(1).backgroundColor(AppColor.Danger)
             .onClick(() => this.deleteNote(note.id))
         }.width('100%')
       } else {
@@ -201,13 +201,14 @@ struct Index {
           Button('打开').layoutWeight(2).onClick(() => this.openNote(note))
           Button('重命名').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => this.beginRename(note))
-          Button('删除').layoutWeight(1).backgroundColor(AppColor.Control).fontColor('#C43131')
+          Button('删除').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Danger)
             .onClick(() => { this.deleteId = note.id; this.renameId = ''; })
         }.width('100%')
       }
     }
     .width('100%').padding(AppSpace.Card)
     .backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
+    .border({ width: 1, color: AppColor.Border })
   }
 
   build() {
@@ -224,21 +225,34 @@ struct Index {
             .onClick(() => this.pathStack.pushPath(new NavPathInfo(AppRoute.Settings, undefined)))
         }.width('100%')
 
+        Column({ space: 8 }) {
+          Text('把视频变成可回看的知识').fontSize(12).fontColor(AppColor.PrimaryStrong).width('100%')
+          Text('从一个视频开始\n构建你的知识库')
+            .fontSize(24).fontWeight(FontWeight.Bold).fontColor(AppColor.Text).width('100%')
+          Text('提取 B站字幕，使用你的模型生成带时间轴的 Markdown 笔记。')
+            .fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
+          Button('新建视频笔记').width('100%').borderRadius(AppSpace.ControlRadius)
+            .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
+            .onClick(() => this.createNote())
+        }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Hero)
+          .borderRadius(22).border({ width: 1, color: AppColor.Border })
+
         Search({ value: this.query, placeholder: $r('app.string.library_search_placeholder') })
-          .width('100%').onChange((value: string) => { this.query = value; })
+          .width('100%').backgroundColor(AppColor.Surface).borderRadius(AppSpace.ControlRadius)
+          .onChange((value: string) => { this.query = value; })
 
         Row({ space: 7 }) {
           Button('最新').fontSize(12).layoutWeight(1)
             .backgroundColor(this.sortMode === 'newest' ? AppColor.Primary : AppColor.Control)
-            .fontColor(this.sortMode === 'newest' ? AppColor.Surface : AppColor.Text)
+            .fontColor(this.sortMode === 'newest' ? AppColor.OnPrimary : AppColor.Text)
             .onClick(() => { this.sortMode = 'newest'; })
           Button('最早').fontSize(12).layoutWeight(1)
             .backgroundColor(this.sortMode === 'oldest' ? AppColor.Primary : AppColor.Control)
-            .fontColor(this.sortMode === 'oldest' ? AppColor.Surface : AppColor.Text)
+            .fontColor(this.sortMode === 'oldest' ? AppColor.OnPrimary : AppColor.Text)
             .onClick(() => { this.sortMode = 'oldest'; })
           Button('标题').fontSize(12).layoutWeight(1)
             .backgroundColor(this.sortMode === 'title' ? AppColor.Primary : AppColor.Control)
-            .fontColor(this.sortMode === 'title' ? AppColor.Surface : AppColor.Text)
+            .fontColor(this.sortMode === 'title' ? AppColor.OnPrimary : AppColor.Text)
             .onClick(() => { this.sortMode = 'title'; })
         }.width('100%')
 
@@ -265,7 +279,6 @@ struct Index {
         if (this.status.length > 0) {
           Text(this.status).fontSize(12).fontColor(AppColor.TextSecondary).width('100%')
         }
-        Button($r('app.string.library_new_note')).width('100%').onClick(() => this.createNote())
       }
       .width('100%').height('100%').padding(AppSpace.Page).backgroundColor(AppColor.Background)
     }

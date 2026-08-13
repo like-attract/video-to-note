@@ -225,13 +225,13 @@ export struct SettingsPage {
                 Text(`${getProviderPreset(profile.providerName).label} · ${profile.model} · 思考 ${profile.reasoningEffort}`)
                   .fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
                 Text(profile.hasApiKey ? '密钥已安全保存' : '缺少密钥，请编辑补充')
-                  .fontSize(12).fontColor(profile.hasApiKey ? AppColor.TextMuted : '#C43131').width('100%')
+                  .fontSize(12).fontColor(profile.hasApiKey ? AppColor.TextMuted : AppColor.Danger).width('100%')
                 if (this.deletingProfileId === profile.id) {
-                  Text('确定删除此配置和 API Key？').fontSize(13).fontColor('#C43131').width('100%')
+                  Text('确定删除此配置和 API Key？').fontSize(13).fontColor(AppColor.Danger).width('100%')
                   Row({ space: 8 }) {
                     Button('取消').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
                       .onClick(() => { this.deletingProfileId = ''; })
-                    Button('确认删除').layoutWeight(1).backgroundColor('#C43131')
+                    Button('确认删除').layoutWeight(1).backgroundColor(AppColor.Danger)
                       .onClick(() => this.removeProfile(profile.id))
                   }.width('100%')
                 } else {
@@ -242,7 +242,7 @@ export struct SettingsPage {
                       .onClick(() => this.makeDefault(profile.id))
                     Button('编辑').layoutWeight(1).fontSize(12)
                       .onClick(() => this.startEditProfile(profile))
-                    Button('删除').layoutWeight(1).fontSize(12).backgroundColor('#C43131')
+                    Button('删除').layoutWeight(1).fontSize(12).backgroundColor(AppColor.Danger)
                       .onClick(() => { this.deletingProfileId = profile.id; })
                   }.width('100%')
                 }
@@ -259,7 +259,7 @@ export struct SettingsPage {
                   ForEach(LLM_PROVIDERS, (provider: ProviderPreset) => {
                     Button(provider.label).fontSize(12).type(ButtonType.Capsule)
                       .backgroundColor(this.providerName === provider.id ? AppColor.Primary : AppColor.Control)
-                      .fontColor(this.providerName === provider.id ? AppColor.Surface : AppColor.Text)
+                      .fontColor(this.providerName === provider.id ? AppColor.OnPrimary : AppColor.Text)
                       .onClick(() => this.applyProvider(provider.id))
                   }, (provider: ProviderPreset) => provider.id)
                 }
@@ -286,7 +286,7 @@ export struct SettingsPage {
                           mode === 'glm' ? 'GLM' : 'Qwen')
                           .fontSize(11).type(ButtonType.Capsule)
                           .backgroundColor(this.compatibilityMode === mode ? AppColor.Primary : AppColor.Control)
-                          .fontColor(this.compatibilityMode === mode ? AppColor.Surface : AppColor.Text)
+                          .fontColor(this.compatibilityMode === mode ? AppColor.OnPrimary : AppColor.Text)
                           .onClick(() => { this.compatibilityMode = mode; })
                       }, (mode: LlmCompatibilityMode) => mode)
                   }
@@ -303,7 +303,7 @@ export struct SettingsPage {
                     .fontSize(11).textAlign(TextAlign.Center)
                     .padding({ left: 12, right: 12, top: 7, bottom: 7 }).borderRadius(18)
                     .backgroundColor(this.reasoningEffort === effort ? AppColor.Primary : AppColor.Control)
-                    .fontColor(this.reasoningEffort === effort ? AppColor.Surface : AppColor.Text)
+                    .fontColor(this.reasoningEffort === effort ? AppColor.OnPrimary : AppColor.Text)
                     .onClick(() => { this.reasoningEffort = effort; })
                 }, (effort: ReasoningEffort) => effort)
               }.width('100%')
@@ -314,29 +314,32 @@ export struct SettingsPage {
               }.width('100%')
             }
           }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
+            .border({ width: 1, color: AppColor.Border })
 
           Column({ space: 10 }) {
             Text($r('app.string.settings_account_title')).fontSize(18).fontWeight(FontWeight.Medium).width('100%')
             Text($r('app.string.settings_logout_help')).fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
             Button($r('app.string.action_logout')).width('100%').enabled(!this.isWorking).onClick(() => this.logout())
           }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
+            .border({ width: 1, color: AppColor.Border })
 
           Column({ space: 10 }) {
             Text($r('app.string.settings_data_title')).fontSize(18).fontWeight(FontWeight.Medium).width('100%')
             Text($r('app.string.settings_clear_all_help')).fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
             if (this.confirmClearAll) {
-              Text($r('app.string.settings_clear_all_confirm')).fontSize(14).fontColor('#C43131').width('100%')
+              Text($r('app.string.settings_clear_all_confirm')).fontSize(14).fontColor(AppColor.Danger).width('100%')
               Row({ space: 8 }) {
                 Button($r('app.string.action_cancel')).layoutWeight(1).backgroundColor(AppColor.Control)
                   .fontColor(AppColor.Text).onClick(() => { this.confirmClearAll = false; })
-                Button($r('app.string.action_confirm_clear')).layoutWeight(1).backgroundColor('#C43131')
+                Button($r('app.string.action_confirm_clear')).layoutWeight(1).backgroundColor(AppColor.Danger)
                   .enabled(!this.isWorking).onClick(() => this.clearAllData())
               }.width('100%')
             } else {
-              Button($r('app.string.action_clear_all_data')).width('100%').backgroundColor('#C43131')
+              Button($r('app.string.action_clear_all_data')).width('100%').backgroundColor(AppColor.Danger)
                 .enabled(!this.isWorking).onClick(() => { this.confirmClearAll = true; })
             }
           }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
+            .border({ width: 1, color: AppColor.Border })
 
           Text(this.status).fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
           if (this.isWorking) LoadingProgress().width(36).height(36).color(AppColor.Primary)

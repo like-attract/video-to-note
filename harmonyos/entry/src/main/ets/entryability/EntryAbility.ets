@@ -1,4 +1,4 @@
-import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { systemShare } from '@kit.ShareKit';
 import { appContainer } from '../app/AppContainer';
@@ -8,6 +8,8 @@ export default class EntryAbility extends UIAbility {
   private readonly shareParser: IncomingShareParser = new IncomingShareParser();
 
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    this.context.getApplicationContext()
+      .setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     this.receiveSharedInput(want);
   }
 

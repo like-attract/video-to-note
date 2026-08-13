@@ -191,4 +191,13 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
 - 思考强度仅保留 `auto | off | high | max`；HarmonyOS 请求不发送 `temperature` 或 `top_p`。
 - Profile 文档已升级为 v2；旧 v1 或 legacy 配置缺少兼容模式时恢复为 `auto`，HUKS 密钥命名不变。
 - 后台任务中心采用持久化、应用级单任务 runner；页面退出不取消任务，进程被系统终止后下次启动恢复。详见 `docs/adr/0004-persistent-generation-task-center.md`。
+
+## 10. UI 方向（2026-08-13）
+
+- 用户已选定设计稿 B「青澈」。品牌色取自 `sources/icon.png`，主色为深青与薄荷青。
+- `resources/base/element/color.json` 与 `resources/dark/element/color.json` 提供同名语义色，应用跟随系统明暗模式。
+- 首页已落地青澈 Hero、主操作、搜索框和卡片边框；登录、处理、阅读、设置等页面统一使用青澈资源与卡片边界。
+- 二维码始终使用独立黑白色板，避免暗色模式影响扫码可靠性。
+- 启动窗口改用正式应用图标，并有明暗两套启动背景，避免暗色冷启动白闪。
+- 完整四项底部导航与任务中心运行时入口需在持久化 `GenerationTask` 实现后一起接入，当前不展示虚假的后台能力。
 - 当前 Git 状态中整个 `harmonyos/` 仍是未跟踪目录，尚未提交或推送。

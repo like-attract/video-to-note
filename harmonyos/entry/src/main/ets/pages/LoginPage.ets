@@ -132,7 +132,7 @@ export struct LoginPage {
             .width(208)
             .height(208)
             .color(AppColor.Qr)
-            .backgroundColor(AppColor.Surface)
+            .backgroundColor(AppColor.QrSurface)
         } else if (this.isLoading) {
           LoadingProgress().width(56).height(56).color(AppColor.Primary)
         } else {
@@ -141,13 +141,17 @@ export struct LoginPage {
       }
       .width(240).height(240)
       .justifyContent(FlexAlign.Center)
-      .backgroundColor(AppColor.Surface)
+      .backgroundColor(AppColor.QrSurface)
+      .border({ width: 1, color: AppColor.Border })
       .borderRadius(16)
 
       Text(this.status).fontSize(14).fontColor(AppColor.TextSecondary).textAlign(TextAlign.Center)
 
       Button(this.qrCodeUrl.length > 0 ? '重新生成二维码' : '生成登录二维码')
         .width('100%')
+        .borderRadius(AppSpace.ControlRadius)
+        .backgroundColor(AppColor.Primary)
+        .fontColor(AppColor.OnPrimary)
         .enabled(!this.isLoading)
         .onClick(() => {
           this.createChallenge();

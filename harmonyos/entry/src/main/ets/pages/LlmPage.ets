@@ -145,7 +145,7 @@ export struct LlmPage {
           ForEach(LLM_PROVIDERS, (provider: ProviderPreset) => {
             Button(provider.label).fontSize(12).type(ButtonType.Capsule)
               .backgroundColor(this.providerName === provider.id ? AppColor.Primary : AppColor.Control)
-              .fontColor(this.providerName === provider.id ? AppColor.Surface : AppColor.Text)
+              .fontColor(this.providerName === provider.id ? AppColor.OnPrimary : AppColor.Text)
               .onClick(() => { this.applyProvider(provider.id); })
           }, (provider: ProviderPreset) => provider.id)
         }
@@ -175,13 +175,13 @@ export struct LlmPage {
       Row({ space: 8 }) {
         Button($r('app.string.llm_style_detailed')).layoutWeight(1).onClick(() => { this.style = 'detailed'; })
           .backgroundColor(this.style === 'detailed' ? AppColor.Primary : AppColor.Control)
-          .fontColor(this.style === 'detailed' ? AppColor.Surface : AppColor.Text)
+          .fontColor(this.style === 'detailed' ? AppColor.OnPrimary : AppColor.Text)
         Button($r('app.string.llm_style_faithful')).layoutWeight(1).onClick(() => { this.style = 'faithful'; })
           .backgroundColor(this.style === 'faithful' ? AppColor.Primary : AppColor.Control)
-          .fontColor(this.style === 'faithful' ? AppColor.Surface : AppColor.Text)
+          .fontColor(this.style === 'faithful' ? AppColor.OnPrimary : AppColor.Text)
         Button($r('app.string.llm_style_concise')).layoutWeight(1).onClick(() => { this.style = 'concise'; })
           .backgroundColor(this.style === 'concise' ? AppColor.Primary : AppColor.Control)
-          .fontColor(this.style === 'concise' ? AppColor.Surface : AppColor.Text)
+          .fontColor(this.style === 'concise' ? AppColor.OnPrimary : AppColor.Text)
       }.width('100%')
       Text($r('app.string.llm_reasoning_effort')).fontSize(14).fontWeight(FontWeight.Medium).width('100%')
       Row({ space: 6 }) {
@@ -191,7 +191,7 @@ export struct LlmPage {
             .fontSize(12).textAlign(TextAlign.Center)
             .padding({ left: 12, right: 12, top: 7, bottom: 7 }).borderRadius(18)
             .backgroundColor(this.reasoningEffort === effort ? AppColor.Primary : AppColor.Control)
-            .fontColor(this.reasoningEffort === effort ? AppColor.Surface : AppColor.Text)
+            .fontColor(this.reasoningEffort === effort ? AppColor.OnPrimary : AppColor.Text)
             .onClick(() => { this.reasoningEffort = effort; })
         }, (effort: ReasoningEffort) => effort)
       }.width('100%')

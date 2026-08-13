@@ -94,7 +94,7 @@ export struct ProcessingPage {
               .fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
           }
         }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface)
-          .borderRadius(AppSpace.Radius)
+          .borderRadius(AppSpace.Radius).border({ width: 1, color: AppColor.Border })
 
         Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
           .width('100%').color(AppColor.Primary)

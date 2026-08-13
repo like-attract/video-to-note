@@ -112,6 +112,7 @@ export struct NotePage {
           }, (block: MarkdownBlock, index: number) => `${index}-${block.kind}-${block.text}`)
         }.width('100%').layoutWeight(1).padding(AppSpace.Card)
           .backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
+          .border({ width: 1, color: AppColor.Border })
       }
       Text(this.status).fontSize(12).fontColor(AppColor.TextMuted).width('100%')
       }.width('100%').height('100%').padding(AppSpace.Page).backgroundColor(AppColor.Background)
