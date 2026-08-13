@@ -1,0 +1,66 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "B站字幕转 Markdown 时间轴笔记" },
+    { "name": "entry_ability_desc", "value": "VideoToNo HarmonyOS" },
+    { "name": "entry_ability_label", "value": "VideoToNo" },
+    { "name": "app_title", "value": "VideoToNo" },
+    { "name": "login_title", "value": "登录 B 站" },
+    { "name": "subtitle_title", "value": "B站字幕" },
+    { "name": "llm_title", "value": "LLM 笔记配置" },
+    { "name": "note_title", "value": "Markdown 笔记" },
+    { "name": "app_tagline", "value": "B站已有字幕 → LLM → Markdown 时间轴笔记" },
+    { "name": "productization_status", "value": "核心链路已验证，当前进入正式产品化重构。" },
+    { "name": "action_start", "value": "开始使用" },
+    { "name": "action_continue", "value": "继续使用" },
+    { "name": "action_copy", "value": "复制" },
+    { "name": "action_share_harmony", "value": "分享到华为生态" },
+    { "name": "action_relogin", "value": "重新登录" },
+    { "name": "action_logout", "value": "退出登录" },
+    { "name": "action_load_subtitle", "value": "获取视频和字幕" },
+    { "name": "action_generate_note", "value": "生成 Markdown 笔记" },
+    { "name": "action_cancel_generation", "value": "取消生成" },
+    { "name": "login_help", "value": "模拟器显示二维码后，用另一台设备上的 B 站客户端扫码确认。" },
+    { "name": "login_qr_placeholder", "value": "二维码将在这里显示" },
+    { "name": "subtitle_input_placeholder", "value": "粘贴 BV、完整链接或 b23.tv 短链接" },
+    { "name": "llm_provider", "value": "模型服务商" },
+    { "name": "llm_provider_help", "value": "第三方 OpenAI-compatible 地址也应按实际模型选择：DeepSeek 选 deepseek，GLM 选 glm；不确定时选 custom。" },
+    { "name": "llm_base_url_placeholder", "value": "Base URL，例如 https://api.example.com/v1" },
+    { "name": "llm_custom_model_placeholder", "value": "手动输入模型 ID" },
+    { "name": "llm_api_key_placeholder", "value": "API Key" },
+    { "name": "llm_remember_api_key", "value": "使用 HUKS 在本机安全保存 API Key" },
+    { "name": "llm_note_style", "value": "笔记风格" },
+    { "name": "llm_style_detailed", "value": "详细+点评" },
+    { "name": "llm_style_faithful", "value": "忠实详细" },
+    { "name": "llm_style_concise", "value": "精炼" },
+    { "name": "llm_reasoning_effort", "value": "思考强度" },
+    { "name": "llm_deepseek_auto_help", "value": "auto 使用模型默认思考设置，不附加私有强度参数；DeepSeek 会保留充足输出额度。" },
+    { "name": "llm_memory_only_notice", "value": "当前版本默认不保存 API Key；后续可由用户明确选择安全保存。" },
+    { "name": "llm_secure_save_notice", "value": "API Key 将使用 HUKS 加密后保存在本机；可随时关闭保存。" },
+    { "name": "note_back_to_subtitle", "value": "返回字幕" },
+    { "name": "processing_title", "value": "正在生成笔记" }
+    ,{ "name": "session_restored", "value": "已从本机安全存储恢复 B站登录会话。" }
+    ,{ "name": "action_settings", "value": "设置" }
+    ,{ "name": "action_back", "value": "返回" }
+    ,{ "name": "action_cancel", "value": "取消" }
+    ,{ "name": "action_retry_restore", "value": "重试恢复" }
+    ,{ "name": "action_save_llm_config", "value": "保存模型配置" }
+    ,{ "name": "action_clear_all_data", "value": "清除全部本机数据" }
+    ,{ "name": "action_confirm_clear", "value": "确认清除" }
+    ,{ "name": "settings_title", "value": "设置与数据" }
+    ,{ "name": "settings_account_title", "value": "B站账号" }
+    ,{ "name": "settings_logout_help", "value": "退出后删除本机加密的 B站 Cookie，不影响模型设置和笔记。" }
+    ,{ "name": "settings_data_title", "value": "本机数据" }
+    ,{ "name": "settings_clear_all_help", "value": "删除 B站登录、LLM 配置和 API Key、全部笔记，并销毁 HUKS 密钥。此操作无法撤销。" }
+    ,{ "name": "settings_clear_all_confirm", "value": "确定清除全部数据吗？笔记和配置删除后无法恢复。" }
+    ,{ "name": "library_title", "value": "我的笔记" }
+    ,{ "name": "library_search_placeholder", "value": "搜索标题、BV号或正文" }
+    ,{ "name": "library_new_note", "value": "新建视频笔记" }
+    ,{ "name": "flow_step_subtitle", "value": "步骤 1/3 · 视频、字幕与生成选项" }
+    ,{ "name": "flow_step_llm", "value": "步骤 2/4 · 配置笔记生成" }
+    ,{ "name": "flow_step_processing", "value": "步骤 2/3 · 生成 Markdown 笔记" }
+    ,{ "name": "flow_step_note", "value": "步骤 3/3 · 阅读与分享" }
+    ,{ "name": "action_start_generation", "value": "确认配置并开始生成" }
+    ,{ "name": "action_retry_generation", "value": "重新生成" }
+    ,{ "name": "action_back_to_config", "value": "返回修改生成选项" }
+  ]
+}
