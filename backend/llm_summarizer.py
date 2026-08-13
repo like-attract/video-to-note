@@ -24,6 +24,7 @@ SUMMARY_CHUNK_CHARACTERS = 9_000
 MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300
 LLM_MAX_RETRIES = 0
+DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
 ProgressCallback = Callable[[int, str], Awaitable[None] | None]
 
 
@@ -243,7 +244,9 @@ class LLMSummarizer:
             request["max_completion_tokens"] = max_tokens
         else:
             request["max_tokens"] = (
-                max(max_tokens * 3, 12_000)
+                max(max_tokens * 3, DEEPSEEK_HIGH_TOKEN_BUDGET)
+                if self._uses_deepseek_compatibility() and effort == "max"
+                else DEEPSEEK_HIGH_TOKEN_BUDGET
                 if self._uses_deepseek_compatibility() and effort != "off"
                 else max_tokens
             )
@@ -273,7 +276,7 @@ class LLMSummarizer:
         return content.strip()
 
     def _apply_reasoning(self, request: dict[str, Any], effort: str) -> None:
-        if effort == "auto":
+        if effort == "auto" and not self._uses_deepseek_compatibility():
             return
         enabled = effort != "off"
         if self._uses_deepseek_compatibility():

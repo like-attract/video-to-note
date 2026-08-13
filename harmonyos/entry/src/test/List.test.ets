@@ -10,6 +10,7 @@ import latestOperationGateTest from './LatestOperationGate.test';
 import memoryLlmProfileRepositoryTest from './MemoryLlmProfileRepository.test';
 import llmCompatibilityTest from './LlmCompatibility.test';
 import generationTaskRunnerTest from './GenerationTaskRunner.test';
+import openAiSseParserTest from './OpenAiSseParser.test';
 
 export default function testsuite(): void {
   transcriptServiceTest();
@@ -24,4 +25,5 @@ export default function testsuite(): void {
   memoryLlmProfileRepositoryTest();
   llmCompatibilityTest();
   generationTaskRunnerTest();
+  openAiSseParserTest();
 }

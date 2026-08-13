@@ -1,10 +1,13 @@
 import { http } from '@kit.NetworkKit';
+import { util } from '@kit.ArkTS';
 import type { BiliPage, BiliVideo, TranscriptSegment } from '../models/BiliModels';
 import type { LlmCompatibilityMode, LlmConfig, NoteStyle, ReasoningEffort } from '../models/LlmModels';
 import { resolveCompatibilityMode } from '../models/LlmCompatibility';
 import { TranscriptService } from './TranscriptService';
 import { RequestScope } from '../core/network/RequestScope';
 import { NetworkPolicy } from '../core/network/NetworkPolicy';
+import type { StreamHttpResponse } from '../core/network/RequestScope';
+import { parseOpenAiStreamResponse } from './OpenAiSseParser';
 
 interface ChatMessage { role: string; content: string; }
 interface ChatRequest {
@@ -15,11 +18,9 @@ interface ChatRequest {
   reasoning_effort?: string;
   thinking?: ThinkingSwitch;
   enable_thinking?: boolean;
+  stream: boolean;
 }
 interface ThinkingSwitch { type?: string; }
-interface ChatChoiceMessage { content: string; }
-interface ChatChoice { message: ChatChoiceMessage; finish_reason?: string; }
-interface ChatResponse { choices: ChatChoice[]; }
 interface ErrorDetail { message?: string; }
 interface ErrorResponse { error?: ErrorDetail; message?: string; }
 export type LlmProgressCallback = (progress: number, message: string) => void;
@@ -28,6 +29,7 @@ const SYSTEM_PROMPT: string =
   '你是视频笔记编辑。忠实理解语境与作者意图，允许结合上下文保守修正明显的口误、笔误和语音转写错误。';
 const CHUNK_CHARACTERS: number = 9000;
 const MERGE_CHARACTERS: number = 14000;
+const DEEPSEEK_HIGH_TOKEN_BUDGET: number = 12000;
 
 export class LlmService {
   private readonly transcriptService: TranscriptService = new TranscriptService();
@@ -100,7 +102,7 @@ export class LlmService {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: prompt }
     ];
-    const body: ChatRequest = { model: config.model.trim(), messages: messages };
+    const body: ChatRequest = { model: config.model.trim(), messages: messages, stream: true };
     const effort: ReasoningEffort = effortOverride === undefined ?
       this.stageEffort(config.reasoningEffort, config.style, stage) : effortOverride;
     const compatibility: LlmCompatibilityMode = resolveCompatibilityMode(config);
@@ -108,42 +110,41 @@ export class LlmService {
       body.max_completion_tokens = maxTokens;
     } else {
       body.max_tokens = compatibility === 'deepseek' && effort !== 'off' ?
-        Math.max(maxTokens * 3, 12000) : maxTokens;
+        (effort === 'max' ? Math.max(maxTokens * 3, DEEPSEEK_HIGH_TOKEN_BUDGET) :
+          DEEPSEEK_HIGH_TOKEN_BUDGET) : maxTokens;
     }
     this.applyReasoning(body, config, effort);
-    const response: http.HttpResponse = await this.requests.request(this.endpoint(config.baseUrl), {
+    const response: StreamHttpResponse = await this.requests.requestInStream(this.endpoint(config.baseUrl), {
         method: http.RequestMethod.POST,
         header: {
           'Content-Type': 'application/json',
-          'Accept': 'application/json',
+          'Accept': 'text/event-stream',
           'Authorization': `Bearer ${config.apiKey.trim()}`
         },
         extraData: JSON.stringify(body),
-        expectDataType: http.HttpDataType.STRING,
         usingCache: false,
         connectTimeout: NetworkPolicy.ConnectTimeoutMs,
         readTimeout: NetworkPolicy.LlmReadTimeoutMs,
         maxLimit: NetworkPolicy.MaxResponseBytes
-    });
-    const raw: string = typeof response.result === 'string' ? response.result : String(response.result);
+    }, NetworkPolicy.MaxResponseBytes);
+    const raw: string = new util.TextDecoder('utf-8').decodeToString(response.result);
     const status: number = response.responseCode as number;
     if (status < 200 || status >= 300) throw new Error(this.httpError(status, raw));
-    const parsed: ChatResponse = JSON.parse(raw) as ChatResponse;
-    if (parsed.choices === undefined || parsed.choices.length === 0 ||
-      parsed.choices[0].message?.content?.trim().length === 0) {
-      const finishReason: string = parsed.choices?.[0]?.finish_reason || 'unknown';
+    const parsed = parseOpenAiStreamResponse(raw);
+    if (parsed.content.length === 0) {
+      const finishReason: string = parsed.finishReason;
       if (allowEmptyRetry && effort !== 'off' && this.canControlReasoning(config)) {
         return await this.complete(config, prompt, maxTokens, stage, 'off', false);
       }
       throw new Error(`模型未返回正文（finish_reason=${finishReason}）。`);
     }
-    return parsed.choices[0].message.content.trim();
+    return parsed.content;
   }
 
   private applyReasoning(body: ChatRequest, config: LlmConfig, effort: ReasoningEffort): void {
-    if (effort === 'auto') return;
-    const enabled: boolean = effort !== 'off';
     const compatibility: LlmCompatibilityMode = resolveCompatibilityMode(config);
+    if (effort === 'auto' && compatibility !== 'deepseek') return;
+    const enabled: boolean = effort !== 'off';
     if (compatibility === 'deepseek') {
       body.thinking = { type: enabled ? 'enabled' : 'disabled' };
       if (enabled) body.reasoning_effort = effort === 'max' ? 'max' : 'high';

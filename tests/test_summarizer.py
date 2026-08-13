@@ -70,7 +70,8 @@ def test_reasoning_effort_maps_by_provider() -> None:
     assert deepseek_request["extra_body"]["thinking"]["type"] == "enabled"
     default_request = {}
     summarizer._apply_reasoning(default_request, "auto")
-    assert default_request == {}
+    assert default_request["reasoning_effort"] == "high"
+    assert default_request["extra_body"]["thinking"]["type"] == "enabled"
 
     summarizer.model_type = "openai"
     summarizer.model = "gpt-5.6-terra"
@@ -166,7 +167,7 @@ async def test_gpt5_chat_completion_uses_supported_token_parameter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_custom_deepseek_uses_default_thinking_with_safe_output_budget() -> None:
+async def test_custom_deepseek_uses_explicit_high_thinking_with_safe_output_budget() -> None:
     captured: dict = {}
 
     async def create(**kwargs):
@@ -186,8 +187,12 @@ async def test_custom_deepseek_uses_default_thinking_with_safe_output_budget() -
     assert await summarizer._complete("测试", 800, "auto") == "摘要"
     assert captured["max_tokens"] == 12_000
     assert "temperature" not in captured
-    assert "reasoning_effort" not in captured
-    assert "extra_body" not in captured
+    assert captured["reasoning_effort"] == "high"
+    assert captured["extra_body"]["thinking"]["type"] == "enabled"
+
+    captured.clear()
+    assert await summarizer._complete("测试", 4_600, "auto") == "摘要"
+    assert captured["max_tokens"] == 12_000
 
 
 def test_auto_keeps_model_default_across_generation_stages() -> None:
