@@ -13,6 +13,7 @@
     { "name": "app_control", "value": "#E2F1ED" },
     { "name": "app_border", "value": "#D5E8E3" },
     { "name": "app_danger", "value": "#B93B45" },
+    { "name": "app_on_danger", "value": "#FFFFFF" },
     { "name": "app_hero", "value": "#D9FFF5" },
     { "name": "app_qr", "value": "#111111" },
     { "name": "app_qr_surface", "value": "#FFFFFF" },

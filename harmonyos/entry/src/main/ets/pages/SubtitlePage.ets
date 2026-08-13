@@ -205,9 +205,11 @@ export struct SubtitlePage {
     NavDestination() {
       Column({ space: 12 }) {
       Row({ space: 8 }) {
-        Button($r('app.string.action_back')).fontSize(13).onClick(() => this.pathStack.pop())
+        Button($r('app.string.action_back')).fontSize(13)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.pathStack.pop())
         Text($r('app.string.subtitle_title')).fontSize(24).fontWeight(FontWeight.Bold).layoutWeight(1)
         Button($r('app.string.action_settings')).fontSize(13)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text)
           .onClick(() => this.pathStack.pushPath(new NavPathInfo(AppRoute.Settings, undefined)))
       }.width('100%')
 
@@ -219,6 +221,7 @@ export struct SubtitlePage {
         .onChange((value: string) => { this.input = value; })
       Button($r('app.string.action_load_subtitle'))
         .width('100%').enabled(!this.isLoading && this.input.trim().length > 0)
+        .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
         .onClick(() => this.loadVideo())
 
       if (this.isLoading) {
@@ -271,11 +274,13 @@ export struct SubtitlePage {
           }.width('100%')
           Button(this.isPreparingGeneration ? '正在准备…' : $r('app.string.action_generate_note'))
             .width('100%').enabled(!this.isPreparingGeneration)
+            .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
             .onClick(() => this.beginGeneration())
         } else {
           Text('尚未配置 LLM，请先在设置中添加模型服务与 API Key。')
             .fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
           Button('前往设置 LLM').width('100%')
+            .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
             .onClick(() => this.pathStack.pushPath(new NavPathInfo(AppRoute.Settings, undefined)))
         }
       } else {

@@ -11,6 +11,7 @@ export class AppColor {
   static readonly Control: ResourceColor = $r('app.color.app_control');
   static readonly Border: ResourceColor = $r('app.color.app_border');
   static readonly Danger: ResourceColor = $r('app.color.app_danger');
+  static readonly OnDanger: ResourceColor = $r('app.color.app_on_danger');
   static readonly Hero: ResourceColor = $r('app.color.app_hero');
   static readonly Qr: ResourceColor = $r('app.color.app_qr');
   static readonly QrSurface: ResourceColor = $r('app.color.app_qr_surface');

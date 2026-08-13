@@ -91,17 +91,20 @@ export struct NotePage {
     NavDestination() {
       Column({ space: 14 }) {
       Row({ space: 8 }) {
-        Button($r('app.string.action_back')).fontSize(13).onClick(() => this.pathStack.pop())
+        Button($r('app.string.action_back')).fontSize(13)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.pathStack.pop())
         Text($r('app.string.note_title')).fontSize(24).fontWeight(FontWeight.Bold).layoutWeight(1)
       }.width('100%')
       Text($r('app.string.flow_step_note'))
         .fontSize(12).fontColor(AppColor.Primary).fontWeight(FontWeight.Medium).width('100%')
       Row({ space: 8 }) {
         Button(this.showSource ? '预览' : '原文').fontSize(13).layoutWeight(1)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text)
           .onClick(() => { this.showSource = !this.showSource; })
-        Button($r('app.string.action_copy')).fontSize(13).layoutWeight(1).onClick(() => this.copyMarkdown())
+        Button($r('app.string.action_copy')).fontSize(13).layoutWeight(1)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.copyMarkdown())
         Button($r('app.string.action_share_harmony')).fontSize(13).layoutWeight(2)
-          .backgroundColor(AppColor.Primary).onClick(() => this.shareToHarmony())
+          .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary).onClick(() => this.shareToHarmony())
       }.width('100%')
       if (this.showSource) {
         TextArea({ text: this.markdown }).fontFamily('monospace').width('100%').layoutWeight(1)

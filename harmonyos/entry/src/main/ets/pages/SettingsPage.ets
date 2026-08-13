@@ -199,14 +199,17 @@ export struct SettingsPage {
       Scroll() {
         Column({ space: 16 }) {
           Row({ space: 8 }) {
-            Button($r('app.string.action_back')).fontSize(13).onClick(() => this.pathStack.pop())
+            Button($r('app.string.action_back')).fontSize(13)
+              .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.pathStack.pop())
             Text($r('app.string.settings_title')).fontSize(26).fontWeight(FontWeight.Bold).layoutWeight(1)
           }.width('100%')
 
           Column({ space: 10 }) {
             Row() {
               Text('LLM 配置').fontSize(18).fontWeight(FontWeight.Medium).layoutWeight(1)
-              Button('添加').fontSize(13).enabled(!this.isWorking).onClick(() => this.startAddProfile())
+              Button('添加').fontSize(13).enabled(!this.isWorking)
+                .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
+                .onClick(() => this.startAddProfile())
             }.width('100%')
             Text('提前保存多个模型服务；生成笔记时直接选择。API Key 使用 HUKS 加密。')
               .fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
@@ -232,6 +235,7 @@ export struct SettingsPage {
                     Button('取消').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
                       .onClick(() => { this.deletingProfileId = ''; })
                     Button('确认删除').layoutWeight(1).backgroundColor(AppColor.Danger)
+                      .fontColor(AppColor.OnDanger)
                       .onClick(() => this.removeProfile(profile.id))
                   }.width('100%')
                 } else {
@@ -241,8 +245,10 @@ export struct SettingsPage {
                       .backgroundColor(AppColor.Control).fontColor(AppColor.Text)
                       .onClick(() => this.makeDefault(profile.id))
                     Button('编辑').layoutWeight(1).fontSize(12)
+                      .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
                       .onClick(() => this.startEditProfile(profile))
                     Button('删除').layoutWeight(1).fontSize(12).backgroundColor(AppColor.Danger)
+                      .fontColor(AppColor.OnDanger)
                       .onClick(() => { this.deletingProfileId = profile.id; })
                   }.width('100%')
                 }
@@ -310,7 +316,9 @@ export struct SettingsPage {
               Row({ space: 8 }) {
                 Button('取消').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
                   .onClick(() => { this.showEditor = false; this.apiKey = ''; })
-                Button('保存配置').layoutWeight(1).enabled(!this.isWorking).onClick(() => this.saveProfile())
+                Button('保存配置').layoutWeight(1).enabled(!this.isWorking)
+                  .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
+                  .onClick(() => this.saveProfile())
               }.width('100%')
             }
           }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
@@ -319,7 +327,8 @@ export struct SettingsPage {
           Column({ space: 10 }) {
             Text($r('app.string.settings_account_title')).fontSize(18).fontWeight(FontWeight.Medium).width('100%')
             Text($r('app.string.settings_logout_help')).fontSize(13).fontColor(AppColor.TextSecondary).width('100%')
-            Button($r('app.string.action_logout')).width('100%').enabled(!this.isWorking).onClick(() => this.logout())
+            Button($r('app.string.action_logout')).width('100%').enabled(!this.isWorking)
+              .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.logout())
           }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)
             .border({ width: 1, color: AppColor.Border })
 
@@ -332,10 +341,12 @@ export struct SettingsPage {
                 Button($r('app.string.action_cancel')).layoutWeight(1).backgroundColor(AppColor.Control)
                   .fontColor(AppColor.Text).onClick(() => { this.confirmClearAll = false; })
                 Button($r('app.string.action_confirm_clear')).layoutWeight(1).backgroundColor(AppColor.Danger)
+                  .fontColor(AppColor.OnDanger)
                   .enabled(!this.isWorking).onClick(() => this.clearAllData())
               }.width('100%')
             } else {
               Button($r('app.string.action_clear_all_data')).width('100%').backgroundColor(AppColor.Danger)
+                .fontColor(AppColor.OnDanger)
                 .enabled(!this.isWorking).onClick(() => { this.confirmClearAll = true; })
             }
           }.width('100%').padding(AppSpace.Card).backgroundColor(AppColor.Surface).borderRadius(AppSpace.Radius)

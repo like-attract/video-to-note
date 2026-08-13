@@ -120,7 +120,8 @@ export struct LoginPage {
     NavDestination() {
       Column({ space: 20 }) {
       Row({ space: 8 }) {
-        Button($r('app.string.action_back')).fontSize(13).onClick(() => this.pathStack.pop())
+        Button($r('app.string.action_back')).fontSize(13)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.pathStack.pop())
         Text($r('app.string.login_title')).fontSize(26).fontWeight(FontWeight.Bold).layoutWeight(1)
       }.width('100%')
       Text($r('app.string.login_help'))

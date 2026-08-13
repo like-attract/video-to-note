@@ -80,6 +80,7 @@ export struct ProcessingPage {
       Column({ space: 18 }) {
         Row({ space: 8 }) {
           Button($r('app.string.action_back')).fontSize(13).enabled(!this.isRunning)
+            .backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => this.pathStack.pop())
           Text($r('app.string.processing_title')).fontSize(26).fontWeight(FontWeight.Bold).layoutWeight(1)
         }.width('100%')
@@ -109,6 +110,7 @@ export struct ProcessingPage {
             .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.cancel())
         } else if (this.canRetry) {
           Button($r('app.string.action_retry_generation')).width('100%')
+            .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
             .onClick(() => this.runGeneration())
           Button($r('app.string.action_back_to_config')).width('100%')
             .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.pathStack.pop())

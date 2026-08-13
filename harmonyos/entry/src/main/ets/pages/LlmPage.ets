@@ -134,7 +134,8 @@ export struct LlmPage {
       Scroll() {
       Column({ space: 14 }) {
       Row({ space: 8 }) {
-        Button($r('app.string.action_back')).fontSize(13).onClick(() => this.pathStack.pop())
+        Button($r('app.string.action_back')).fontSize(13)
+          .backgroundColor(AppColor.Control).fontColor(AppColor.Text).onClick(() => this.pathStack.pop())
         Text($r('app.string.llm_title')).fontSize(26).fontWeight(FontWeight.Bold).layoutWeight(1)
       }.width('100%')
       Text($r('app.string.flow_step_llm'))
@@ -165,6 +166,7 @@ export struct LlmPage {
         .type(InputType.Password).onChange((value: string) => { this.apiKey = value; }).width('100%')
       Row({ space: 10 }) {
         Toggle({ type: ToggleType.Switch, isOn: this.rememberApiKey })
+          .selectedColor(AppColor.Primary)
           .onChange((value: boolean) => {
             if (value) this.rememberApiKey = true;
             else this.disableApiKeyPersistence();
@@ -205,6 +207,7 @@ export struct LlmPage {
         .enabled(!this.isPreparing).onClick(() => this.saveConfig())
       Button(this.isPreparing ? '正在准备…' : $r('app.string.action_start_generation'))
         .width('100%').enabled(!this.isPreparing)
+        .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
         .onClick(() => this.beginGeneration())
       Text(this.rememberApiKey ? $r('app.string.llm_secure_save_notice') :
         $r('app.string.llm_memory_only_notice'))

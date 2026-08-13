@@ -185,6 +185,7 @@ struct Index {
           Button('取消').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => { this.renameId = ''; })
           Button('保存').layoutWeight(1).enabled(this.renameValue.trim().length > 0)
+            .backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
             .onClick(() => this.saveRename())
         }.width('100%')
       } else if (this.deleteId === note.id) {
@@ -193,12 +194,13 @@ struct Index {
         Row({ space: 8 }) {
           Button('取消').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => { this.deleteId = ''; })
-          Button('确认删除').layoutWeight(1).backgroundColor(AppColor.Danger)
+          Button('确认删除').layoutWeight(1).backgroundColor(AppColor.Danger).fontColor(AppColor.OnDanger)
             .onClick(() => this.deleteNote(note.id))
         }.width('100%')
       } else {
         Row({ space: 8 }) {
-          Button('打开').layoutWeight(2).onClick(() => this.openNote(note))
+          Button('打开').layoutWeight(2).backgroundColor(AppColor.Primary).fontColor(AppColor.OnPrimary)
+            .onClick(() => this.openNote(note))
           Button('重命名').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => this.beginRename(note))
           Button('删除').layoutWeight(1).backgroundColor(AppColor.Control).fontColor(AppColor.Danger)
