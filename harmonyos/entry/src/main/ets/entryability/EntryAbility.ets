@@ -19,6 +19,7 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
     appContainer.initialize(this.context);
+    appContainer.taskRunner.reconcile();
     windowStage.loadContent('pages/Index');
   }
 

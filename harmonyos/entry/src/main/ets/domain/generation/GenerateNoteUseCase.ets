@@ -16,14 +16,16 @@ export class GenerateNoteUseCase {
     this.notes = notes;
   }
 
-  async execute(config: LlmConfig, onProgress?: GenerationProgress): Promise<NoteRecord> {
-    const preview: SubtitlePreview | undefined = (await this.workspace.getWorkspace()).preview;
+  async execute(config: LlmConfig, onProgress?: GenerationProgress,
+    previewOverride?: SubtitlePreview, noteId?: string): Promise<NoteRecord> {
+    const preview: SubtitlePreview | undefined = previewOverride ||
+      (await this.workspace.getWorkspace()).preview;
     if (preview === undefined)
       throw new AppError(AppErrorCode.InvalidInput, '字幕数据不存在，请返回重新获取。');
     const markdown: string = await this.generator.generate(
       config, preview.video, preview.page, preview.segments, onProgress);
     const note: NoteRecord = {
-      id: `${preview.video.bvid}-${preview.page.cid}-${Date.now()}`,
+      id: noteId || `${preview.video.bvid}-${preview.page.cid}-${Date.now()}`,
       bvid: preview.video.bvid,
       cid: preview.page.cid,
       noteTitle: preview.video.title,

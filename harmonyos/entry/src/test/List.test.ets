@@ -9,6 +9,7 @@ import appBootstrapUseCaseTest from './AppBootstrapUseCase.test';
 import latestOperationGateTest from './LatestOperationGate.test';
 import memoryLlmProfileRepositoryTest from './MemoryLlmProfileRepository.test';
 import llmCompatibilityTest from './LlmCompatibility.test';
+import generationTaskRunnerTest from './GenerationTaskRunner.test';
 
 export default function testsuite(): void {
   transcriptServiceTest();
@@ -22,4 +23,5 @@ export default function testsuite(): void {
   latestOperationGateTest();
   memoryLlmProfileRepositoryTest();
   llmCompatibilityTest();
+  generationTaskRunnerTest();
 }

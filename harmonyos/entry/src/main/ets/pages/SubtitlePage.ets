@@ -1,4 +1,4 @@
-import { AppRoute } from '../app/AppRoutes';
+import { AppRoute, TaskRouteParam } from '../app/AppRoutes';
 import { appContainer } from '../app/AppContainer';
 import { AppError, AppErrorCode, toUserMessage } from '../core/errors/AppError';
 import { AppColor, AppSpace } from '../core/theme/AppTheme';
@@ -7,7 +7,8 @@ import type {
 } from '../models/BiliModels';
 import { TranscriptService } from '../services/TranscriptService';
 import { LatestOperationGate } from '../features/capture/LatestOperationGate';
-import type { LlmConfig, LlmProfile, NoteStyle } from '../models/LlmModels';
+import type { LlmProfile, NoteStyle } from '../models/LlmModels';
+import type { GenerationTask } from '../models/GenerationTask';
 
 class LlmProfileOption {
   value: string;
@@ -87,9 +88,10 @@ export struct SubtitlePage {
     this.isPreparingGeneration = true;
     this.status = '正在准备生成任务…';
     try {
-      const config: LlmConfig = await appContainer.llmProfiles.resolve(this.selectedProfileId, this.noteStyle);
-      await appContainer.generation.saveLlmConfig(config);
-      if (!this.disposed) this.pathStack.pushPath(new NavPathInfo(AppRoute.Processing, undefined));
+      const task: GenerationTask = await appContainer.generationTasks.create(
+        this.preview, this.selectedProfileId, this.noteStyle);
+      if (!this.disposed) this.pathStack.pushPath(
+        new NavPathInfo(AppRoute.Processing, new TaskRouteParam(task.id)));
     } catch (error) {
       if (!this.disposed) this.status = `准备生成失败：${toUserMessage(error as Object)}`;
     } finally {

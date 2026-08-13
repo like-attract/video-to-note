@@ -184,6 +184,7 @@ export struct SettingsPage {
     if (dataManagement === undefined) { this.status = '数据管理服务尚未初始化。'; return; }
     this.isWorking = true;
     try {
+      appContainer.taskRunner.cancelActive();
       await dataManagement.clearAll();
       if (!this.disposed) {
         this.confirmClearAll = false;

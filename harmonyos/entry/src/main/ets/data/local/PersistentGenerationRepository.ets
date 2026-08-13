@@ -5,9 +5,8 @@ import type { GenerationRepository, GenerationWorkspace } from '../../domain/gen
 import { workStore } from '../../stores/WorkStore';
 import { SecureSecretStore } from './SecureSecretStore';
 
-// The generation workspace is intentionally process-local. Long-lived LLM settings
-// are owned by PersistentLlmProfileRepository; keeping them separate prevents a run
-// from silently overwriting the user's default profile.
+// Capture draft workspace remains process-local. Persistent generation history is
+// owned separately by RdbGenerationTaskRepository.
 export class PersistentGenerationRepository implements GenerationRepository {
   constructor(_context: common.Context, _secrets: SecureSecretStore) {}
 

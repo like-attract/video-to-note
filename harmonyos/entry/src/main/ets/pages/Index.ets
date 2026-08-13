@@ -1,10 +1,10 @@
-import { AppRoute, NoteRouteParam } from '../app/AppRoutes';
+import { AppRoute, NoteRouteParam, TaskRouteParam } from '../app/AppRoutes';
 import { LoginPage } from './LoginPage';
 import { SubtitlePage } from './SubtitlePage';
-import { LlmPage } from './LlmPage';
 import { ProcessingPage } from './ProcessingPage';
 import { NotePage } from './NotePage';
 import { SettingsPage } from './SettingsPage';
+import { TaskCenterPage } from './TaskCenterPage';
 import { AppColor, AppSpace } from '../core/theme/AppTheme';
 import { appContainer } from '../app/AppContainer';
 import { AppBootstrapState } from '../domain/startup/AppBootstrapUseCase';
@@ -144,6 +144,10 @@ struct Index {
     const noteParam: NoteRouteParam = param as NoteRouteParam;
     return noteParam.noteId || '';
   }
+  private taskIdFrom(param: Object): string {
+    const taskParam: TaskRouteParam = param as TaskRouteParam;
+    return taskParam.taskId || '';
+  }
 
   @Builder
   private pageMap(name: string, param: Object): void {
@@ -151,14 +155,14 @@ struct Index {
       LoginPage({ pathStack: this.pathStack })
     } else if (name === AppRoute.Subtitle) {
       SubtitlePage({ pathStack: this.pathStack })
-    } else if (name === AppRoute.Llm) {
-      LlmPage({ pathStack: this.pathStack })
     } else if (name === AppRoute.Processing) {
-      ProcessingPage({ pathStack: this.pathStack })
+      ProcessingPage({ pathStack: this.pathStack, taskId: this.taskIdFrom(param) })
     } else if (name === AppRoute.Note) {
       NotePage({ pathStack: this.pathStack, noteId: this.noteIdFrom(param) })
     } else if (name === AppRoute.Settings) {
       SettingsPage({ pathStack: this.pathStack })
+    } else if (name === AppRoute.Tasks) {
+      TaskCenterPage({ pathStack: this.pathStack })
     }
   }
 
@@ -222,6 +226,8 @@ struct Index {
             Text(this.hasSession ? 'B站已登录' : '未登录；仍可阅读本地笔记')
               .fontSize(12).fontColor(AppColor.TextSecondary).width('100%')
           }.layoutWeight(1)
+          Button('任务').fontSize(13).backgroundColor(AppColor.Control).fontColor(AppColor.Text)
+            .onClick(() => this.pathStack.pushPath(new NavPathInfo(AppRoute.Tasks, undefined)))
           Button($r('app.string.action_settings')).fontSize(13)
             .backgroundColor(AppColor.Control).fontColor(AppColor.Text)
             .onClick(() => this.pathStack.pushPath(new NavPathInfo(AppRoute.Settings, undefined)))

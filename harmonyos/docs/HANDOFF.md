@@ -56,6 +56,11 @@ OpenAI-compatible LLM，生成 Markdown 时间轴笔记并保存在本机。
 2. 独立生成进度、取消与重试；
 3. 阅读、保存、复制和系统分享。
 
+生成流程现已由应用级 `GenerationTaskRunner` 承载：任务、字幕快照、所选 Profile 和状态写入
+ArkData RDB；离开处理页不会取消，多个任务按创建顺序串行。应用进程被系统终止时网络请求不会
+继续，下次启动会把运行中任务标记为“已中断”，由用户显式重试，避免自动重复消耗 Token。
+API Key 不进入任务数据库，runner 每次执行时从对应 Profile 的 HUKS 密钥解析配置。
+
 ### 本地笔记与应用框架
 
 - 首页是本地笔记库，可离线搜索、排序、打开、重命名和删除。
@@ -73,11 +78,13 @@ OpenAI-compatible LLM，生成 Markdown 时间轴笔记并保存在本机。
 - 最新 HAP 已覆盖安装并在 API 24 Phone 模拟器启动。
 - 设置页、多 Profile 编辑器、服务商预设 URL、思考强度和模型下拉完成视觉验收。
 - 模型下拉初始空白问题已修复，当前显示 `DeepSeek V4 Flash`。
+- 持久生成任务、应用内继续生成、串行队列、任务中心和中断恢复已完成本地单测与 HAP 构建。
 
 新增测试：
 
 - `MemoryLlmProfileRepository.test.ets`：默认项、本次风格合成、删除回退、编辑保留密钥。
 - `Persistence.test.ets`：Profile 元数据和 HUKS API Key 跨 Repository 实例恢复。
+- `GenerationTaskRunner.test.ets`：确定性笔记 ID、成功落库、重复启动去重与中断恢复。
 
 本轮用户已确认：
 
@@ -153,10 +160,11 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
 
 1. 完成上述 Profile/HUKS 设备测试，修复发现的问题。
 2. 验证 Profile 新增、编辑、默认、删除后重启应用仍可恢复。
-3. 完善 Markdown 渲染、时间戳交互、文件导出和 Share Kit 体验。
-4. 在真机验证 B站分享进入、扫码登录、华为笔记接收和 HUKS。
-5. 完成深色模式、字体缩放、无障碍、多尺寸和错误/空状态。
-6. 最后处理 AGC、正式包名、签名、隐私材料和应用市场发布。
+3. 验收任务中心的离页继续、串行排队、取消和进程中断恢复。
+4. 完善 Markdown 渲染、时间戳交互、文件导出和 Share Kit 体验。
+5. 在真机验证 B站分享进入、扫码登录、华为笔记接收和 HUKS。
+6. 完成字体缩放、无障碍、多尺寸和错误/空状态。
+7. 最后处理 AGC、正式包名、签名、隐私材料和应用市场发布。
 
 ## 7. 关键代码位置
 
@@ -166,6 +174,9 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
 - `entry/src/main/ets/pages/SettingsPage.ets`
 - `entry/src/main/ets/pages/SubtitlePage.ets`
 - `entry/src/main/ets/pages/ProcessingPage.ets`
+- `entry/src/main/ets/pages/TaskCenterPage.ets`
+- `entry/src/main/ets/domain/generation/GenerationTaskRunner.ets`
+- `entry/src/main/ets/data/local/RdbGenerationTaskRepository.ets`
 - `entry/src/main/ets/services/LlmService.ets`
 - `entry/src/main/ets/models/LlmPresets.ets`
 - `entry/src/test/MemoryLlmProfileRepository.test.ets`
@@ -190,7 +201,8 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
 - 中转使用不透明别名时必须显式选协议族；`generic` 表示标准 OpenAI-compatible，绝不附加厂商私有 thinking 参数。
 - 思考强度仅保留 `auto | off | high | max`；HarmonyOS 请求不发送 `temperature` 或 `top_p`。
 - Profile 文档已升级为 v2；旧 v1 或 legacy 配置缺少兼容模式时恢复为 `auto`，HUKS 密钥命名不变。
-- 后台任务中心采用持久化、应用级单任务 runner；页面退出不取消任务，进程被系统终止后下次启动恢复。详见 `docs/adr/0004-persistent-generation-task-center.md`。
+- 任务中心采用持久化、应用级单任务 runner；页面退出不取消任务。进程被系统终止后请求不会继续，
+  下次启动恢复为“已中断”并等待显式重试。详见 `docs/adr/0004-persistent-generation-task-center.md`。
 
 ## 10. UI 方向（2026-08-13）
 
@@ -199,6 +211,6 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
 - 首页已落地青澈 Hero、主操作、搜索框和卡片边框；登录、处理、阅读、设置等页面统一使用青澈资源与卡片边界。
 - 二维码始终使用独立黑白色板，避免暗色模式影响扫码可靠性。
 - 启动窗口改用正式应用图标，并有明暗两套启动背景，避免暗色冷启动白闪。
-- 完整四项底部导航与任务中心运行时入口需在持久化 `GenerationTask` 实现后一起接入，当前不展示虚假的后台能力。
+- 首页已提供任务中心入口；完整四项底部导航留待一级页面信息架构统一时接入。
 - 所有页面 Button 均需显式使用 `Primary + OnPrimary`、`Control + Text` 或 `Danger + OnDanger`；不能依赖 HarmonyOS 默认按钮色，否则二级页面会回退为系统蓝色。
-- 当前 Git 状态中整个 `harmonyos/` 仍是未跟踪目录，尚未提交或推送。
+- `harmonyos/` 已建立 Git 基线，后续 UI 与任务中心变更按独立提交维护。
