@@ -76,11 +76,6 @@ export class LlmService {
       this.notePrompt(video, page, source, config.style), maxTokens, 'notes');
     markdown = this.stripCodeFence(markdown);
     onProgress?.(91, '完整笔记初稿已生成');
-    if (config.style !== 'concise' && this.needsTimelineRevision(markdown, segments)) {
-      onProgress?.(92, '正在修正时间轴顺序与覆盖');
-      markdown = this.stripCodeFence(await this.complete(config,
-        this.coveragePrompt(video.title, markdown, source), maxTokens, 'notes'));
-    }
     if (config.style === 'detailed') {
       onProgress?.(93, '正在补充点评与分析');
       const analysis: string = await this.complete(config,
@@ -244,25 +239,14 @@ export class LlmService {
     const task: string = style === 'concise' ?
       '写一份精炼的 Markdown 摘要，说明视频谈了什么、作者的主要观点，并列出少量最有用的时间点。' :
       '写一份翔实、自然的 Markdown 视频笔记。完整复原内容脉络、具体例子、核心观点及其依据，并在有帮助时加入关键时间点。不要加入外部知识或评价。';
-    const coverage: string = style === 'concise' ? '' :
-      '笔记必须覆盖材料从开头到结尾的完整内容范围；时间点应分布在各个主要内容阶段。' +
-      '相邻关键时间点若跨越较长区间，应补充该区间的重要内容。不得用“...”“略”等符号代替正文。\n';
     return task + '\n\n' +
       `视频标题：${video.title}\n作者：${video.ownerName || '未知'}\n` +
       `分P：P${page.page} ${page.part}\n文字来源：B站字幕\n\n` +
       '以准确理解语境和作者立场为先。时间点只能取自材料。可在上下文支持时直接修正明显的口误、' +
-      '笔误或字幕错误。全文必须按视频时间先后组织，时间戳单调不下降；不得先写后段再回到前段。' +
-      '结构按内容自然组织，不必凑固定模板。' + coverage +
+      '笔误或字幕错误；只有歧义会影响结论且无法可靠判断时，才在正文采用最可能的解释，并在文末用' +
+      ' Markdown 脚注集中说明。不要在正文反复插入“原文如此”或“疑为字幕错误”。' +
+      '结构按内容自然组织，不必凑固定模板。' +
       `标题使用：# 视频笔记：《${video.title}》\n\n材料：\n${source}`;
-  }
-
-  private coveragePrompt(title: string, draft: string, source: string): string {
-    return `请修订以下 Markdown 视频笔记，解决时间轴乱序或覆盖缺口。\n\n视频标题：${title}\n\n` +
-      '要求：全文严格按视频时间先后组织，所有时间戳按出现顺序单调不下降；不得先出现 [04:17] 后又回到 [00:12]；' +
-      '不要按主题重排而造成时间倒流。保留已有的正确内容；覆盖材料从开头到结尾的主要阶段；' +
-      '相邻关键时间点不要跨过一大段重要内容；只能使用材料中真实存在的时间点；' +
-      '不得用“...”“略”等代替正文。直接输出完整修订稿。' +
-      `\n\n现有笔记：\n${draft}\n\n完整材料：\n${source}`;
   }
 
   private analysisPrompt(title: string, draft: string): string {
@@ -270,31 +254,6 @@ export class LlmService {
       '点评对象是视频里的内容，而不是笔记的写法：分析作者观点、论据、逻辑、结论可靠性、信息价值、' +
       '适用场景和值得进一步思考的问题。可补充稳定背景知识，但必须标明“模型补充，未联网核验”。' +
       `不要评价笔记排版或文笔。\n\n标题：${title}\n\n已有笔记：\n${draft}`;
-  }
-
-  private needsTimelineRevision(markdown: string, segments: TranscriptSegment[]): boolean {
-    if (segments.length === 0) return false;
-    const timestamps: number[] = [];
-    const pattern: RegExp = /\[(?:(\d+):)?(\d{2}):(\d{2})\]/g;
-    let match: RegExpExecArray | null = pattern.exec(markdown);
-    while (match !== null) {
-      const hours: number = Number(match[1] || 0);
-      timestamps.push(hours * 3600 + Number(match[2]) * 60 + Number(match[3]));
-      match = pattern.exec(markdown);
-    }
-    if (timestamps.length < 2) return true;
-    for (let index: number = 1; index < timestamps.length; index++) {
-      if (timestamps[index] < timestamps[index - 1]) return true;
-    }
-    const ordered: number[] = timestamps.slice();
-    ordered.sort((left: number, right: number) => left - right);
-    const videoEnd: number = segments[segments.length - 1].endSeconds;
-    const allowedGap: number = Math.max(180, videoEnd * 0.25);
-    if (ordered[0] > allowedGap || videoEnd - ordered[ordered.length - 1] > allowedGap) return true;
-    for (let index: number = 1; index < ordered.length; index++) {
-      if (ordered[index] - ordered[index - 1] > allowedGap) return true;
-    }
-    return false;
   }
 
   private stripCodeFence(value: string): string {

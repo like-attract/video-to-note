@@ -51,6 +51,8 @@ export default function generationTaskRunnerTest(): void {
       expect(saved?.status).assertEqual('succeeded');
       expect(saved?.noteId).assertEqual(task.id);
       expect((await notes.list()).length).assertEqual(1);
+      expect((await notes.list())[0].generation?.model).assertEqual('deepseek-chat');
+      expect((await notes.list())[0].generation?.style).assertEqual('faithful');
       await runner.start(task.id);
       expect(generator.calls).assertEqual(1);
     });

@@ -31,7 +31,11 @@ export class GenerateNoteUseCase {
       noteTitle: preview.video.title,
       videoTitle: preview.video.title,
       markdown: markdown,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      generation: {
+        providerName: config.providerName, model: config.model, style: config.style,
+        reasoningEffort: config.reasoningEffort
+      }
     };
     await this.workspace.saveNote(note);
     await this.notes.save(note);

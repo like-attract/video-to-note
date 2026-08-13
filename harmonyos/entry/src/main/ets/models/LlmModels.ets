@@ -24,6 +24,13 @@ export interface LlmProfile {
   hasApiKey: boolean;
 }
 
+export interface NoteGenerationMetadata {
+  providerName: string;
+  model: string;
+  style: NoteStyle;
+  reasoningEffort: ReasoningEffort;
+}
+
 export interface NoteRecord {
   id: string;
   bvid: string;
@@ -32,4 +39,5 @@ export interface NoteRecord {
   videoTitle: string;
   markdown: string;
   createdAt: number;
+  generation?: NoteGenerationMetadata;
 }

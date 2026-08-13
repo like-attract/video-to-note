@@ -78,11 +78,14 @@ export default function persistenceTest() {
       const note: NoteRecord = {
         id: `note-${Date.now()}`, bvid: 'BV1xx411c7mD', cid: 42,
         noteTitle: '我的持久化笔记', videoTitle: '持久化测试',
-        markdown: '# 测试\n\n[00:01] 正文', createdAt: Date.now()
+        markdown: '# 测试\n\n[00:01] 正文', createdAt: Date.now(),
+        generation: { providerName: 'deepseek', model: 'deepseek-v4-flash',
+          style: 'detailed', reasoningEffort: 'auto' }
       };
       await first.save(note);
       const second: RdbNoteRepository = new RdbNoteRepository(context, databaseName);
       expect((await second.getById(note.id))?.markdown).assertEqual(note.markdown);
+      expect((await second.getById(note.id))?.generation?.model).assertEqual('deepseek-v4-flash');
       expect((await second.list()).length).assertEqual(1);
       await second.renameTitle(note.id, '重命名后的笔记');
       const renamed: NoteRecord | undefined = await second.getById(note.id);
@@ -108,6 +111,7 @@ export default function persistenceTest() {
         await new RdbNoteRepository(context, v1Name).getById('old');
       expect(migrated?.noteTitle).assertEqual('旧视频');
       expect(migrated?.markdown).assertEqual('# 旧正文');
+      expect(migrated?.generation).assertUndefined();
 
       const interruptedName: string = `test_notes_interrupted_${Date.now()}.db`;
       const interrupted: relationalStore.RdbStore = await relationalStore.getRdbStore(context, {

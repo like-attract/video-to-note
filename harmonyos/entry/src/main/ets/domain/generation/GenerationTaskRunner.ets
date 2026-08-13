@@ -69,10 +69,12 @@ export class GenerationTaskRunner {
       task.message = '笔记生成完成'; task.noteId = note.id; task.retryable = false;
       await this.persist(task);
     } catch (error) {
+      const failedStage: string = task.message;
       const cancelled: boolean = error instanceof AppError && error.code === AppErrorCode.Cancelled;
       task.status = cancelled ? 'cancelled' : 'failed';
       task.stage = task.status; task.errorCode = error instanceof AppError ? error.code : AppErrorCode.Unknown;
-      task.errorMessage = toUserMessage(error as Object); task.message = cancelled ? '生成已取消' : task.errorMessage;
+      task.errorMessage = toUserMessage(error as Object);
+      task.message = cancelled ? '生成已取消' : `${failedStage}：${task.errorMessage}`;
       task.retryable = !cancelled && (!(error instanceof AppError) || error.retryable ||
         error.code === AppErrorCode.Unknown || error.code === AppErrorCode.ApiError);
       await this.persist(task);

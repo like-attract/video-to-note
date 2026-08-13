@@ -90,7 +90,7 @@ export struct SubtitlePage {
     try {
       const task: GenerationTask = await appContainer.generationTasks.create(
         this.preview, this.selectedProfileId, this.noteStyle);
-      if (!this.disposed) this.pathStack.pushPath(
+      if (!this.disposed) this.pathStack.replacePath(
         new NavPathInfo(AppRoute.Processing, new TaskRouteParam(task.id)));
     } catch (error) {
       if (!this.disposed) this.status = `准备生成失败：${toUserMessage(error as Object)}`;

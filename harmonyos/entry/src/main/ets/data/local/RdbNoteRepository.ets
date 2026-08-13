@@ -2,6 +2,7 @@ import { relationalStore } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import type { NoteRepository } from '../../domain/notes/NoteRepository';
 import type { NoteRecord } from '../../models/LlmModels';
+import type { NoteGenerationMetadata } from '../../models/LlmModels';
 
 const NOTE_TABLE: string = 'notes';
 
@@ -49,7 +50,8 @@ export class RdbNoteRepository implements NoteRepository {
       note_title: note.noteTitle,
       video_title: note.videoTitle,
       markdown: note.markdown,
-      created_at: note.createdAt
+      created_at: note.createdAt,
+      generation_metadata: note.generation === undefined ? '' : JSON.stringify(note.generation)
     };
     await (await this.getStore()).insert(
       NOTE_TABLE, values, relationalStore.ConflictResolution.ON_CONFLICT_REPLACE);
@@ -59,7 +61,8 @@ export class RdbNoteRepository implements NoteRepository {
     const values: relationalStore.ValuesBucket = { note_title: title };
     const predicates: relationalStore.RdbPredicates =
       new relationalStore.RdbPredicates(NOTE_TABLE).equalTo('id', id);
-    await (await this.getStore()).update(values, predicates);
+    const changed: number = await (await this.getStore()).update(values, predicates);
+    if (changed === 0) throw new Error('笔记不存在或已被删除。');
   }
 
   async deleteById(id: string): Promise<void> {
@@ -99,6 +102,13 @@ export class RdbNoteRepository implements NoteRepository {
         "UPDATE notes SET note_title = video_title WHERE note_title = ''");
       store.version = 2;
     }
+    if (store.version < 3) {
+      if (!await this.hasColumn(store, 'generation_metadata')) {
+        await store.executeSql(
+          "ALTER TABLE notes ADD COLUMN generation_metadata TEXT NOT NULL DEFAULT ''");
+      }
+      store.version = 3;
+    }
     return store;
   }
 
@@ -116,6 +126,8 @@ export class RdbNoteRepository implements NoteRepository {
   }
 
   private readNote(result: relationalStore.ResultSet): NoteRecord {
+    const encodedMetadata: string = result.getString(result.getColumnIndex('generation_metadata'));
+    const generation: NoteGenerationMetadata | undefined = this.parseGeneration(encodedMetadata);
     return {
       id: result.getString(result.getColumnIndex('id')),
       bvid: result.getString(result.getColumnIndex('bvid')),
@@ -123,7 +135,14 @@ export class RdbNoteRepository implements NoteRepository {
       noteTitle: result.getString(result.getColumnIndex('note_title')),
       videoTitle: result.getString(result.getColumnIndex('video_title')),
       markdown: result.getString(result.getColumnIndex('markdown')),
-      createdAt: result.getLong(result.getColumnIndex('created_at'))
+      createdAt: result.getLong(result.getColumnIndex('created_at')),
+      generation: generation
     };
+  }
+
+  private parseGeneration(encoded: string): NoteGenerationMetadata | undefined {
+    if (encoded.length === 0) return undefined;
+    try { return JSON.parse(encoded) as NoteGenerationMetadata; }
+    catch (_error) { return undefined; }
   }
 }

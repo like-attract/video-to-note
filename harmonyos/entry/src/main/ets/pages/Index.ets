@@ -9,7 +9,9 @@ import { AppColor, AppSpace } from '../core/theme/AppTheme';
 import { appContainer } from '../app/AppContainer';
 import { AppBootstrapState } from '../domain/startup/AppBootstrapUseCase';
 import { toUserMessage } from '../core/errors/AppError';
-import type { NoteRecord } from '../models/LlmModels';
+import type { NoteGenerationMetadata, NoteRecord, NoteStyle } from '../models/LlmModels';
+import { getProviderPreset } from '../models/LlmPresets';
+import type { ModelPreset, ProviderPreset } from '../models/LlmPresets';
 import { NoteLibraryViewModel, NoteSortMode } from '../features/library/NoteLibraryViewModel';
 
 @Entry
@@ -149,6 +151,25 @@ struct Index {
     return taskParam.taskId || '';
   }
 
+  private styleLabel(style: NoteStyle): string {
+    if (style === 'detailed') return '详细+点评';
+    if (style === 'faithful') return '忠实详细';
+    return '精炼';
+  }
+
+  private generationLabel(note: NoteRecord): string {
+    const generation: NoteGenerationMetadata | undefined = note.generation;
+    if (generation === undefined) return '';
+    const provider: ProviderPreset = getProviderPreset(generation.providerName);
+    const preset: ModelPreset | undefined = provider.models
+      .find((item: ModelPreset) => item.id === generation.model);
+    return `${preset?.label || generation.model} · ${this.styleLabel(generation.style)}`;
+  }
+
+  private noteRenderKey(note: NoteRecord): string {
+    return `${note.id}:${note.noteTitle}:${this.generationLabel(note)}`;
+  }
+
   @Builder
   private pageMap(name: string, param: Object): void {
     if (name === AppRoute.Login) {
@@ -172,6 +193,9 @@ struct Index {
       Text(note.noteTitle).fontSize(18).fontWeight(FontWeight.Medium).width('100%').maxLines(2)
       if (note.noteTitle !== note.videoTitle) {
         Text(`来源：${note.videoTitle}`).fontSize(12).fontColor(AppColor.TextMuted).width('100%').maxLines(1)
+      }
+      if (this.generationLabel(note).length > 0) {
+        Text(this.generationLabel(note)).fontSize(12).fontColor(AppColor.Primary).width('100%').maxLines(1)
       }
       Text(this.viewModel.excerpt(note.markdown) || '暂无正文摘要')
         .fontSize(14).fontColor(AppColor.TextSecondary).width('100%').maxLines(3)
@@ -280,7 +304,7 @@ struct Index {
           List({ space: 11 }) {
             ForEach(this.visibleNotes(), (note: NoteRecord) => {
               ListItem() { this.noteCard(note) }.width('100%')
-            }, (note: NoteRecord) => note.id)
+            }, (note: NoteRecord) => this.noteRenderKey(note))
           }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
         }
 
