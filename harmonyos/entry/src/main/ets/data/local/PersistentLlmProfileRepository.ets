@@ -1,12 +1,13 @@
 import { common } from '@kit.AbilityKit';
 import { AppError, AppErrorCode } from '../../core/errors/AppError';
 import type { LlmConfig, LlmProfile, NoteStyle, ReasoningEffort } from '../../models/LlmModels';
+import { normalizeCompatibilityMode } from '../../models/LlmCompatibility';
 import type { LlmProfileRepository } from '../../domain/generation/LlmProfileRepository';
 import { PreferenceEntry, PreferencesStore } from './PreferencesStore';
 import { SecureSecretStore } from './SecureSecretStore';
 
 class ProfileDocument {
-  version: number = 1;
+  version: number = 2;
   defaultId: string = '';
   profiles: LlmProfile[] = [];
 }
@@ -65,6 +66,7 @@ export class PersistentLlmProfileRepository implements LlmProfileRepository {
     const saved: LlmProfile = {
       id: profile.id, name: profile.name.trim(), providerName: profile.providerName,
       baseUrl: profile.baseUrl.trim(), model: profile.model.trim(),
+      compatibilityMode: profile.compatibilityMode,
       reasoningEffort: profile.reasoningEffort, hasApiKey: hasApiKey
     };
     if (saved.name.length === 0) throw new AppError(AppErrorCode.InvalidInput, '请输入配置名称。');
@@ -103,6 +105,7 @@ export class PersistentLlmProfileRepository implements LlmProfileRepository {
       throw new AppError(AppErrorCode.InvalidInput, '该配置缺少 API Key，请先在设置中补充。');
     return {
       providerName: profile.providerName, baseUrl: profile.baseUrl, model: profile.model,
+      compatibilityMode: profile.compatibilityMode,
       apiKey: apiKey, rememberApiKey: true, style: style, reasoningEffort: profile.reasoningEffort
     };
   }
@@ -145,6 +148,7 @@ export class PersistentLlmProfileRepository implements LlmProfileRepository {
       id: LEGACY_ID, name: '已迁移配置', providerName: provider,
       baseUrl: await this.legacy.getString(LegacyKey.BaseUrl),
       model: await this.legacy.getString(LegacyKey.Model),
+      compatibilityMode: 'auto',
       reasoningEffort: this.toReasoning(await this.legacy.getString(LegacyKey.Reasoning, 'auto')),
       hasApiKey: legacyApiKey.length > 0
     };
@@ -162,8 +166,10 @@ export class PersistentLlmProfileRepository implements LlmProfileRepository {
       const parsed: ProfileDocument = JSON.parse(encoded) as ProfileDocument;
       if (!Array.isArray(parsed.profiles)) throw new Error('profiles');
       parsed.profiles.forEach((profile: LlmProfile) => {
+        profile.compatibilityMode = normalizeCompatibilityMode(String(profile.compatibilityMode || 'auto'));
         profile.reasoningEffort = this.toReasoning(String(profile.reasoningEffort));
       });
+      parsed.version = 2;
       return parsed;
     } catch (_error) {
       throw new AppError(AppErrorCode.ParseError, 'LLM 配置数据损坏，请在设置中清除后重新添加。');

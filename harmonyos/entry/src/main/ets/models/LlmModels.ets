@@ -1,10 +1,12 @@
 export type NoteStyle = 'detailed' | 'faithful' | 'concise';
 export type ReasoningEffort = 'auto' | 'off' | 'high' | 'max';
+export type LlmCompatibilityMode = 'auto' | 'generic' | 'deepseek' | 'openai' | 'glm' | 'qwen';
 
 export interface LlmConfig {
   providerName: string;
   baseUrl: string;
   model: string;
+  compatibilityMode: LlmCompatibilityMode;
   apiKey: string;
   rememberApiKey?: boolean;
   style: NoteStyle;
@@ -17,6 +19,7 @@ export interface LlmProfile {
   providerName: string;
   baseUrl: string;
   model: string;
+  compatibilityMode: LlmCompatibilityMode;
   reasoningEffort: ReasoningEffort;
   hasApiKey: boolean;
 }

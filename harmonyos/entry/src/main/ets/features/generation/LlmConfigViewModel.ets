@@ -1,4 +1,4 @@
-import type { LlmConfig, NoteStyle, ReasoningEffort } from '../../models/LlmModels';
+import type { LlmCompatibilityMode, LlmConfig, NoteStyle, ReasoningEffort } from '../../models/LlmModels';
 import { CUSTOM_MODEL_ID, getProviderPreset, ModelPreset, ProviderPreset } from '../../models/LlmPresets';
 
 export class LlmConfigState {
@@ -6,6 +6,7 @@ export class LlmConfigState {
   baseUrl: string = '';
   model: string = '';
   modelChoice: string = CUSTOM_MODEL_ID;
+  compatibilityMode: LlmCompatibilityMode = 'auto';
   style: NoteStyle = 'faithful';
   reasoningEffort: ReasoningEffort = 'auto';
 }
@@ -17,6 +18,7 @@ export class LlmConfigViewModel {
     state.providerName = config.providerName;
     state.baseUrl = config.baseUrl;
     state.model = config.model;
+    state.compatibilityMode = config.compatibilityMode;
     state.modelChoice = this.isPresetModel(config.providerName, config.model) ?
       config.model : CUSTOM_MODEL_ID;
     state.style = config.style;
@@ -30,6 +32,7 @@ export class LlmConfigViewModel {
     state.baseUrl = preset.baseUrl;
     state.modelChoice = preset.defaultModel;
     state.model = preset.defaultModel === CUSTOM_MODEL_ID ? '' : preset.defaultModel;
+    state.compatibilityMode = 'auto';
     return state;
   }
 
@@ -56,6 +59,7 @@ export class LlmConfigViewModel {
       providerName: state.providerName,
       baseUrl: state.baseUrl.trim(),
       model: state.model.trim(),
+      compatibilityMode: state.compatibilityMode,
       apiKey: apiKey.trim(),
       rememberApiKey: rememberApiKey,
       style: state.style,

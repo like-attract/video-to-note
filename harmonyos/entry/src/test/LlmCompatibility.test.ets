@@ -1,12 +1,15 @@
 import { describe, expect, it } from '@ohos/hypium';
 import type { LlmConfig } from '../main/ets/models/LlmModels';
-import { usesDeepSeekCompatibility } from '../main/ets/models/LlmCompatibility';
+import type { LlmCompatibilityMode } from '../main/ets/models/LlmModels';
+import { resolveCompatibilityMode, usesDeepSeekCompatibility } from '../main/ets/models/LlmCompatibility';
 
-function config(providerName: string, baseUrl: string, model: string): LlmConfig {
+function config(providerName: string, baseUrl: string, model: string,
+  compatibilityMode: LlmCompatibilityMode = 'auto'): LlmConfig {
   return {
     providerName: providerName,
     baseUrl: baseUrl,
     model: model,
+    compatibilityMode: compatibilityMode,
     apiKey: 'test-key',
     style: 'faithful',
     reasoningEffort: 'auto'
@@ -37,6 +40,27 @@ export default function llmCompatibilityTest(): void {
       expect(usesDeepSeekCompatibility(config(
         'custom', 'https://gateway.example/v1', 'other-model'
       ))).assertFalse();
+    });
+
+    it('lets explicit DeepSeek mode handle opaque relay aliases', 0, () => {
+      expect(resolveCompatibilityMode(config(
+        'custom', 'https://gateway.example/v1', 'reasoner-v3', 'deepseek'
+      ))).assertEqual('deepseek');
+    });
+
+    it('lets generic mode disable a false DeepSeek guess', 0, () => {
+      expect(resolveCompatibilityMode(config(
+        'custom', 'https://deepseek.example/v1', 'other-model', 'generic'
+      ))).assertEqual('generic');
+    });
+
+    it('maps custom OpenAI GLM and Qwen relays explicitly', 0, () => {
+      expect(resolveCompatibilityMode(config('custom', 'https://relay/v1', 'alias', 'openai')))
+        .assertEqual('openai');
+      expect(resolveCompatibilityMode(config('custom', 'https://relay/v1', 'alias', 'glm')))
+        .assertEqual('glm');
+      expect(resolveCompatibilityMode(config('custom', 'https://relay/v1', 'alias', 'qwen')))
+        .assertEqual('qwen');
     });
   });
 }

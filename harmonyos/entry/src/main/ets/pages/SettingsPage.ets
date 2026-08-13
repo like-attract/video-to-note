@@ -2,7 +2,7 @@ import { AppRoute } from '../app/AppRoutes';
 import { appContainer } from '../app/AppContainer';
 import { toUserMessage } from '../core/errors/AppError';
 import { AppColor, AppSpace } from '../core/theme/AppTheme';
-import type { LlmProfile, ReasoningEffort } from '../models/LlmModels';
+import type { LlmCompatibilityMode, LlmProfile, ReasoningEffort } from '../models/LlmModels';
 import { CUSTOM_MODEL_ID, getProviderPreset, LLM_PROVIDERS, ModelPreset,
   ProviderPreset } from '../models/LlmPresets';
 import { LlmConfigState, LlmConfigViewModel } from '../features/generation/LlmConfigViewModel';
@@ -28,6 +28,7 @@ export struct SettingsPage {
   @State baseUrl: string = '';
   @State model: string = '';
   @State modelChoice: string = CUSTOM_MODEL_ID;
+  @State compatibilityMode: LlmCompatibilityMode = 'auto';
   @State apiKey: string = '';
   @State reasoningEffort: ReasoningEffort = 'auto';
   private disposed: boolean = false;
@@ -50,6 +51,7 @@ export struct SettingsPage {
     const state: LlmConfigState = new LlmConfigState();
     state.providerName = this.providerName; state.baseUrl = this.baseUrl;
     state.model = this.model; state.modelChoice = this.modelChoice;
+    state.compatibilityMode = this.compatibilityMode;
     state.reasoningEffort = this.reasoningEffort;
     return state;
   }
@@ -57,6 +59,7 @@ export struct SettingsPage {
   private applyConfigState(state: LlmConfigState): void {
     this.providerName = state.providerName; this.baseUrl = state.baseUrl;
     this.model = state.model; this.modelChoice = state.modelChoice;
+    this.compatibilityMode = state.compatibilityMode;
     this.reasoningEffort = state.reasoningEffort;
   }
 
@@ -70,7 +73,8 @@ export struct SettingsPage {
   private startEditProfile(profile: LlmProfile): void {
     this.editingId = profile.id; this.profileName = profile.name; this.apiKey = '';
     this.providerName = profile.providerName; this.baseUrl = profile.baseUrl;
-    this.model = profile.model; this.reasoningEffort = profile.reasoningEffort;
+    this.model = profile.model; this.compatibilityMode = profile.compatibilityMode;
+    this.reasoningEffort = profile.reasoningEffort;
     const preset: ProviderPreset = getProviderPreset(profile.providerName);
     this.modelChoice = preset.models.some((item: ModelPreset) => item.id === profile.model) ?
       profile.model : CUSTOM_MODEL_ID;
@@ -120,7 +124,8 @@ export struct SettingsPage {
     const id: string = this.editingId.length > 0 ? this.editingId : `profile-${Date.now()}`;
     const profile: LlmProfile = {
       id: id, name: name, providerName: this.providerName, baseUrl: baseUrl,
-      model: model, reasoningEffort: this.reasoningEffort, hasApiKey: this.editingId.length > 0
+      model: model, compatibilityMode: this.compatibilityMode,
+      reasoningEffort: this.reasoningEffort, hasApiKey: this.editingId.length > 0
     };
     this.isWorking = true;
     try {
@@ -267,6 +272,25 @@ export struct SettingsPage {
               if (this.modelChoice === CUSTOM_MODEL_ID) {
                 TextInput({ text: this.model, placeholder: $r('app.string.llm_custom_model_placeholder') })
                   .onChange((value: string) => { this.model = value; }).width('100%')
+              }
+              if (this.providerName === 'custom') {
+                Text('兼容模式').fontSize(14).fontWeight(FontWeight.Medium).width('100%')
+                Text('自动识别会根据模型与地址选择协议；若中转使用别名，请手动指定。')
+                  .fontSize(12).fontColor(AppColor.TextMuted).width('100%')
+                Scroll() {
+                  Row({ space: 6 }) {
+                    ForEach(['auto', 'generic', 'deepseek', 'openai', 'glm', 'qwen'],
+                      (mode: LlmCompatibilityMode) => {
+                        Button(mode === 'auto' ? '自动' : mode === 'generic' ? '标准' :
+                          mode === 'deepseek' ? 'DeepSeek' : mode === 'openai' ? 'OpenAI' :
+                          mode === 'glm' ? 'GLM' : 'Qwen')
+                          .fontSize(11).type(ButtonType.Capsule)
+                          .backgroundColor(this.compatibilityMode === mode ? AppColor.Primary : AppColor.Control)
+                          .fontColor(this.compatibilityMode === mode ? AppColor.Surface : AppColor.Text)
+                          .onClick(() => { this.compatibilityMode = mode; })
+                      }, (mode: LlmCompatibilityMode) => mode)
+                  }
+                }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%')
               }
               TextInput({ text: this.apiKey,
                 placeholder: this.editingId.length > 0 ? 'API Key（留空保留原密钥）' : 'API Key' })

@@ -19,6 +19,7 @@ export class MemoryLlmProfileRepository implements LlmProfileRepository {
     const saved: LlmProfile = {
       id: profile.id, name: profile.name, providerName: profile.providerName,
       baseUrl: profile.baseUrl, model: profile.model,
+      compatibilityMode: profile.compatibilityMode,
       reasoningEffort: profile.reasoningEffort, hasApiKey: hasApiKey
     };
     if (apiKey !== undefined && apiKey.trim().length > 0) this.apiKeys.set(profile.id, apiKey.trim());
@@ -47,6 +48,7 @@ export class MemoryLlmProfileRepository implements LlmProfileRepository {
       throw new AppError(AppErrorCode.InvalidInput, '该配置缺少 API Key，请先在设置中补充。');
     return {
       providerName: profile.providerName, baseUrl: profile.baseUrl, model: profile.model,
+      compatibilityMode: profile.compatibilityMode,
       apiKey: apiKey, rememberApiKey: true, style: style, reasoningEffort: profile.reasoningEffort
     };
   }

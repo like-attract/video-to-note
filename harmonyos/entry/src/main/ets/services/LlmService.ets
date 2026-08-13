@@ -1,7 +1,7 @@
 import { http } from '@kit.NetworkKit';
 import type { BiliPage, BiliVideo, TranscriptSegment } from '../models/BiliModels';
-import type { LlmConfig, NoteStyle, ReasoningEffort } from '../models/LlmModels';
-import { usesDeepSeekCompatibility } from '../models/LlmCompatibility';
+import type { LlmCompatibilityMode, LlmConfig, NoteStyle, ReasoningEffort } from '../models/LlmModels';
+import { resolveCompatibilityMode } from '../models/LlmCompatibility';
 import { TranscriptService } from './TranscriptService';
 import { RequestScope } from '../core/network/RequestScope';
 import { NetworkPolicy } from '../core/network/NetworkPolicy';
@@ -108,10 +108,11 @@ export class LlmService {
     const body: ChatRequest = { model: config.model.trim(), messages: messages };
     const effort: ReasoningEffort = effortOverride === undefined ?
       this.stageEffort(config.reasoningEffort, config.style, stage) : effortOverride;
-    if (config.providerName === 'openai' && config.model.trim().startsWith('gpt-5')) {
+    const compatibility: LlmCompatibilityMode = resolveCompatibilityMode(config);
+    if (compatibility === 'openai' && config.model.trim().startsWith('gpt-5')) {
       body.max_completion_tokens = maxTokens;
     } else {
-      body.max_tokens = usesDeepSeekCompatibility(config) && effort !== 'off' ?
+      body.max_tokens = compatibility === 'deepseek' && effort !== 'off' ?
         Math.max(maxTokens * 3, 12000) : maxTokens;
     }
     this.applyReasoning(body, config, effort);
@@ -147,14 +148,15 @@ export class LlmService {
   private applyReasoning(body: ChatRequest, config: LlmConfig, effort: ReasoningEffort): void {
     if (effort === 'auto') return;
     const enabled: boolean = effort !== 'off';
-    if (usesDeepSeekCompatibility(config)) {
+    const compatibility: LlmCompatibilityMode = resolveCompatibilityMode(config);
+    if (compatibility === 'deepseek') {
       body.thinking = { type: enabled ? 'enabled' : 'disabled' };
       if (enabled) body.reasoning_effort = effort === 'max' ? 'max' : 'high';
-    } else if (config.providerName === 'glm') {
+    } else if (compatibility === 'glm') {
       body.thinking = { type: enabled ? 'enabled' : 'disabled' };
-    } else if (config.providerName === 'qwen') {
+    } else if (compatibility === 'qwen') {
       body.enable_thinking = enabled;
-    } else if (config.providerName === 'openai') {
+    } else if (compatibility === 'openai') {
       body.reasoning_effort = effort === 'off' ? 'none' : (effort === 'max' ? 'xhigh' : effort);
     }
   }
@@ -164,8 +166,9 @@ export class LlmService {
   }
 
   private canControlReasoning(config: LlmConfig): boolean {
-    return usesDeepSeekCompatibility(config) || config.providerName === 'openai' ||
-      config.providerName === 'glm' || config.providerName === 'qwen';
+    const compatibility: LlmCompatibilityMode = resolveCompatibilityMode(config);
+    return compatibility === 'deepseek' || compatibility === 'openai' ||
+      compatibility === 'glm' || compatibility === 'qwen';
   }
 
   private endpoint(baseUrl: string): string {

@@ -79,11 +79,14 @@ OpenAI-compatible LLM，生成 Markdown 时间轴笔记并保存在本机。
 - `MemoryLlmProfileRepository.test.ets`：默认项、本次风格合成、删除回退、编辑保留密钥。
 - `Persistence.test.ets`：Profile 元数据和 HUKS API Key 跨 Repository 实例恢复。
 
+本轮用户已确认：
+
+- 真实 LLM 三步生成链路已经验收，可作为当前功能基线。
+
 尚未确认：
 
 - CLI 执行单个 Hypium 设备测试会一直不返回；设备测试代码和 HAP 已编译，但不能据此宣称运行通过。
 - 模拟器目前没有可迁移的旧 LLM API Key，因此本轮尚未做新的真实 LLM API 短测。
-- 完整三步在线生成链路需用户重新录入一个 Profile 后验收。
 
 模拟器视觉证据：
 
@@ -148,7 +151,7 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
 
 ## 6. 下一步执行顺序
 
-1. 完成上述设备测试与真实 LLM 三步链路验收，修复发现的问题。
+1. 完成上述 Profile/HUKS 设备测试，修复发现的问题。
 2. 验证 Profile 新增、编辑、默认、删除后重启应用仍可恢复。
 3. 完善 Markdown 渲染、时间戳交互、文件导出和 Share Kit 体验。
 4. 在真机验证 B站分享进入、扫码登录、华为笔记接收和 HUKS。
@@ -179,4 +182,13 @@ API Key 只在模拟器内输入，不要发到聊天或日志。
   不影响本轮构建成功，后续应专项清理。
 - 不记录或输出 Cookie、SESSDATA、refresh token、API Key。
 - 不要修改无关的根目录 `.gitignore` 或 `scripts/read_bili_cookie.py`。
+
+## 9. LLM 兼容模式与任务中心决策（2026-08-13）
+
+- Profile 兼容模式为 `auto | generic | deepseek | openai | glm | qwen`。
+- `auto` 优先跟随已选服务商；自定义接口会继续用模型名和 Base URL 识别 DeepSeek。
+- 中转使用不透明别名时必须显式选协议族；`generic` 表示标准 OpenAI-compatible，绝不附加厂商私有 thinking 参数。
+- 思考强度仅保留 `auto | off | high | max`；HarmonyOS 请求不发送 `temperature` 或 `top_p`。
+- Profile 文档已升级为 v2；旧 v1 或 legacy 配置缺少兼容模式时恢复为 `auto`，HUKS 密钥命名不变。
+- 后台任务中心采用持久化、应用级单任务 runner；页面退出不取消任务，进程被系统终止后下次启动恢复。详见 `docs/adr/0004-persistent-generation-task-center.md`。
 - 当前 Git 状态中整个 `harmonyos/` 仍是未跟踪目录，尚未提交或推送。

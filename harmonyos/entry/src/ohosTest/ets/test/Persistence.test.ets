@@ -48,6 +48,7 @@ export default function persistenceTest() {
         context, secrets, profilesName, legacyName);
       const saved: LlmProfile = {
         id: 'primary', name: '主配置', providerName: 'deepseek',
+        compatibilityMode: 'auto',
         baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat',
         reasoningEffort: 'auto', hasApiKey: false
       };

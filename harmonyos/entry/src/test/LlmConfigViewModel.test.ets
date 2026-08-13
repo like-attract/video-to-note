@@ -14,10 +14,19 @@ export default function llmConfigViewModelTest(): void {
       const viewModel: LlmConfigViewModel = new LlmConfigViewModel();
       const state: LlmConfigState = viewModel.restore({
         providerName: 'deepseek', baseUrl: 'https://gateway.example/v1',
-        model: 'custom-deepseek', apiKey: '', style: 'faithful', reasoningEffort: 'auto'
+        model: 'custom-deepseek', compatibilityMode: 'deepseek', apiKey: '',
+        style: 'faithful', reasoningEffort: 'auto'
       });
       expect(state.modelChoice).assertEqual(CUSTOM_MODEL_ID);
       expect(state.model).assertEqual('custom-deepseek');
+      expect(state.compatibilityMode).assertEqual('deepseek');
+    });
+    it('resets compatibility to auto when provider changes', 0, () => {
+      const viewModel: LlmConfigViewModel = new LlmConfigViewModel();
+      const state: LlmConfigState = new LlmConfigState();
+      state.compatibilityMode = 'deepseek';
+      viewModel.selectProvider('qwen', state);
+      expect(state.compatibilityMode).assertEqual('auto');
     });
     it('validatesRequiredGenerationConfiguration', 0, () => {
       const viewModel: LlmConfigViewModel = new LlmConfigViewModel();
