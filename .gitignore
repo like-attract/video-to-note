@@ -36,3 +36,6 @@ Thumbs.db
 
 # 视频宣传脚本
 /promo/
+# harmonyos开发
+/harmonyos/
+/scripts/read_bili_cookie.py
