@@ -105,6 +105,7 @@ jobs:
           - 链接输入更宽松：输入框接受 B 站分享文本、无 scheme 的 `b23.tv` 短链与裸 BV/av 号，自动识别补全
           - 全新 3D 产品图标：exe、系统托盘、网页侧栏与 favicon 统一换新
           - DeepSeek 长响应流式读取，推理默认值与请求超时对齐
+          - 打包版与 dev 服务可共存：`/api/health` 上报 mode，launcher 仅复用同模式实例，修复 dev 服务占用端口时打包版不驻留托盘
           - README 恢复详细 MCP 接入与 FAQ 指南
 
           ### v1.1.1 更新

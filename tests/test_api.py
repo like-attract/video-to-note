@@ -18,6 +18,7 @@ def test_health_and_frontend_are_served() -> None:
     assert health.json()["version"] == "1.1.2"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
+    assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
     page = client.get("/")
     assert page.status_code == 200
     assert "VideoToNo" in page.text

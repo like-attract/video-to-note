@@ -19,6 +19,7 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouT
 - 🔗 **Looser link input**: the URL field no longer requires an `https://` prefix — Bilibili share text, scheme-less `b23.tv` short links, and bare BV/av IDs are recognized and normalized automatically.
 - 🎨 **New 3D product icon**: the exe, system tray, web sidebar, and browser favicon all use the refreshed icon.
 - 🧠 **More reliable long answers**: long DeepSeek responses are streamed; reasoning defaults and request timeouts are aligned.
+- 🖥️ **Portable and dev instances can coexist**: the health endpoint reports the run mode and the launcher only reuses same-mode instances; a dev server on port 8000 no longer blocks the portable build's tray.
 - 📚 **Docs restored**: detailed MCP integration and FAQ guides are back in the README.
 
 <details>

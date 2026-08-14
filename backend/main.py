@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import shutil
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -607,6 +608,8 @@ async def health_check() -> dict[str, Any]:
         "status": "ok",
         "service": "VideoToNo",
         "version": app.version,
+        # portable/dev 互不复用对方实例，避免 dev 服务占用端口导致打包版不驻留托盘
+        "mode": "portable" if getattr(sys, "frozen", False) else "dev",
         "dependencies": {
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,

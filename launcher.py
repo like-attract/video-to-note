@@ -62,13 +62,20 @@ def configure_runtime_dirs() -> None:
     os.environ.setdefault("VIDEOTONOTES_WORKSPACE", str(workspace))
 
 
-def server_alive(url: str) -> bool:
+RUN_MODE = "portable" if is_frozen() else "dev"
+
+
+def server_alive(url: str, mode: str | None = None) -> bool:
+    """健康检查。mode 给定时仅当运行实例模式匹配才算“本程序已在运行”：
+    dev 服务与打包版互不复用，避免 dev 占用端口导致打包版不驻留托盘。"""
     try:
         with urllib.request.urlopen(f"{url}/api/health", timeout=1.5) as response:
             if response.status != 200:
                 return False
             payload = json.loads(response.read().decode("utf-8"))
-            return payload.get("status") == "ok" and payload.get("service") == "VideoToNo"
+            if not (payload.get("status") == "ok" and payload.get("service") == "VideoToNo"):
+                return False
+            return mode is None or payload.get("mode") == mode
     except Exception:
         return False
 
@@ -86,8 +93,8 @@ def port_free(port: int) -> bool:
 def find_available_port() -> int:
     for port in range(DEFAULT_PORT, DEFAULT_PORT + PORT_SCAN_RANGE):
         url = f"http://127.0.0.1:{port}"
-        if server_alive(url):
-            return port  # 本程序已在运行，直接复用
+        if server_alive(url, mode=RUN_MODE):
+            return port  # 同模式实例已在运行，直接复用
         if port_free(port):
             return port
     raise RuntimeError(f"端口 {DEFAULT_PORT}-{DEFAULT_PORT + PORT_SCAN_RANGE - 1} 均不可用，请稍后重试")
@@ -252,8 +259,8 @@ def main() -> int:
 
     url = f"http://127.0.0.1:{port}"
 
-    if server_alive(url):
-        # 服务已在运行，直接打开界面
+    if server_alive(url, mode=RUN_MODE):
+        # 同模式服务已在运行，直接打开界面
         if not no_browser:
             webbrowser.open(url)
         return 0
