@@ -101,6 +101,12 @@ jobs:
           NOTES=$(cat <<EOF
           ## VideoToNo $GITHUB_REF_NAME
 
+          ### v1.1.2 更新
+          - 链接输入更宽松：输入框接受 B 站分享文本、无 scheme 的 `b23.tv` 短链与裸 BV/av 号，自动识别补全
+          - 全新 3D 产品图标：exe、系统托盘、网页侧栏与 favicon 统一换新
+          - DeepSeek 长响应流式读取，推理默认值与请求超时对齐
+          - README 恢复详细 MCP 接入与 FAQ 指南
+
           ### v1.1.1 更新
           - 产品页品牌图标统一使用 `sources/icon.png`，处理进度 6 个环节改为等距排列
           - 空正文自动重试提示改为按具体生成阶段即时显示，避免完成后才出现误导性日志

@@ -30,7 +30,7 @@ from .transcript import (
     segments_to_prompt,
     transcript_quality,
 )
-from .video_processor import VideoProcessor, VideoSource
+from .video_processor import VideoProcessor, VideoSource, normalize_video_input
 from .whisper_asr import WhisperTranscriber
 
 
@@ -68,7 +68,7 @@ DOUYIN_HINT = (
     "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.1")
+app = FastAPI(title="VideoToNo API", version="1.1.2")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -419,6 +419,14 @@ def write_upload_manifest(task_id: str, filename: str) -> None:
 async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
     if request.whisper_model not in WHISPER_MODELS:
         raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
+    if request.video_url:
+        normalized = normalize_video_input(request.video_url)
+        if not normalized:
+            raise HTTPException(
+                status_code=422,
+                detail="无法识别视频链接：支持 http(s) 链接，或包含 B 站链接 / BV 号的文本",
+            )
+        request.video_url = normalized
     if request.video_url and urlsplit(request.video_url).netloc.endswith(DOUYIN_HOSTS):
         raise HTTPException(status_code=422, detail=DOUYIN_HINT)
 

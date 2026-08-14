@@ -35,7 +35,12 @@ def _encode_bmp32(frame: Image.Image) -> bytes:
     pixels = bytearray(frame.tobytes())  # RGBA 顺序
     for index in range(0, len(pixels), 4):
         pixels[index], pixels[index + 2] = pixels[index + 2], pixels[index]  # RGBA -> BGRA
-    return header + bytes(pixels)
+    # BMP 要求自下而上行序，而 frame.tobytes() 是自上而下；不翻转图标会上下颠倒
+    stride = width * 4
+    pixels = b"".join(
+        bytes(pixels[row * stride:(row + 1) * stride]) for row in range(height - 1, -1, -1)
+    )
+    return header + pixels
 
 
 def _encode_png(frame: Image.Image) -> bytes:

@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.1</h1>
+<h1 align="center">VideoToNo v1.1.2</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,13 +14,23 @@
 
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-## 🆕 What's New (v1.1.0 → v1.1.1)
+## 🆕 What's New (v1.1.1 → v1.1.2)
+
+- 🔗 **Looser link input**: the URL field no longer requires an `https://` prefix — Bilibili share text, scheme-less `b23.tv` short links, and bare BV/av IDs are recognized and normalized automatically.
+- 🎨 **New 3D product icon**: the exe, system tray, web sidebar, and browser favicon all use the refreshed icon.
+- 🧠 **More reliable long answers**: long DeepSeek responses are streamed; reasoning defaults and request timeouts are aligned.
+- 📚 **Docs restored**: detailed MCP integration and FAQ guides are back in the README.
+
+<details>
+<summary>v1.1.1 and earlier</summary>
 
 - 🎬 **More reliable long-video generation**: transcripts are split at segment boundaries and reduced hierarchically, with live chunk, draft, and analysis progress.
 - 📝 **Smoother output workflow**: copy complete notes, export Markdown / HTML / JSON / plain text / PNG, delete failed tasks, resume from saved transcripts, cancel jobs, and archive notes automatically.
 - 🧠 **Clearer model status**: when a model returns an empty body, the affected stage reports it immediately and retries once with reasoning disabled.
 - 🎨 **More consistent UI**: the product page, desktop app, and tray use the shared `sources/icon.png` asset; the six progress stages are evenly spaced; product screenshots were refreshed.
 - 🔌 **Better local integration**: multiple providers, custom model IDs, note styles, reasoning controls, and MCP access for clients such as Cherry Studio and Codex.
+
+</details>
 
 ## 🖼️ Screenshots
 
@@ -38,7 +48,7 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouT
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.1.1-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.1.2-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;

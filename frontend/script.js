@@ -793,15 +793,31 @@ function validateAndBuildRequestBase(resumeTaskId = null) {
         return { sourceType, file, videoUrl: '', modelConfig };
     }
 
-    const videoUrl = byId('videoUrl').value.trim();
-    if (!videoUrl) return validationError('请输入视频链接');
-    try {
-        const parsed = new URL(videoUrl);
-        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
-    } catch {
-        return validationError('请输入有效的 http(s) 视频链接');
-    }
+    const videoUrl = normalizeVideoInput(byId('videoUrl').value);
+    if (!videoUrl) return validationError('请输入有效链接，或包含 B 站链接 / BV 号的分享文本');
+    byId('videoUrl').value = videoUrl;
     return { sourceType, file: null, videoUrl, modelConfig };
+}
+
+// 宽松识别：完整 http(s) 链接原样返回；否则从分享文本提取 B 站链接（可缺省 scheme），
+// 或裸 BV/av 号补全为视频页 URL；无法识别返回 null。与后端 normalize_video_input 同语义。
+function normalizeVideoInput(raw) {
+    const value = (raw || '').trim();
+    if (!value) return null;
+    try {
+        const parsed = new URL(value);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return value;
+    } catch { /* 非完整链接，走下方提取 */ }
+    const link = value.match(/(?:https?:\/\/)?(?:www\.|m\.)?(?:bilibili\.com|b23\.tv)\/\S+/i);
+    if (link) {
+        const cleaned = link[0].replace(/[.,;:!?。，；：！？、）】」』”]+$/, '');
+        return cleaned.startsWith('http') ? cleaned : `https://${cleaned}`;
+    }
+    const bv = value.match(/BV[0-9A-Za-z]{10}/);
+    if (bv) return `https://www.bilibili.com/video/${bv[0]}`;
+    const av = value.match(/av(\d+)/i);
+    if (av) return `https://www.bilibili.com/video/av${av[1]}`;
+    return null;
 }
 
 function validationError(message) {

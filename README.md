@@ -14,13 +14,23 @@
 
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
 
-## 🆕 What's New（v1.1.0 → v1.1.1）
+## 🆕 What's New（v1.1.1 → v1.1.2）
+
+- 🔗 **链接输入更宽松**：输入框不再要求必须以 `https://` 开头——直接粘贴 B 站分享文本、无 scheme 的 `b23.tv` 短链或裸 BV/av 号都能自动识别并补全。
+- 🎨 **全新 3D 产品图标**：exe、系统托盘、网页侧栏与浏览器 favicon 统一换上新图标。
+- 🧠 **长回答更稳**：DeepSeek 长响应改为流式读取，推理默认值与请求超时对齐，减少超时截断。
+- 📚 **文档更完整**：README 恢复详细 MCP 接入与 FAQ 指南。
+
+<details>
+<summary>v1.1.1 及更早</summary>
 
 - 🎬 **长视频更稳**：转录内容按完整分段切块并分层归并，生成阶段实时展示逐段整理、成稿和点评进度。
 - 📝 **输出更顺手**：支持一键复制、Markdown / HTML / JSON / 纯文本 / PNG 导出，失败任务删除、断点继续、任务取消和笔记自动归档更完整。
 - 🧠 **模型状态更透明**：模型返回空正文时会在当前阶段立即提示，并自动关闭深度思考重试一次，避免任务结束后才出现误导性日志。
 - 🎨 **界面更统一**：产品页、桌面端和托盘统一使用 `sources/icon.png` 生成的图标，处理进度 6 个环节等距排列，并更新产品截图。
 - 🔌 **本地集成更完整**：支持多 Provider、自定义模型、笔记风格、推理强度，以及 Cherry Studio / Codex 等 AI 客户端的 MCP 接入。
+
+</details>
 
 ## 🖼️ 界面预览
 
@@ -38,7 +48,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.1-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.2-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；
@@ -70,7 +80,7 @@ faster-whisper 本地转写
 
 ## 🌍 支持范围
 
-- B 站、YouTube，以及当前版本 `yt-dlp` 能解析的其他 `http` / `https` 视频链接；
+- B 站、YouTube，以及当前版本 `yt-dlp` 能解析的其他 `http` / `https` 视频链接；B 站输入支持分享文本、`b23.tv` 短链（可缺省 scheme）与裸 BV/av 号；
 - `.mp3`、`.m4a`、`.wav`、`.flac`、`.aac`、`.mp4`、`.mkv`、`.mov`、`.webm`、`.avi` 等本地媒体；
 - 抖音、爱奇艺、腾讯视频目前未做专门适配，能否处理取决于平台访问权限、字幕可见性和 `yt-dlp` 的解析能力。
 

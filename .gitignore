@@ -33,3 +33,6 @@ Thumbs.db
 /sources/icon_old.*
 # 构建产物（由 build_exe.ps1 从模板生成）
 /scripts/version_info.txt
+
+# 视频宣传脚本
+/promo/

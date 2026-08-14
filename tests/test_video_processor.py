@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.video_processor import VideoProcessor, VideoSource
+from backend.video_processor import VideoProcessor, VideoSource, normalize_video_input
 
 
 def test_detect_known_sources(tmp_path: Path) -> None:
@@ -28,6 +28,39 @@ def test_reject_non_http_and_do_not_misclassify_lookalike_domains(
         processor.detect_source("https://notbilibili.com/video/BV1xx")
         == VideoSource.OTHER
     )
+
+
+def test_normalize_video_input_accepts_loose_bilibili_text() -> None:
+    # 完整链接原样返回
+    assert (
+        normalize_video_input("https://www.bilibili.com/video/BV1xM4y1z7Kt?p=1")
+        == "https://www.bilibili.com/video/BV1xM4y1z7Kt?p=1"
+    )
+    # 分享文本中的 b23.tv 短链（无 scheme）补全 https
+    assert (
+        normalize_video_input("【硬核】大模型读懂视频 https://b23.tv/AbCd3Fg 复制打开")
+        == "https://b23.tv/AbCd3Fg"
+    )
+    # 缺省 scheme 的完整域名链接
+    assert (
+        normalize_video_input("www.bilibili.com/video/BV1xM4y1z7Kt")
+        == "https://www.bilibili.com/video/BV1xM4y1z7Kt"
+    )
+    # 裸 BV 号补全为视频页
+    assert (
+        normalize_video_input("BV1xM4y1z7Kt")
+        == "https://www.bilibili.com/video/BV1xM4y1z7Kt"
+    )
+    # av 号
+    assert normalize_video_input("av170001") == "https://www.bilibili.com/video/av170001"
+    # 尾部标点不粘进链接
+    assert normalize_video_input("看下这个：b23.tv/AbCd3Fg。") == "https://b23.tv/AbCd3Fg"
+
+
+def test_normalize_video_input_rejects_unknown_text() -> None:
+    assert normalize_video_input("") is None
+    assert normalize_video_input("随便一段没有链接的文字") is None
+    assert normalize_video_input("ftp://example.com/video.mp4") is None
 
 
 def test_choose_manual_chinese_subtitles_before_automatic(tmp_path: Path) -> None:

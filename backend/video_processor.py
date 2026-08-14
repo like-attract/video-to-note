@@ -33,6 +33,35 @@ class SubtitleResult:
     source: str
 
 
+_EMBEDDED_LINK_RE = re.compile(r"(?:https?://)?(?:www\.|m\.)?(?:bilibili\.com|b23\.tv)/\S+", re.I)
+_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+_AV_RE = re.compile(r"av(\d+)", re.I)
+_TRAILING_PUNCT = ".,;:!?。，；：！？、）】」』”"
+
+
+def normalize_video_input(value: str) -> str | None:
+    """宽松识别视频输入：完整 http(s) 链接原样返回；否则从分享文本中提取
+    B 站链接（bilibili.com / b23.tv，可缺省 scheme），或裸 BV/av 号补全为视频页 URL。
+    无法识别时返回 None。"""
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return text
+    match = _EMBEDDED_LINK_RE.search(text)
+    if match:
+        link = match.group(0).rstrip(_TRAILING_PUNCT)
+        return link if link.startswith(("http://", "https://")) else f"https://{link}"
+    bv = _BV_RE.search(text)
+    if bv:
+        return f"https://www.bilibili.com/video/{bv.group(0)}"
+    av = _AV_RE.search(text)
+    if av:
+        return f"https://www.bilibili.com/video/av{av.group(1)}"
+    return None
+
+
 class VideoProcessor:
     def __init__(self, work_dir: Path) -> None:
         self.work_dir = work_dir

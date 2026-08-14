@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.1"
+    assert health.json()["version"] == "1.1.2"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     page = client.get("/")
