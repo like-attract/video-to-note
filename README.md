@@ -1,8 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-
-<h1 align="center">VideoToNo v1.1.1</h1>
+<h1 align="center">VideoToNo v1.1.2</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
