@@ -29,6 +29,8 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouT
 - 🖥️ **Portable and dev instances can coexist**: the health endpoint reports the run mode and the launcher only reuses same-mode instances; a dev server on port 8000 no longer blocks the portable build's tray.
 - 📚 **Docs restored**: detailed MCP integration and FAQ guides are back in the README.
 
+</details>
+
 <details>
 <summary>v1.1.1 and earlier</summary>
 
