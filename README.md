@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.1.2</h1>
+<h1 align="center">VideoToNo v1.1.3</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -13,7 +13,14 @@
 
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
 
-## 🆕 What's New（v1.1.1 → v1.1.2）
+## 🆕 What's New（v1.1.2 → v1.1.3）
+
+- 🛡️ **B 站下载更稳**：修复 412 反爬拦截（改用真实浏览器 UA、Cookie 改走 yt-dlp cookiefile 通道、补齐 buvid/b_nut/b_lsid 风控 Cookie），登录后下载不再被拒绝。
+- 🩺 **一键测试 LLM 连接**：配置区新增「测试连接」按钮，秒级验证 Provider / API Key / Base URL 是否可用，失败时直接告知是密钥错误还是接口地址错误。
+- ⚡ **前端更新即时生效**：静态资源改为 no-cache 策略，发布后刷新页面即用到新版，不再出现旧版页面/按钮。
+
+<details>
+<summary>v1.1.2 及更早</summary>
 
 - 🔗 **链接输入更宽松**：输入框不再要求必须以 `https://` 开头——直接粘贴 B 站分享文本、无 scheme 的 `b23.tv` 短链或裸 BV/av 号都能自动识别并补全。
 - 🎨 **全新 3D 产品图标**：exe、系统托盘、网页侧栏与浏览器 favicon 统一换上新图标。
@@ -48,7 +55,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.2-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.3-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；

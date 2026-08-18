@@ -101,6 +101,11 @@ jobs:
           NOTES=$(cat <<EOF
           ## VideoToNo $GITHUB_REF_NAME
 
+          ### v1.1.3 更新
+          - 修复 B 站下载 412 反爬拦截：改用真实浏览器 UA、Cookie 改走 yt-dlp cookiefile 通道、补齐 buvid/b_nut/b_lsid 风控 Cookie
+          - 配置区新增「测试连接」按钮：一键验证 LLM 配置，失败时直接区分 API Key 错误或接口地址错误
+          - 前端静态资源 no-cache：发布后刷新页面即用到新版，避免旧缓存导致按钮/功能不生效
+
           ### v1.1.2 更新
           - 链接输入更宽松：输入框接受 B 站分享文本、无 scheme 的 `b23.tv` 短链与裸 BV/av 号，自动识别补全
           - 全新 3D 产品图标：exe、系统托盘、网页侧栏与 favicon 统一换新

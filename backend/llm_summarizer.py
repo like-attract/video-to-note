@@ -66,6 +66,86 @@ class LLMSummarizer:
         self.model = model
         self.warnings: list[str] = []
 
+    async def test_connection(self, timeout_seconds: float = 20.0) -> tuple[bool, str, float]:
+        """轻量连通性测试：发一个极小请求，返回 (是否成功, 可读消息, 耗时秒)。"""
+        import time
+
+        start = time.monotonic()
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=8,
+                timeout=timeout_seconds,
+            )
+            latency = time.monotonic() - start
+            reply = (response.choices[0].message.content or "").strip()
+            if reply:
+                return True, f"连接成功（{latency * 1000:.0f} ms）模型响应：{reply[:40]}", latency
+            return True, f"连接成功（{latency * 1000:.0f} ms）", latency
+        except Exception as exc:
+            latency = time.monotonic() - start
+            return False, self._describe_llm_error(exc, latency), latency
+
+    @staticmethod
+    def _describe_llm_error(exc: Exception, latency: float) -> str:
+        """把连接异常翻译成用户可读的诊断信息（区分 key 错误 / URL 错误 / 其他）。"""
+        try:
+            from openai import (
+                APIConnectionError,
+                APITimeoutError,
+                AuthenticationError,
+                BadRequestError,
+                NotFoundError,
+                PermissionDeniedError,
+                RateLimitError,
+            )
+        except ImportError:
+            message = (
+                f"连接失败（{latency * 1000:.0f} ms）：{type(exc).__name__}: {exc}"
+            )
+            return message
+
+        elapsed_ms = f"{latency * 1000:.0f} ms"
+        if isinstance(exc, AuthenticationError):
+            return (
+                f"连接失败（HTTP 401，{elapsed_ms}）：API Key 无效或已过期，请检查密钥"
+            )
+        if isinstance(exc, PermissionDeniedError):
+            return (
+                f"连接失败（HTTP 403，{elapsed_ms}）：API Key 无权限访问该模型，"
+                f"请检查密钥权限或模型名称"
+            )
+        if isinstance(exc, NotFoundError):
+            return (
+                f"连接失败（HTTP 404，{elapsed_ms}）：接口/模型不存在——大概率是 "
+                f"Base URL 或模型名填错了"
+            )
+        if isinstance(exc, BadRequestError):
+            return (
+                f"连接失败（HTTP 400，{elapsed_ms}）：请求被拒绝——通常是模型名不识别"
+                f"或参数不受支持（{exc}）"
+            )
+        if isinstance(exc, RateLimitError):
+            return (
+                f"连接失败（HTTP 429，{elapsed_ms}）：请求频率超限或余额不足，请稍后重试"
+            )
+        if isinstance(exc, APITimeoutError):
+            return (
+                f"连接失败（{elapsed_ms}）：请求超时——服务无响应，或网络不通"
+            )
+        if isinstance(exc, APIConnectionError):
+            hint = "Base URL 填错或网络无法访问该地址"
+            if "resolve" in str(exc).lower() or "dns" in str(exc).lower():
+                hint = "域名解析失败——Base URL 填错或网络不通"
+            return (
+                f"连接失败（{elapsed_ms}）：{hint}（{type(exc).__name__}: {exc}）"
+            )
+        detail = getattr(exc, "status_code", None)
+        if detail:
+            return f"连接失败（HTTP {detail}，{elapsed_ms}）：{exc}"
+        return f"连接失败（{elapsed_ms}）：{type(exc).__name__}: {exc}"
+
     async def generate_summary(
         self,
         title: str,

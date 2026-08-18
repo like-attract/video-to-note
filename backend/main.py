@@ -20,6 +20,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """前端开发期共享：静态资源每次都重新校验，避免浏览器缓存旧版本。"""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> FileResponse:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 from pydantic import BaseModel, Field, SecretStr
 
 from .config_store import ConfigStore
@@ -69,7 +78,7 @@ DOUYIN_HINT = (
     "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.2")
+app = FastAPI(title="VideoToNo API", version="1.1.3")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -122,6 +131,15 @@ class BilibiliCookie(BaseModel):
 class LLMConfigPayload(BaseModel):
     model_type: str = "deepseek"
     api_key: SecretStr
+    base_url: str | None = None
+    model: str | None = None
+
+
+class LLMTestPayload(BaseModel):
+    """测试连接的可选覆盖参数；为 None 的字段回退到已保存配置。"""
+
+    model_type: str | None = None
+    api_key: SecretStr | None = None
     base_url: str | None = None
     model: str | None = None
 
@@ -565,6 +583,45 @@ async def save_llm_config(payload: LLMConfigPayload) -> dict[str, Any]:
         config["model"] = payload.model
     config_store.save_llm_config(config)
     return {"saved": True, "model_type": payload.model_type, "model": config.get("model")}
+
+
+@app.post("/api/llm-test")
+async def test_llm_connection(
+    payload: LLMTestPayload | None = None,
+) -> dict[str, Any]:
+    """用（可选覆盖的）LLM 配置做一次轻量连通测试。"""
+    saved = config_store.load_llm_config() or {}
+    model_type = (
+        payload.model_type if payload and payload.model_type else saved.get("model_type", "deepseek")
+    )
+    api_key = (
+        payload.api_key.get_secret_value()
+        if payload and payload.api_key
+        else str(saved.get("api_key") or "")
+    )
+    base_url = (
+        payload.base_url if payload and payload.base_url else saved.get("base_url")
+    )
+    model = payload.model if payload and payload.model else saved.get("model")
+    if not api_key:
+        return {"ok": False, "error": "未配置 API Key，请先填写"}
+    try:
+        summarizer = LLMSummarizer(
+            model_type=model_type,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+        ok, message, latency = await summarizer.test_connection()
+        return {
+            "ok": ok,
+            "message": message,
+            "latency_ms": int(round(latency * 1000)),
+            "model": model or summarizer.model,
+            "base_url": summarizer.base_url,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"初始化失败：{exc}"}
 
 
 @app.delete("/api/llm-config")
@@ -1182,7 +1239,11 @@ async def favicon() -> FileResponse:
 
 
 if FRONTEND_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    app.mount(
+        "/",
+        NoCacheStaticFiles(directory=FRONTEND_DIR, html=True),
+        name="frontend",
+    )
 
 
 if __name__ == "__main__":

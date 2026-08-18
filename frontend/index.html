@@ -18,7 +18,7 @@
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
-                <h1>VideoToNo <span id="appVersion" class="app-version">v1.1.2</span></h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.1.3</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
@@ -67,6 +67,10 @@
                 <input type="password" id="apiKey" autocomplete="off" placeholder="仅在本次页面会话中使用">
                 <small>只保留在当前页面内存中，刷新或关闭页面后需重新填写。</small>
             </label>
+            <div class="llm-test-row">
+                <button id="llmTestBtn" class="button secondary" type="button">测试连接</button>
+                <span id="llmTestStatus" class="llm-test-status" role="status" aria-live="polite"></span>
+            </div>
 
             <div id="customApiConfig" class="custom-config" hidden>
                 <label id="customBaseUrlField" class="field" hidden>

@@ -155,6 +155,7 @@ function bindEvents() {
     });
     byId('llmProvider').addEventListener('change', handleProviderChange);
     byId('llmModel').addEventListener('change', toggleCustomConfig);
+    byId('llmTestBtn').addEventListener('click', testLlmConnection);
     byId('sourceType').addEventListener('change', toggleSourceType);
     byId('videoUrl').addEventListener('input', () => {
         window.clearTimeout(biliHintDebounce);
@@ -445,6 +446,46 @@ function toggleCustomConfig() {
     byId('customBaseUrlField').hidden = !customProvider;
     byId('customModelNameField').hidden = !customModel;
     byId('customApiConfig').hidden = !customProvider;
+}
+
+async function testLlmConnection() {
+    const button = byId('llmTestBtn');
+    const status = byId('llmTestStatus');
+    const modelConfig = getSelectedModelConfig();
+    if (!modelConfig) return;
+    const apiKey = byId('apiKey').value.trim();
+    if (!apiKey) {
+        status.textContent = '请先填写 API Key';
+        status.className = 'llm-test-status error';
+        return;
+    }
+    button.disabled = true;
+    status.textContent = '测试中…';
+    status.className = 'llm-test-status testing';
+    try {
+        const response = await fetchWithTimeout(
+            `${API_BASE}/llm-test`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model_type: modelConfig.provider,
+                    api_key: apiKey,
+                    base_url: modelConfig.baseUrl || undefined,
+                    model: modelConfig.model
+                })
+            },
+            30_000
+        );
+        const data = await readResponse(response, '测试请求失败');
+        status.textContent = data.ok ? data.message : (data.message || data.error || '连接失败');
+        status.className = data.ok ? 'llm-test-status ok' : 'llm-test-status error';
+    } catch (error) {
+        status.textContent = `测试失败：${error.message}`;
+        status.className = 'llm-test-status error';
+    } finally {
+        button.disabled = false;
+    }
 }
 
 function getSelectedModelConfig() {

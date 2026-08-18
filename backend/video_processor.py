@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -63,6 +65,13 @@ def normalize_video_input(value: str) -> str | None:
 
 
 class VideoProcessor:
+    # B 站风控要求真实浏览器 UA；yt-dlp 的 bilibili 提取器依赖它通过 /web-interface 接口检查
+    BILI_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    )
+
+
     def __init__(self, work_dir: Path) -> None:
         self.work_dir = work_dir
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -249,15 +258,12 @@ class VideoProcessor:
         task_dir = self._task_dir(task_id)
 
         def _download() -> Path:
-            options = self._base_ydl_options(cookie)
-            options.update(
-                {
-                    "format": "bestaudio/best",
-                    "outtmpl": str(task_dir / "audio.%(ext)s"),
-                    "noplaylist": True,
-                }
-            )
-            with yt_dlp.YoutubeDL(options) as ydl:
+            with self._ydl(
+                cookie,
+                format="bestaudio/best",
+                outtmpl=str(task_dir / "audio.%(ext)s"),
+                noplaylist=True,
+            ) as ydl:
                 ydl.extract_info(url, download=True)
             matches = [
                 item
@@ -276,15 +282,12 @@ class VideoProcessor:
         task_dir = self._task_dir(task_id)
 
         def _download() -> Path:
-            options = self._base_ydl_options(cookie)
-            options.update(
-                {
-                    "format": "worstvideo[height>=360]/bestvideo[height<=720]/worst",
-                    "outtmpl": str(task_dir / "preview.%(ext)s"),
-                    "noplaylist": True,
-                }
-            )
-            with yt_dlp.YoutubeDL(options) as ydl:
+            with self._ydl(
+                cookie,
+                format="worstvideo[height>=360]/bestvideo[height<=720]/worst",
+                outtmpl=str(task_dir / "preview.%(ext)s"),
+                noplaylist=True,
+            ) as ydl:
                 ydl.extract_info(url, download=True)
             matches = [
                 item
@@ -349,9 +352,7 @@ class VideoProcessor:
     def _extract_info(
         self, url: str, cookie: dict[str, str] | None
     ) -> dict[str, Any]:
-        options = self._base_ydl_options(cookie)
-        options.update({"skip_download": True, "noplaylist": True})
-        with yt_dlp.YoutubeDL(options) as ydl:
+        with self._ydl(cookie, skip_download=True, noplaylist=True) as ydl:
             raw_info = ydl.extract_info(url, download=False)
             info = ydl.sanitize_info(raw_info)
         return {
@@ -424,7 +425,7 @@ class VideoProcessor:
             subtitle_url = "https:" + subtitle_url
         headers = {
             "Referer": referer,
-            "User-Agent": "Mozilla/5.0 VideoToNo/1.0",
+            "User-Agent": VideoProcessor.BILI_USER_AGENT,
         }
         if extra_headers:
             headers.update(extra_headers)
@@ -436,17 +437,61 @@ class VideoProcessor:
             return response.read().decode("utf-8-sig", errors="replace")
 
     @staticmethod
-    def _base_ydl_options(cookie: dict[str, str] | None) -> dict[str, Any]:
-        headers = {"User-Agent": "Mozilla/5.0 VideoToNo/1.0"}
-        cookie_header = VideoProcessor._cookie_header(cookie)
-        if cookie_header:
-            headers["Cookie"] = cookie_header
+    def _base_ydl_options() -> dict[str, Any]:
         return {
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
-            "http_headers": headers,
+            "http_headers": {"User-Agent": VideoProcessor.BILI_USER_AGENT},
         }
+
+    @staticmethod
+    def _write_cookie_file(cookie: dict[str, str] | None) -> Path | None:
+        """把 bilibili 登录凭据写成 Netscape cookies.txt，供 yt-dlp cookiefile 使用。
+
+        新版 yt-dlp 已弃用通过 Cookie header 传凭据（存在安全风险且会被
+        scope 到下载地址域名），cookiefile 才是受支持的方式。
+        """
+        if not cookie or not cookie.get("sessdata"):
+            return None
+        mapping = (
+            ("SESSDATA", cookie.get("sessdata")),
+            ("bili_jct", cookie.get("bili_jct")),
+            ("buvid3", cookie.get("buvid3")),
+            ("buvid4", cookie.get("buvid4")),
+            ("b_nut", cookie.get("b_nut")),
+            ("b_lsid", cookie.get("b_lsid")),
+        )
+        lines = ["# Netscape HTTP Cookie File"]
+        for name, value in mapping:
+            if value:
+                lines.append(f".bilibili.com\tTRUE\t/\tFALSE\t0\t{name}\t{value}")
+        fd, raw_path = tempfile.mkstemp(prefix="videotono-cookies-", suffix=".txt")
+        os.close(fd)
+        path = Path(raw_path)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    @contextlib.contextmanager
+    def _ydl(
+        self, cookie: dict[str, str] | None, **extra: Any
+    ) -> Iterator[yt_dlp.YoutubeDL]:
+        """构造 YoutubeDL：cookie 走临时 cookiefile，退出时自动清理。"""
+        options = self._base_ydl_options()
+        cookie_file: Path | None = None
+        try:
+            cookie_file = self._write_cookie_file(cookie)
+            if cookie_file is not None:
+                options["cookiefile"] = str(cookie_file)
+            options.update(extra)
+            with yt_dlp.YoutubeDL(options) as ydl:
+                yield ydl
+        finally:
+            if cookie_file is not None:
+                try:
+                    cookie_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _cookie_header(cookie: dict[str, str] | None) -> str:

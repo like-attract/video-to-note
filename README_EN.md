@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.2</h1>
+<h1 align="center">VideoToNo v1.1.3</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,7 +14,14 @@
 
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-## 🆕 What's New (v1.1.1 → v1.1.2)
+## 🆕 What's New (v1.1.2 → v1.1.3)
+
+- 🛡️ **Reliable Bilibili downloads**: fixed HTTP 412 anti-bot rejections (real browser User-Agent, Cookies moved to yt-dlp's cookiefile channel, and missing risk cookies like buvid/b_nut/b_lsid now collected), so downloads work after signing in.
+- 🩺 **One-click LLM connection test**: a new “Test connection” button in the settings panel verifies Provider / API Key / Base URL in seconds and tells you whether a failed test is a bad key or a wrong endpoint.
+- ⚡ **Frontend updates apply instantly**: static assets now use a no-cache policy, so a simple refresh loads new pages/buttons instead of stale cached files.
+
+<details>
+<summary>v1.1.2 and earlier</summary>
 
 - 🔗 **Looser link input**: the URL field no longer requires an `https://` prefix — Bilibili share text, scheme-less `b23.tv` short links, and bare BV/av IDs are recognized and normalized automatically.
 - 🎨 **New 3D product icon**: the exe, system tray, web sidebar, and browser favicon all use the refreshed icon.
@@ -49,7 +56,7 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouT
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.1.2-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.1.3-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;

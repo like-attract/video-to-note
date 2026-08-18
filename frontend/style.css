@@ -160,6 +160,13 @@ button, select { cursor: pointer; }
 .credentials-section[open] summary { margin-bottom: 8px; }
 .section-note { margin-bottom: 14px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
 
+.llm-test-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.llm-test-row .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
+.llm-test-status { min-width: 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.llm-test-status.ok { color: var(--success, #3fb950); }
+.llm-test-status.error { color: var(--danger, #f85149); }
+.llm-test-status.testing { color: var(--text-muted); }
+
 .bili-login-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .bili-login-row .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
 .bili-login-status { min-width: 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }

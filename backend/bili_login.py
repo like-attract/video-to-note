@@ -278,10 +278,18 @@ class BiliLoginManager:
         except Exception:
             return {}
         wanted: dict[str, str] = {}
+        wanted_keys = (
+            "SESSDATA",
+            "bili_jct",
+            "buvid3",
+            "buvid4",
+            "b_nut",
+            "b_lsid",
+        )
         for cookie in cookies:
             domain = cookie.get("domain", "")
             name = cookie.get("name", "")
-            if "bilibili.com" in domain and name in ("SESSDATA", "bili_jct", "buvid3"):
+            if "bilibili.com" in domain and name in wanted_keys:
                 wanted[name] = cookie.get("value", "")
         if not wanted.get("SESSDATA"):
             return {}
@@ -289,6 +297,9 @@ class BiliLoginManager:
             "sessdata": wanted.get("SESSDATA", ""),
             "bili_jct": wanted.get("bili_jct", ""),
             "buvid3": wanted.get("buvid3", ""),
+            "buvid4": wanted.get("buvid4", ""),
+            "b_nut": wanted.get("b_nut", ""),
+            "b_lsid": wanted.get("b_lsid", ""),
         }
 
     async def cancel(self) -> dict[str, Any]:
