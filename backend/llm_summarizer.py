@@ -430,7 +430,10 @@ class LLMSummarizer:
         style: str = "detailed",
     ) -> str:
         owner = metadata.get("owner") or "未知"
+        published_at = metadata.get("published_at") or "未知"
         duration = metadata.get("duration_text") or "未知"
+        view_count = metadata.get("view_count") or 0
+        like_count = metadata.get("like_count") or 0
         source_label = metadata.get("transcript_source") or "语音转写"
         if style == "concise":
             task = (
@@ -447,14 +450,22 @@ class LLMSummarizer:
                 "时间点写在段落开头，写成 [MM:SS] 或 [起点-终点]；"
                 "仅在有助于定位时使用，不必每段都加。"
             )
+        metadata_hint = (
+            "如果有助于读者快速了解视频，可在标题下自然带出材料中明确的作者、发布时间、"
+            "时长或播放信息；缺失的信息省略，不要猜测，也不必为了满足格式强行补齐。"
+            "应用会在标题下补充一行可验证的元信息，正文无需重复同一组信息。"
+        )
         return f"""{task}
 
 视频标题：{title}
 作者：{owner}
+发布时间：{published_at}
 时长：{duration}
+播放：{view_count}
+点赞：{like_count}
 文字来源：{source_label}
 
-以准确理解语境和作者立场为先。时间点只能取自材料。{timestamp_hint}可在上下文支持时直接修正明显的口误、
+以准确理解语境和作者立场为先。{metadata_hint}时间点只能取自材料。{timestamp_hint}可在上下文支持时直接修正明显的口误、
 笔误或转写错误；只有歧义会影响结论且无法可靠判断时，才在正文采用最可能的解释，并在文末用
 Markdown 脚注集中说明。不要在正文反复插入“原文如此”或“疑为转写错误”。
 结构按内容自然组织，不必凑固定模板。标题使用：# 视频笔记：《{title}》

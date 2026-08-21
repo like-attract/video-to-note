@@ -163,6 +163,7 @@ function bindEvents() {
     });
     byId('biliHintScanBtn').addEventListener('click', startBiliLogin);
     byId('biliHintManualBtn').addEventListener('click', revealBiliCredentials);
+    byId('douyinLoginBtn').addEventListener('click', startDouyinLogin);
     byId('biliHintDismissBtn').addEventListener('click', dismissBiliHint);
     initBiliLogin();
     byId('includeScreenshots').addEventListener('change', toggleScreenshotSettings);
@@ -174,6 +175,7 @@ function bindEvents() {
     window.addEventListener('beforeunload', () => {
         stopPolling();
         stopElapsedTimer();
+        stopDouyinLoginPolling();
     });
 }
 
@@ -521,6 +523,8 @@ function toggleSourceType() {
 
 let biliHintDebounce = null;
 let biliPromptDismissed = false;
+let douyinLoginTimer = null;
+let douyinCookies = null;
 
 function isBilibiliUrl(value) {
     return /bilibili\.com|b23\.tv|BV[0-9A-Za-z]{10}/.test(value);
@@ -544,15 +548,26 @@ function updateBiliHint(forceShow = false) {
     const isBili = notLocal && isBilibiliUrl(value);
     const isDouyin = notLocal && isDouyinUrl(value);
     const hint = byId('biliHint');
+    const actions = byId('biliHintActions');
+    const biliScanButton = byId('biliHintScanBtn');
+    const biliManualButton = byId('biliHintManualBtn');
+    const douyinButton = byId('douyinLoginBtn');
     if (forceShow || (isBili && !hasBiliCredentials() && !biliPromptDismissed)) {
         byId('biliHintTitle').textContent = '检测到 B 站链接';
         byId('biliHintDesc').textContent = '填写访问凭据可优先使用 AI 字幕，无需等待本地转写。';
-        byId('biliHintActions').hidden = false;
+        actions.hidden = false;
+        biliScanButton.hidden = false;
+        biliManualButton.hidden = false;
+        douyinButton.hidden = true;
+        byId('douyinLoginStatus').textContent = '';
         hint.hidden = false;
     } else if (forceShow || (isDouyin && !biliPromptDismissed)) {
-        byId('biliHintTitle').textContent = '抖音链接暂不支持直接解析';
-        byId('biliHintDesc').textContent = '请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。';
-        byId('biliHintActions').hidden = true;
+        byId('biliHintTitle').textContent = '检测到抖音链接';
+        byId('biliHintDesc').textContent = '先尝试直接解析；如果需要验证，可在本机浏览器完成后重试。';
+        actions.hidden = false;
+        biliScanButton.hidden = true;
+        biliManualButton.hidden = true;
+        douyinButton.hidden = false;
         hint.hidden = false;
     } else {
         hint.hidden = true;
@@ -653,6 +668,54 @@ async function cancelBiliLogin() {
     }
 }
 
+async function startDouyinLogin() {
+    if (douyinLoginTimer) return;
+    const button = byId('douyinLoginBtn');
+    const status = byId('douyinLoginStatus');
+    button.disabled = true;
+    status.textContent = '正在打开抖音浏览器…';
+    try {
+        const response = await fetch(`${API_BASE}/douyin-login/start`, { method: 'POST' });
+        const data = await readResponse(response, '启动抖音浏览器失败');
+        if (!data.ok) {
+            status.textContent = data.error || data.message || '启动失败';
+            button.disabled = false;
+            return;
+        }
+        status.textContent = data.message || '请在弹出的浏览器中完成登录或验证';
+        douyinLoginTimer = window.setInterval(pollDouyinLogin, 2000);
+        pollDouyinLogin();
+    } catch (error) {
+        status.textContent = `启动失败：${error.message}`;
+        button.disabled = false;
+    }
+}
+
+async function pollDouyinLogin() {
+    try {
+        const response = await fetch(`${API_BASE}/douyin-login/status`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取抖音浏览器状态失败');
+        byId('douyinLoginStatus').textContent = data.message || '';
+        if (data.state === 'ready' && data.cookies) {
+            douyinCookies = data.cookies;
+            stopDouyinLoginPolling();
+            showToast('抖音浏览器验证完成，下一次提交会携带本机登录态', 'success');
+        } else if (['failed', 'timeout'].includes(data.state)) {
+            stopDouyinLoginPolling();
+        }
+    } catch {
+        byId('douyinLoginStatus').textContent = '状态读取失败，正在重试…';
+    }
+}
+
+function stopDouyinLoginPolling() {
+    if (douyinLoginTimer !== null) {
+        window.clearInterval(douyinLoginTimer);
+        douyinLoginTimer = null;
+    }
+    byId('douyinLoginBtn').disabled = false;
+}
+
 function updateFileInfo() {
     if (byId('sourceType').value !== 'local') {
         byId('fileInfo').textContent = '支持常见视频链接；平台字幕可用时优先读取';
@@ -735,12 +798,6 @@ async function startSummary(options = {}) {
     const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
-
-    // 抖音链接暂不支持直接解析：提示改用本地文件
-    if (request.sourceType !== 'local' && isDouyinUrl(request.videoUrl)) {
-        showToast('抖音暂不支持直接解析，请下载视频后使用本地文件上传', 'error');
-        return;
-    }
 
     // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）
     if (!resumeTaskId) {
@@ -840,7 +897,7 @@ function validateAndBuildRequestBase(resumeTaskId = null) {
     return { sourceType, file: null, videoUrl, modelConfig };
 }
 
-// 宽松识别：完整 http(s) 链接原样返回；否则从分享文本提取 B 站链接（可缺省 scheme），
+// 宽松识别：完整 http(s) 链接原样返回；否则从分享文本提取 B 站/抖音链接（可缺省 scheme），
 // 或裸 BV/av 号补全为视频页 URL；无法识别返回 null。与后端 normalize_video_input 同语义。
 function normalizeVideoInput(raw) {
     const value = (raw || '').trim();
@@ -849,9 +906,9 @@ function normalizeVideoInput(raw) {
         const parsed = new URL(value);
         if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return value;
     } catch { /* 非完整链接，走下方提取 */ }
-    const link = value.match(/(?:https?:\/\/)?(?:www\.|m\.)?(?:bilibili\.com|b23\.tv)\/\S+/i);
+    const link = value.match(/(?:https?:\/\/)?(?:www\.|m\.|v\.)?(?:bilibili\.com|b23\.tv|douyin\.com|iesdouyin\.com)\/\S+/i);
     if (link) {
-        const cleaned = link[0].replace(/[.,;:!?。，；：！？、）】」』”]+$/, '');
+        const cleaned = link[0].replace(/[.,;:!?。，；：！？、）】」』”/]+$/, '');
         return cleaned.startsWith('http') ? cleaned : `https://${cleaned}`;
     }
     const bv = value.match(/BV[0-9A-Za-z]{10}/);
@@ -895,6 +952,9 @@ function buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId = null, force
             bili_jct: byId('biliJct').value.trim(),
             buvid3: byId('buvid3').value.trim()
         };
+    }
+    if (douyinCookies) {
+        config.douyin_cookie = douyinCookies;
     }
     if (uploadTaskId) config.upload_task_id = uploadTaskId;
     if (resumeTaskId && !forceRestart) config.resume_task_id = resumeTaskId;

@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, SecretStr
 from .config_store import ConfigStore
 from .llm_summarizer import LLMSummarizer
 from .bili_login import BiliLoginManager
+from .douyin_login import DouyinLoginManager
 from .transcript import (
     TranscriptSegment,
     format_timestamp,
@@ -72,13 +73,12 @@ ALLOWED_MEDIA_SUFFIXES = {
     ".avi",
 }
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo"}
-DOUYIN_HOSTS = ("v.douyin.com", "douyin.com", "iesdouyin.com")
 DOUYIN_HINT = (
-    "抖音链接暂不支持直接解析（平台签名反爬限制）。"
-    "请在抖音 App 或网页保存视频后，改用「本地文件」上传处理。"
+    "抖音链接解析失败。可以先点击“打开抖音浏览器”，在本机窗口完成登录/验证后重试；"
+    "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.3")
+app = FastAPI(title="VideoToNo API", version="1.1.4")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -116,6 +116,7 @@ async def enforce_local_security(request: Request, call_next):
 video_processor = VideoProcessor(WORKSPACE_DIR)
 transcriber = WhisperTranscriber(WHISPER_CACHE_DIR)
 bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
+douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
@@ -126,6 +127,12 @@ class BilibiliCookie(BaseModel):
     sessdata: str = ""
     bili_jct: str = ""
     buvid3: str = ""
+
+
+class DouyinCookie(BaseModel):
+    """浏览器验证后短暂回传的抖音会话字段；不写入任务清单。"""
+
+    model_config = {"extra": "allow"}
 
 
 class LLMConfigPayload(BaseModel):
@@ -172,6 +179,7 @@ class SummarizeRequest(BaseModel):
     whisper_model: str = "base"
     use_gpu: bool = False
     bilibili_cookie: BilibiliCookie | None = None
+    douyin_cookie: DouyinCookie | None = None
     llm_config: LLMConfig
 
 
@@ -372,6 +380,10 @@ def load_reused_video_info(
         "source": source,
         "duration": duration,
         "owner": str(manifest.get("owner") or ""),
+        "upload_date": str(manifest.get("upload_date") or ""),
+        "timestamp": manifest.get("timestamp") or 0,
+        "view_count": manifest.get("view_count") or 0,
+        "like_count": manifest.get("like_count") or 0,
         "description": "",
     }
 
@@ -387,6 +399,10 @@ def update_task_manifest(task_id: str, info: dict[str, Any]) -> None:
         owner=info.get("owner"),
         duration=info.get("duration"),
         source=info.get("source"),
+        upload_date=info.get("upload_date"),
+        timestamp=info.get("timestamp"),
+        view_count=info.get("view_count"),
+        like_count=info.get("like_count"),
     )
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -443,12 +459,9 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
         if not normalized:
             raise HTTPException(
                 status_code=422,
-                detail="无法识别视频链接：支持 http(s) 链接，或包含 B 站链接 / BV 号的文本",
+                detail="无法识别视频链接：支持 http(s) 链接，或包含 B 站/抖音链接的分享文本",
             )
         request.video_url = normalized
-    if request.video_url and urlsplit(request.video_url).netloc.endswith(DOUYIN_HOSTS):
-        raise HTTPException(status_code=422, detail=DOUYIN_HINT)
-
     reused_task_id = request.resume_task_id
     if request.processing_mode == "restart":
         reused_task_id = None
@@ -690,6 +703,22 @@ async def bili_login_cancel() -> dict[str, Any]:
     return await bili_login_manager.cancel()
 
 
+@app.post("/api/douyin-login/start")
+async def douyin_login_start() -> dict[str, Any]:
+    """打开独立的本机浏览器 profile，用户可手动完成抖音登录/验证。"""
+    return await douyin_login_manager.start()
+
+
+@app.get("/api/douyin-login/status")
+async def douyin_login_status() -> dict[str, Any]:
+    return await douyin_login_manager.status()
+
+
+@app.post("/api/douyin-login/cancel")
+async def douyin_login_cancel() -> dict[str, Any]:
+    return await douyin_login_manager.cancel()
+
+
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)) -> dict[str, str]:
     filename = Path(file.filename or "upload.bin").name
@@ -820,11 +849,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     task = tasks[task_id]
     task["status"] = "processing"
     persist_task_runtime(task_id)
-    cookie = (
+    bili_cookie = (
         request.bilibili_cookie.model_dump()
         if request.bilibili_cookie
         else config_store.load_bili_credentials()
     )
+    douyin_cookie = request.douyin_cookie.model_dump() if request.douyin_cookie else None
 
     try:
         raise_if_cancel_requested(task)
@@ -838,6 +868,10 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             )
             uploaded_path = str(uploaded_media) if uploaded_media else None
         is_local = bool(uploaded_path) or not source_url
+        source_kind = (
+            video_processor.detect_source(source_url) if source_url else VideoSource.LOCAL
+        )
+        cookie = douyin_cookie if source_kind == VideoSource.DOUYIN else bili_cookie
         transcript_result = load_transcript_result(resume_dir) if resume_dir else None
 
         if transcript_result:
@@ -1018,7 +1052,10 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             segments,
             {
                 "owner": info.get("owner"),
+                "published_at": format_publish_time(info),
                 "duration_text": format_duration(info.get("duration", 0)),
+                "view_count": info.get("view_count") or 0,
+                "like_count": info.get("like_count") or 0,
                 "transcript_source": transcript_result["source"],
             },
             style=request.summary_style,
@@ -1029,13 +1066,19 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         for warning in getattr(summarizer, "warnings", []):
             if warning not in task["logs"]:
                 task["logs"].append(warning)
+        summary = add_note_header_metadata(summary, title, info)
         if screenshots:
             summary += "\n\n## 视频截图\n\n" + "\n\n".join(
                 f"![截图 {index}](./images/{path.name})"
                 for index, path in enumerate(screenshots, start=1)
             )
-        if source_url:
-            summary += f"\n\n---\n来源：{source_url}\n"
+        summary = append_note_footer(
+            summary,
+            source_url,
+            config.model_type,
+            model,
+            request.summary_style,
+        )
 
         task_dir = WORKSPACE_DIR / task_id
         (task_dir / "notes.md").write_text(summary, encoding="utf-8")
@@ -1096,7 +1139,18 @@ async def write_transcript_files(
 
 def friendly_task_error(message: str) -> str:
     """把已知的平台限制错误转成对用户友好的提示。"""
-    if "Douyin" in message or "douyin" in message or "Fresh cookies" in message:
+    lowered = message.lower()
+    if "certificate_verify_failed" in lowered or "certificate verify failed" in lowered:
+        return (
+            "Whisper 模型下载时 TLS 证书校验失败。程序已尝试备用下载源；"
+            "如果仍失败，请检查系统时间、网络代理或企业根证书，"
+            "并通过 HF_ENDPOINT 指定能正常验证证书的镜像后重试。"
+        )
+    if "fresh cookies" in lowered or "challenge" in lowered or "验证码" in message:
+        return "抖音要求浏览器验证。点击输入区下方的“打开抖音浏览器”，完成登录/验证后重新提交。"
+    if "403" in lowered or "forbidden" in lowered:
+        return "抖音媒体地址已过期或被拒绝，请重新提交链接；如果仍失败，先用本机抖音浏览器完成验证。"
+    if "douyin" in lowered or "iesdouyin" in lowered or "抖音" in message:
         return DOUYIN_HINT
     return message
 
@@ -1105,6 +1159,87 @@ def format_duration(seconds: float) -> str:
     if not seconds:
         return "未知"
     return format_timestamp(float(seconds))
+
+
+def format_publish_time(info: dict[str, Any]) -> str:
+    """优先使用 yt-dlp 的发布日期；没有日期时再使用 Unix 时间戳。"""
+    raw_date = str(info.get("upload_date") or info.get("release_date") or "").strip()
+    if len(raw_date) == 8 and raw_date.isdigit():
+        return f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+    raw_timestamp = info.get("timestamp") or info.get("release_timestamp")
+    try:
+        timestamp = float(raw_timestamp)
+    except (TypeError, ValueError):
+        return ""
+    if timestamp <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def add_note_header_metadata(summary: str, title: str, info: dict[str, Any]) -> str:
+    """在模型标题下放置可验证的视频元信息，不让模型负责记住固定排版。"""
+    value = summary.strip()
+    lines = value.splitlines()
+    if lines and lines[0].lstrip().startswith("#"):
+        heading = lines[0].strip()
+        body = "\n".join(lines[1:]).lstrip()
+    else:
+        heading = f"# 视频笔记：《{title}》"
+        body = value
+
+    metadata: list[str] = []
+    owner = str(info.get("owner") or "").strip()
+    published_at = format_publish_time(info)
+    duration = format_duration(info.get("duration", 0))
+    view_count = int(info.get("view_count") or 0)
+    like_count = int(info.get("like_count") or 0)
+    if owner:
+        metadata.append(f"UP主：{owner}")
+    if published_at:
+        metadata.append(f"发布时间：{published_at}")
+    if duration != "未知":
+        metadata.append(f"时长：{duration}")
+    if view_count > 0:
+        metadata.append(f"播放：{view_count:,}")
+    if like_count > 0:
+        metadata.append(f"点赞：{like_count:,}")
+    if not metadata:
+        return value or heading
+    metadata_block = "> " + " · ".join(metadata)
+    return f"{heading}\n\n{metadata_block}" + (f"\n\n{body}" if body else "")
+
+
+def summary_style_label(style: str) -> str:
+    return {
+        "detailed": "详细笔记 + 点评分析",
+        "faithful": "详细复原（仅视频内容）",
+        "concise": "精简摘要",
+    }.get(style, style)
+
+
+def append_note_footer(
+    summary: str,
+    source_url: str | None,
+    model_type: str,
+    model: str | None,
+    style: str,
+) -> str:
+    """确定性追加来源与生成配置，避免不同风格遗漏关键追溯信息。"""
+    source = source_url.strip() if source_url else ""
+    source_line = source or "本地文件（未提供视频链接）"
+    model_line = model.strip() if model else "未指定模型"
+    footer = "\n".join(
+        [
+            "---",
+            f"来源：{source_line}",
+            f"生成模型：{model_type} · {model_line}",
+            f"笔记风格：{summary_style_label(style)}",
+        ]
+    )
+    return f"{summary.rstrip()}\n\n{footer}\n"
 
 
 def _safe_filename(value: str) -> str:

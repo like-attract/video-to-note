@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.3</h1>
+<h1 align="center">VideoToNo v1.1.4</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,7 +14,12 @@
 
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-## 🆕 What's New (v1.1.2 → v1.1.3)
+## 🆕 What's New (v1.1.3 → v1.1.4)
+
+- 📝 **Richer note metadata**: notes show available author, publish date, and duration details below the title, then append the source URL, model, and note style at the end.
+- 🎛️ **Consistent style handling**: all three styles can naturally use verified video metadata without forcing a rigid template or inventing missing fields.
+- 🔄 **Tray update check**: manually check the GitHub Release page from the system tray and open it after confirmation when a newer version is available.
+- 🧠 **More faithful Whisper selection**: the selected model is actually attempted first; fallback to a cached `base` model happens only after a real load/download failure.
 
 - 🛡️ **Reliable Bilibili downloads**: fixed HTTP 412 anti-bot rejections (real browser User-Agent, Cookies moved to yt-dlp's cookiefile channel, and missing risk cookies like buvid/b_nut/b_lsid now collected), so downloads work after signing in.
 - 🩺 **One-click LLM connection test**: a new “Test connection” button in the settings panel verifies Provider / API Key / Base URL in seconds and tells you whether a failed test is a bad key or a wrong endpoint.

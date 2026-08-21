@@ -24,11 +24,12 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
 APP_NAME = f"VideoToNo v{VERSION}"
+GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/like-attract/video-to-note/releases/latest"
 
 
 def is_frozen() -> bool:
@@ -201,6 +202,68 @@ def open_in_shell(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def version_tuple(value: str) -> tuple[int, ...]:
+    """把 v1.2.3 或 1.2.3 转成可比较的版本元组。"""
+    text = str(value or "").strip().lstrip("vV")
+    parts: list[int] = []
+    for part in text.split("."):
+        digits = ""
+        for character in part:
+            if not character.isdigit():
+                break
+            digits += character
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts or [0])
+
+
+def latest_release_info() -> dict[str, str]:
+    """读取 GitHub 最新 Release；只在用户点击托盘菜单时调用。"""
+    request = urllib.request.Request(
+        GITHUB_LATEST_RELEASE_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"VideoToNo/{VERSION}",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    tag = str(payload.get("tag_name") or "").strip()
+    url = str(payload.get("html_url") or "https://github.com/like-attract/video-to-note/releases/latest")
+    if not tag:
+        raise RuntimeError("GitHub 未返回有效版本号")
+    return {"tag_name": tag, "html_url": url}
+
+
+def show_update_message(message: str, title: str = APP_NAME, flags: int = 0x40) -> int:
+    """显示更新提示；开发模式/非 Windows 下退回日志，便于测试。"""
+    if sys.platform == "win32":
+        import ctypes
+
+        return int(ctypes.windll.user32.MessageBoxW(None, message, title, flags))
+    print(f"{title}: {message}", file=sys.stderr, flush=True)
+    return 0
+
+
+def check_for_updates(_icon: Any = None, _item: Any = None) -> None:
+    """手动检查 GitHub Release，不阻塞启动，也不在启动时联网。"""
+    try:
+        release = latest_release_info()
+        if version_tuple(release["tag_name"]) <= version_tuple(VERSION):
+            show_update_message(f"当前已是最新版本（v{VERSION}）。", flags=0x40)
+            return
+        message = (
+            f"检测到新版本 {release['tag_name']}（当前 v{VERSION}）。\n\n"
+            "是否打开 GitHub Release 页面查看并更新？"
+        )
+        result = show_update_message(message, title=f"{APP_NAME} 更新", flags=0x24)
+        if result == 6:  # IDYES
+            webbrowser.open(release["html_url"])
+    except Exception as error:
+        show_update_message(f"检查更新失败：{error}\n请稍后重试。", title=f"{APP_NAME} 更新", flags=0x10)
+
+
 def tray_icon_image() -> Any:
     from PIL import Image
 
@@ -235,6 +298,7 @@ def run_tray(url: str, workspace: Path, server: Any) -> int:
     menu = pystray.Menu(
         pystray.MenuItem("打开界面", on_open, default=True),
         pystray.MenuItem("查看日志", on_logs),
+        pystray.MenuItem("检查更新", check_for_updates),
         pystray.MenuItem("退出", on_quit),
     )
     icon = pystray.Icon("videotono", tray_icon_image(), APP_NAME, menu)

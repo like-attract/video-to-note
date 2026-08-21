@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,14 @@ def test_detect_known_sources(tmp_path: Path) -> None:
         processor.detect_source("https://www.bilibili.com:443/video/BV1xx")
         == VideoSource.BILIBILI
     )
+    assert (
+        processor.detect_source("https://www.douyin.com/video/123")
+        == VideoSource.DOUYIN
+    )
+    assert (
+        processor.detect_source("https://v.douyin.com/abc/")
+        == VideoSource.DOUYIN
+    )
 
 
 def test_reject_non_http_and_do_not_misclassify_lookalike_domains(
@@ -28,6 +37,7 @@ def test_reject_non_http_and_do_not_misclassify_lookalike_domains(
         processor.detect_source("https://notbilibili.com/video/BV1xx")
         == VideoSource.OTHER
     )
+    assert processor.detect_source("https://notdouyin.com/video/123") == VideoSource.OTHER
 
 
 def test_normalize_video_input_accepts_loose_bilibili_text() -> None:
@@ -55,6 +65,81 @@ def test_normalize_video_input_accepts_loose_bilibili_text() -> None:
     assert normalize_video_input("av170001") == "https://www.bilibili.com/video/av170001"
     # 尾部标点不粘进链接
     assert normalize_video_input("看下这个：b23.tv/AbCd3Fg。") == "https://b23.tv/AbCd3Fg"
+
+
+def test_normalize_video_input_accepts_douyin_share_text() -> None:
+    assert normalize_video_input("复制打开 https://v.douyin.com/AbCd3Fg/ 看视频") == "https://v.douyin.com/AbCd3Fg"
+    assert normalize_video_input("www.douyin.com/video/123456。") == "https://www.douyin.com/video/123456"
+
+
+def test_douyin_share_page_info_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    processor = VideoProcessor(tmp_path)
+    router = {
+        "loaderData": {
+            "video_(id)/page": {
+                "videoInfoRes": {
+                    "item_list": [{
+                        "desc": "测试抖音视频",
+                        "author": {"nickname": "作者"},
+                        "video": {
+                            "duration": 12_500,
+                            "play_addr": {"url_list": ["https://v.douyinvod.com/playwm/demo.mp4"]},
+                        },
+                        "statistics": {"play_count": 42},
+                    }]
+                }
+            }
+        }
+    }
+    html = f"<script>window._ROUTER_DATA = {json.dumps(router, ensure_ascii=False)}</script>"
+
+    def fake_request(url, headers, return_url=False):
+        if "iesdouyin.com" in url:
+            return url, html
+        return "https://www.douyin.com/video/123456", ""
+
+    monkeypatch.setattr(VideoProcessor, "_request_text", staticmethod(fake_request))
+    info = processor._extract_douyin_share_info("https://v.douyin.com/abc", None)
+    assert info["source"] == "douyin"
+    assert info["title"] == "测试抖音视频"
+    assert info["duration"] == 12.5
+    assert info["owner"] == "作者"
+    assert info["_douyin_video_url"].endswith("/play/demo.mp4")
+
+
+def test_extract_info_preserves_publish_and_engagement_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+
+    class FakeYdl:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            return {
+                "title": "测试视频",
+                "extractor_key": "BiliBili",
+                "duration": 90,
+                "uploader": "作者",
+                "upload_date": "20260821",
+                "timestamp": 1_755_724_800,
+                "view_count": 123,
+                "like_count": 9,
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+    monkeypatch.setattr(processor, "_ydl", lambda *args, **kwargs: FakeYdl())
+    info = processor._extract_info("https://www.bilibili.com/video/BV1xx", None)
+    assert info["upload_date"] == "20260821"
+    assert info["timestamp"] == 1_755_724_800
+    assert info["view_count"] == 123
+    assert info["like_count"] == 9
 
 
 def test_normalize_video_input_rejects_unknown_text() -> None:

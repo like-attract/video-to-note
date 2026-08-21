@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.3"
+    assert health.json()["version"] == "1.1.4"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -47,6 +47,25 @@ def test_frontend_sanitizes_generated_markdown() -> None:
     assert "const body = renderMarkdown(markdown);" in script
     assert "const body = typeof marked" not in script
     assert "persistApiKeyIfRequested" not in script
+
+
+def test_note_metadata_and_footer_are_deterministic() -> None:
+    info = {
+        "owner": "作者",
+        "upload_date": "20260821",
+        "duration": 90,
+        "view_count": 1234,
+        "like_count": 56,
+    }
+    body = main.add_note_header_metadata("# 视频笔记：《测试》\n\n正文", "测试", info)
+    assert "> UP主：作者 · 发布时间：2026-08-21" in body
+    assert "时长：01:30" in body
+    footer = main.append_note_footer(
+        body, "https://www.bilibili.com/video/BV1xx", "deepseek", "deepseek-v4-flash", "faithful"
+    )
+    assert "来源：https://www.bilibili.com/video/BV1xx" in footer
+    assert "生成模型：deepseek · deepseek-v4-flash" in footer
+    assert "笔记风格：详细复原（仅视频内容）" in footer
 
 
 def test_recent_tasks_are_compact_and_do_not_include_markdown(monkeypatch) -> None:
@@ -92,6 +111,27 @@ def test_summarize_rejects_local_path_in_url_field() -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_summarize_accepts_douyin_url_and_does_not_front_reject(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def fake_run(task_id, request):
+        return None
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+    response = TestClient(main.app).post(
+        "/api/summarize",
+        json={
+            "video_url": "https://www.douyin.com/video/123456",
+            "llm_config": {"model_type": "deepseek", "api_key": "test-key"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["task_id"]
 
 
 def test_image_route_requires_a_known_task() -> None:

@@ -101,6 +101,12 @@ jobs:
           NOTES=$(cat <<EOF
           ## VideoToNo $GITHUB_REF_NAME
 
+          ### v1.1.4 更新
+          - 笔记标题下显示可获得的视频作者、发布时间、时长等元信息，文末追加来源链接、生成模型和笔记风格
+          - 三种笔记风格统一参考真实视频元信息，缺失字段省略，不强制固定模板
+          - 托盘新增手动检查更新：发现 GitHub 新版本后确认即可打开 Release 页面
+          - Whisper 先实际尝试用户选择的模型，下载/加载失败后才降级到已缓存的 base
+
           ### v1.1.3 更新
           - 修复 B 站下载 412 反爬拦截：改用真实浏览器 UA、Cookie 改走 yt-dlp cookiefile 通道、补齐 buvid/b_nut/b_lsid 风控 Cookie
           - 配置区新增「测试连接」按钮：一键验证 LLM 配置，失败时直接区分 API Key 错误或接口地址错误

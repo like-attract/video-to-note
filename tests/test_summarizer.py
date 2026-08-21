@@ -21,6 +21,24 @@ def test_note_prompt_forbids_invented_timestamps() -> None:
     assert "[00:10-00:20]" in prompt
 
 
+def test_note_prompt_allows_verified_metadata_without_forcing_a_template() -> None:
+    prompt = LLMSummarizer._note_prompt(
+        "测试视频",
+        "[00:10-00:20] 原文",
+        {
+            "owner": "测试作者",
+            "published_at": "2026-08-21",
+            "duration_text": "00:30",
+            "view_count": 123,
+            "like_count": 4,
+        },
+        "faithful",
+    )
+    assert "发布时间：2026-08-21" in prompt
+    assert "标题下自然带出材料中明确的作者、发布时间" in prompt
+    assert "缺失的信息省略" in prompt
+
+
 def test_chunk_prompt_contains_segment_timestamps() -> None:
     prompt = LLMSummarizer._chunk_prompt(
         "测试视频", 1, 2, [TranscriptSegment(30, 45, "关键论点")]

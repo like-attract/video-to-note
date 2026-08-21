@@ -18,6 +18,7 @@ class WhisperTranscriber:
     def __init__(self, download_root: Path | None = None) -> None:
         self._models: dict[tuple[str, str], Any] = {}
         self._actual_models: dict[tuple[str, str], str] = {}
+        self._last_download_error: Exception | None = None
         self._model_lock = threading.Lock()
         self.download_root = download_root.resolve() if download_root else None
         if self.download_root:
@@ -137,6 +138,10 @@ class WhisperTranscriber:
         if not cached_path and self.download_root:
             # 自建下载（默认 hf-mirror 镜像），避免 huggingface_hub 对镜像的兼容问题
             cached_path = self._download_model_files(model_name)
+            # 不要在自建下载失败后再让 huggingface_hub 重复请求同一个地址；
+            # 那会把真正的网络/证书错误包装成“找不到 snapshot”。
+            if not cached_path and self._last_download_error:
+                raise self._last_download_error
         model_reference = str(cached_path) if cached_path else model_name
         options: dict[str, Any] = {
             "device": device,
@@ -155,7 +160,28 @@ class WhisperTranscriber:
         等镜像不返回该头导致原生下载失败，因此这里自己实现下载：
         走 HF_ENDPOINT（默认 hf-mirror.com），支持断点续传与重试。
         """
-        endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
+        self._last_download_error = None
+        configured_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        endpoint = configured_endpoint.rstrip("/")
+        endpoints = [endpoint]
+        # 镜像证书或代理链路异常时，官方源通常仍可用。仅对默认镜像追加，
+        # 不改变用户通过 HF_ENDPOINT 指定的其他自建 endpoint。
+        if endpoint == "https://hf-mirror.com":
+            endpoints.append("https://huggingface.co")
+
+        for candidate in endpoints:
+            try:
+                snapshot = self._download_model_files_from_endpoint(model_name, candidate)
+                if snapshot:
+                    return snapshot
+            except Exception as exc:
+                self._last_download_error = exc
+        return None
+
+    def _download_model_files_from_endpoint(
+        self, model_name: str, endpoint: str
+    ) -> Path | None:
+        """从单个 Hugging Face endpoint 下载完整快照。"""
         repo = f"Systran/faster-whisper-{model_name}"
         base_url = f"{endpoint}/{repo}/resolve/main"
         headers = {"User-Agent": "VideoToNo/1.0", "Accept-Encoding": "identity"}
@@ -183,15 +209,17 @@ class WhisperTranscriber:
             if target.is_file() and target.stat().st_size > 0:
                 continue
             if not self._download_one_file(f"{base_url}/{filename}", target, headers):
+                if self._last_download_error:
+                    raise self._last_download_error
                 return None
         if not all((snapshot / name).is_file() for name in self.WHISPER_MODEL_FILES):
             return None
         return snapshot
 
-    @staticmethod
-    def _download_one_file(url: str, target: Path, headers: dict[str, str]) -> bool:
+    def _download_one_file(self, url: str, target: Path, headers: dict[str, str]) -> bool:
         """单文件下载：断点续传（Range）+ 重试三次。"""
         part = target.with_suffix(target.suffix + ".part")
+        self._last_download_error = None
         for attempt in range(3):
             try:
                 resume = part.stat().st_size if part.is_file() else 0
@@ -218,7 +246,8 @@ class WhisperTranscriber:
                     target.unlink()
                 part.rename(target)
                 return True
-            except Exception:
+            except Exception as exc:
+                self._last_download_error = exc
                 time.sleep(1.5 * (attempt + 1))
         return False
 
@@ -238,12 +267,8 @@ class WhisperTranscriber:
         self._actual_models[cache_key] = "base"
 
     def _preferred_model(self, requested_model: str) -> str:
-        if (
-            requested_model != "base"
-            and not self._cached_model_path(requested_model)
-            and self._cached_model_path("base")
-        ):
-            return "base"
+        # 让用户选择的模型先真正尝试加载/下载；只有 _ensure_model 捕获到
+        # 下载或加载异常时，才由 _load_cached_base_or_raise 降级到 base。
         return requested_model
 
     def _cached_model_path(self, model_name: str) -> Path | None:

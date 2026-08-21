@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.1.3</h1>
+<h1 align="center">VideoToNo v1.1.4</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -13,7 +13,12 @@
 
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
 
-## 🆕 What's New（v1.1.2 → v1.1.3）
+## 🆕 What's New（v1.1.3 → v1.1.4）
+
+- 📝 **笔记元信息更完整**：标题下显示可获得的视频作者、发布时间、时长等信息，文末追加来源链接、生成模型和笔记风格。
+- 🎛️ **三种风格统一处理**：详细笔记、详细复原和精简摘要都可自然参考真实视频元信息，缺失字段会省略，不强行套模板。
+- 🔄 **托盘检查更新**：可从系统托盘手动检查 GitHub Release，发现新版本后确认即可打开发布页。
+- 🧠 **Whisper 模型选择更准确**：先尝试实际下载所选模型，失败后才降级到已缓存的 `base`。
 
 - 🛡️ **B 站下载更稳**：修复 412 反爬拦截（改用真实浏览器 UA、Cookie 改走 yt-dlp cookiefile 通道、补齐 buvid/b_nut/b_lsid 风控 Cookie），登录后下载不再被拒绝。
 - 🩺 **一键测试 LLM 连接**：配置区新增「测试连接」按钮，秒级验证 Provider / API Key / Base URL 是否可用，失败时直接告知是密钥错误还是接口地址错误。
@@ -57,7 +62,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.3-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.4-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；
