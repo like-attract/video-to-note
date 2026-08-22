@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.4"
+    assert health.json()["version"] == "1.1.5"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -38,6 +38,28 @@ def test_health_and_frontend_are_served() -> None:
     app_icon = client.get("/icon.png")
     assert app_icon.status_code == 200
     assert app_icon.headers["content-type"].startswith("image/png")
+
+
+def test_html_entry_is_no_store_and_assets_no_cache() -> None:
+    """旧 HTML 与新 JS 混用会导致按钮全部失效，入口页必须禁止缓存。"""
+    client = TestClient(main.app)
+    page = client.get("/")
+    assert page.headers["cache-control"] == "no-store"
+    assert page.headers["content-security-policy"].startswith("default-src 'self'")
+    for asset in ("/style.css", "/script.js?v=20260822-1", "/theme-bootstrap.js"):
+        response = client.get(asset)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+
+
+def test_remote_clients_are_rejected() -> None:
+    """纯 ASGI 安全中间件：非回环客户端一律 403（桌面应用仅本机可访问）。"""
+    client = TestClient(main.app, client=("203.0.113.9", 4321))
+    health = client.get("/api/health")
+    assert health.status_code == 403
+    page = client.get("/")
+    assert page.status_code == 403
+    assert page.json()["detail"] == "VideoToNo 仅允许本机访问"
 
 
 def test_frontend_sanitizes_generated_markdown() -> None:

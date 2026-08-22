@@ -16,10 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+# mcp SDK 的 FastMCP Settings 模型里 lifespan 字段带泛型前向引用，
+# pydantic-settings 每次启动都会打印 IncompleteFieldDefinitionWarning。
+# 该字段由 SDK 内部直接赋值、不从环境变量读取，告警无实际影响；
+# 这里静默掉，避免普通用户把它误当成程序故障（v1.1.5）。
+warnings.filterwarnings("ignore", message=r"Field 'lifespan' has an incomplete definition.*")
 
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
 PORT_SCAN_RANGE = 20

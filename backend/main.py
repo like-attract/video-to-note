@@ -17,17 +17,24 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiofiles
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 
 class NoCacheStaticFiles(StaticFiles):
-    """前端开发期共享：静态资源每次都重新校验，避免浏览器缓存旧版本。"""
+    """前端静态资源每次都重新校验，避免浏览器缓存旧版本。
+
+    HTML 入口页更是直接 no-store：旧 HTML 与新版 script.js 混用会导致
+    页面元素对不上、按钮全部"点了没反应"，因此入口页不允许任何缓存。
+    """
 
     def file_response(self, *args: Any, **kwargs: Any) -> FileResponse:
         response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
         return response
 from pydantic import BaseModel, Field, SecretStr
 
@@ -78,7 +85,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.4")
+app = FastAPI(title="VideoToNo API", version="1.1.5")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -93,25 +100,69 @@ def is_loopback_client(host: str | None) -> bool:
     return bool(address.version == 6 and address.ipv4_mapped and address.ipv4_mapped.is_loopback)
 
 
-@app.middleware("http")
-async def enforce_local_security(request: Request, call_next):
-    """VideoToNo is a desktop app; reject remote clients even after a bad HOST override."""
-    client_host = request.client.host if request.client else None
-    if not is_loopback_client(client_host):
-        return JSONResponse(status_code=403, content={"detail": "VideoToNo 仅允许本机访问"})
-    response = await call_next(request)
-    response.headers.setdefault(
-        "Content-Security-Policy",
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; "
         "style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; "
         "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
-        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
-    )
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    return response
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+class LocalSecurityMiddleware:
+    """纯 ASGI 中间件：只允许本机回环客户端访问，并为响应附加安全头。
+
+    不用 Starlette 的 BaseHTTPMiddleware（@app.middleware("http")）：
+    它对流式响应（如 /mcp/sse 的 SSE 长连接）会在转发响应体时遇到第二次
+    http.response.start 而触发 AssertionError，导致 MCP 会话请求直接崩溃；
+    这里直接包装 ASGI 应用，流式响应可以原样透传。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        client_host = client[0] if isinstance(client, (tuple, list)) and client else None
+        if not is_loopback_client(client_host):
+            body = json.dumps(
+                {"detail": "VideoToNo 仅允许本机访问"}, ensure_ascii=False
+            ).encode("utf-8")
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [
+                        (b"content-type", b"application/json; charset=utf-8"),
+                        (b"content-length", str(len(body)).encode("latin-1")),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        async def wrapped_send(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = message.get("headers", [])
+                existing = {key.lower() for key, _value in headers}
+                for key, value in SECURITY_HEADERS.items():
+                    if key.lower() not in existing:
+                        headers.append((key.encode("latin-1"), value.encode("latin-1")))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, wrapped_send)
+
+
+app.add_middleware(LocalSecurityMiddleware)
 
 video_processor = VideoProcessor(WORKSPACE_DIR)
 transcriber = WhisperTranscriber(WHISPER_CACHE_DIR)

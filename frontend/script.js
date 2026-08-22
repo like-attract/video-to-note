@@ -114,13 +114,25 @@ let elapsedBaseSeconds = 0;
 let elapsedSyncedAt = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
-    removeLegacySecrets();
-    loadPreferences();
-    bindEvents();
-    toggleSourceType();
+    window.__videoToNoReady = false;
+    // 每一步单独容错：即使浏览器里残留旧版缓存的 HTML（元素缺失），
+    // 也只影响对应功能，不会让整页按钮全部失效。
+    safeStep(removeLegacySecrets, '清理旧数据');
+    safeStep(loadPreferences, '读取偏好设置');
+    safeStep(bindEvents, '绑定页面事件');
+    safeStep(toggleSourceType, '初始化来源切换');
     loadAppVersion();
     loadRecentTasks(true);
+    window.__videoToNoReady = true;
 });
+
+function safeStep(action, label) {
+    try {
+        action();
+    } catch (error) {
+        console.error(`[VideoToNo] ${label} 初始化失败：`, error);
+    }
+}
 
 async function loadAppVersion() {
     try {
@@ -133,50 +145,65 @@ async function loadAppVersion() {
 }
 
 function bindEvents() {
-    byId('saveConfigBtn').addEventListener('click', savePreferences);
-    byId('resetConfigBtn').addEventListener('click', resetPreferences);
-    byId('submitBtn').addEventListener('click', () => startSummary());
-    byId('retryBtn').addEventListener('click', () => startSummary({ resumeCurrent: true }));
-    byId('restartBtn').addEventListener('click', () => startSummary({ forceRestart: true }));
-    byId('regenerateBtn').addEventListener('click', () => startSummary({ resumeCurrent: true }));
-    byId('cancelTaskBtn').addEventListener('click', cancelCurrentTask);
-    byId('downloadMdBtn').addEventListener('click', downloadSummary);
-    byId('copyNoteBtn').addEventListener('click', copyFullNote);
-    byId('formatSelect').addEventListener('change', toggleImageLayout);
-    byId('refreshRecentTasksBtn').addEventListener('click', () => loadRecentTasks());
-    byId('recentTaskList').addEventListener('click', (event) => {
-        const deleteButton = event.target.closest('[data-delete-task-id]');
-        if (deleteButton) {
-            deleteFailedTask(deleteButton.dataset.deleteTaskId);
-            return;
-        }
-        const button = event.target.closest('[data-task-id]');
-        if (button) openRecentTask(button.dataset.taskId);
-    });
-    byId('llmProvider').addEventListener('change', handleProviderChange);
-    byId('llmModel').addEventListener('change', toggleCustomConfig);
-    byId('llmTestBtn').addEventListener('click', testLlmConnection);
-    byId('sourceType').addEventListener('change', toggleSourceType);
-    byId('videoUrl').addEventListener('input', () => {
-        window.clearTimeout(biliHintDebounce);
-        biliHintDebounce = window.setTimeout(() => updateBiliHint(), 300);
-    });
-    byId('biliHintScanBtn').addEventListener('click', startBiliLogin);
-    byId('biliHintManualBtn').addEventListener('click', revealBiliCredentials);
-    byId('douyinLoginBtn').addEventListener('click', startDouyinLogin);
-    byId('biliHintDismissBtn').addEventListener('click', dismissBiliHint);
+    bindListener('saveConfigBtn', 'click', savePreferences);
+    bindListener('resetConfigBtn', 'click', resetPreferences);
+    bindListener('submitBtn', 'click', () => startSummary());
+    bindListener('retryBtn', 'click', () => startSummary({ resumeCurrent: true }));
+    bindListener('restartBtn', 'click', () => startSummary({ forceRestart: true }));
+    bindListener('regenerateBtn', 'click', () => startSummary({ resumeCurrent: true }));
+    bindListener('cancelTaskBtn', 'click', cancelCurrentTask);
+    bindListener('downloadMdBtn', 'click', downloadSummary);
+    bindListener('copyNoteBtn', 'click', copyFullNote);
+    bindListener('formatSelect', 'change', toggleImageLayout);
+    bindListener('refreshRecentTasksBtn', 'click', () => loadRecentTasks());
+    const recentTaskList = byId('recentTaskList');
+    if (recentTaskList) {
+        recentTaskList.addEventListener('click', (event) => {
+            const deleteButton = event.target.closest('[data-delete-task-id]');
+            if (deleteButton) {
+                deleteFailedTask(deleteButton.dataset.deleteTaskId);
+                return;
+            }
+            const button = event.target.closest('[data-task-id]');
+            if (button) openRecentTask(button.dataset.taskId);
+        });
+    }
+    bindListener('llmProvider', 'change', handleProviderChange);
+    bindListener('llmModel', 'change', toggleCustomConfig);
+    bindListener('llmTestBtn', 'click', testLlmConnection);
+    bindListener('sourceType', 'change', toggleSourceType);
+    const videoUrl = byId('videoUrl');
+    if (videoUrl) {
+        videoUrl.addEventListener('input', () => {
+            window.clearTimeout(biliHintDebounce);
+            biliHintDebounce = window.setTimeout(() => updateBiliHint(), 300);
+        });
+        videoUrl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' && !event.isComposing) startSummary();
+        });
+    }
+    bindListener('biliHintScanBtn', 'click', startBiliLogin);
+    bindListener('biliHintManualBtn', 'click', revealBiliCredentials);
+    bindListener('douyinLoginBtn', 'click', startDouyinLogin);
+    bindListener('biliHintDismissBtn', 'click', dismissBiliHint);
     initBiliLogin();
-    byId('includeScreenshots').addEventListener('change', toggleScreenshotSettings);
-    byId('localFile').addEventListener('change', updateFileInfo);
-    byId('videoUrl').addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && !event.isComposing) startSummary();
-    });
+    bindListener('includeScreenshots', 'change', toggleScreenshotSettings);
+    bindListener('localFile', 'change', updateFileInfo);
     initThemeControl();
     window.addEventListener('beforeunload', () => {
         stopPolling();
         stopElapsedTimer();
         stopDouyinLoginPolling();
     });
+}
+
+function bindListener(id, event, handler) {
+    const element = byId(id);
+    if (element) {
+        element.addEventListener(event, handler);
+    } else {
+        console.warn(`[VideoToNo] 页面缺少元素 #${id}，已跳过对应事件绑定`);
+    }
 }
 
 function byId(id) {
@@ -551,15 +578,18 @@ function updateBiliHint(forceShow = false) {
     const actions = byId('biliHintActions');
     const biliScanButton = byId('biliHintScanBtn');
     const biliManualButton = byId('biliHintManualBtn');
+    // 兼容旧版缓存的 HTML：提示条元素缺失时静默跳过，不影响其他功能
+    if (!hint || !actions || !biliScanButton || !biliManualButton) return;
     const douyinButton = byId('douyinLoginBtn');
+    const douyinStatus = byId('douyinLoginStatus');
+    if (douyinButton) douyinButton.hidden = true;
+    if (douyinStatus) douyinStatus.textContent = '';
     if (forceShow || (isBili && !hasBiliCredentials() && !biliPromptDismissed)) {
         byId('biliHintTitle').textContent = '检测到 B 站链接';
         byId('biliHintDesc').textContent = '填写访问凭据可优先使用 AI 字幕，无需等待本地转写。';
         actions.hidden = false;
         biliScanButton.hidden = false;
         biliManualButton.hidden = false;
-        douyinButton.hidden = true;
-        byId('douyinLoginStatus').textContent = '';
         hint.hidden = false;
     } else if (forceShow || (isDouyin && !biliPromptDismissed)) {
         byId('biliHintTitle').textContent = '检测到抖音链接';
@@ -567,7 +597,7 @@ function updateBiliHint(forceShow = false) {
         actions.hidden = false;
         biliScanButton.hidden = true;
         biliManualButton.hidden = true;
-        douyinButton.hidden = false;
+        if (douyinButton) douyinButton.hidden = false;
         hint.hidden = false;
     } else {
         hint.hidden = true;
@@ -590,8 +620,8 @@ function dismissBiliHint() {
 let biliLoginTimer = null;
 
 function initBiliLogin() {
-    byId('biliLoginBtn').addEventListener('click', startBiliLogin);
-    byId('biliLoginCancelBtn').addEventListener('click', cancelBiliLogin);
+    bindListener('biliLoginBtn', 'click', startBiliLogin);
+    bindListener('biliLoginCancelBtn', 'click', cancelBiliLogin);
 }
 
 async function startBiliLogin() {

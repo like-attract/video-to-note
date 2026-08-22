@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.1.4</h1>
+<h1 align="center">VideoToNo v1.1.5</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -12,6 +12,14 @@
 <p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ 下载 Windows 便携版</strong></a></p>
 
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
+
+## 🆕 What's New（v1.1.4 → v1.1.5）
+
+纯修复版本：
+
+- 修复旧缓存页面导致网页按钮无响应（入口页禁用缓存、脚本初始化容错、加载失败显示提示条）
+- 修复 MCP SSE 长连接请求崩溃
+- 静默启动时 mcp SDK 的 lifespan 告警噪音
 
 ## 🆕 What's New（v1.1.3 → v1.1.4）
 
@@ -62,7 +70,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.4-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.5-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；
