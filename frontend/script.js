@@ -571,7 +571,7 @@ function hasBiliCredentials() {
 
 // ---- Whisper 未缓存确认的降噪逻辑 ----
 // 1) 明显走平台字幕、用不到 Whisper 的提交不弹；
-// 2) 同一页面会话内已确认过的模型不再重复弹（下拉框仍保留“未缓存”提示）。
+// 2) 已确认过一次下载的模型长期不再弹（localStorage 记忆；下拉框仍保留“未缓存”提示）。
 function taskWillLikelyUseSubtitles(request) {
     if (!request || request.sourceType === 'local') return false;
     if (isBilibiliUrl(request.videoUrl) && hasBiliCredentials()) return true;
@@ -579,17 +579,17 @@ function taskWillLikelyUseSubtitles(request) {
     return false;
 }
 
-function whisperConfirmedThisSession(modelId) {
+function whisperDownloadConfirmed(modelId) {
     try {
-        return sessionStorage.getItem(`whisper_confirm_${modelId}`) === '1';
+        return localStorage.getItem(`whisper_confirm_${modelId}`) === '1';
     } catch (_error) {
         return false;
     }
 }
 
-function rememberWhisperConfirm(modelId) {
+function rememberWhisperDownloadConfirm(modelId) {
     try {
-        sessionStorage.setItem(`whisper_confirm_${modelId}`, '1');
+        localStorage.setItem(`whisper_confirm_${modelId}`, '1');
     } catch (_error) {
         // 隐私模式等无法写入存储时，只影响本次会话的重复提醒
     }
@@ -857,7 +857,9 @@ async function startSummary(options = {}) {
 
     // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）。
     // 以下情况跳过确认：复用转录/续跑（不用 Whisper）、明显走平台字幕的提交
-    // （B 站已填凭据、抖音已验证）、同一会话内已确认过的模型。
+    // （B 站已填凭据、抖音已验证）、已在任意会话确认过该模型下载的用户
+    // （localStorage 长期记忆——前端无法预知本次是否真的会用到 Whisper，
+    // 弹窗只负责首次告知下载体积，此后交任务内下载/失败提示）。
     if (!resumeTaskId && forceRestart && !taskWillLikelyUseSubtitles(request)) {
         const whisperOption = byId('whisperModel').selectedOptions[0];
         const status = whisperOption ? whisperOption.dataset.status : 'missing';
@@ -867,7 +869,7 @@ async function startSummary(options = {}) {
             && status
             && status !== 'cached'
             && modelId
-            && !whisperConfirmedThisSession(modelId)
+            && !whisperDownloadConfirmed(modelId)
         ) {
             const modelLabel = (whisperOption.dataset.baseLabel || whisperOption.textContent).split('（')[0];
             const size = WHISPER_MODEL_SIZES[modelId] || '';
@@ -878,7 +880,7 @@ async function startSummary(options = {}) {
                 showToast('已取消，任务未提交', 'info');
                 return;
             }
-            rememberWhisperConfirm(modelId);
+            rememberWhisperDownloadConfirm(modelId);
         }
     }
 

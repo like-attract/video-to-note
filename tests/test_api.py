@@ -76,9 +76,9 @@ def test_frontend_whisper_confirm_dedup_logic() -> None:
     script = (main.FRONTEND_DIR / "script.js").read_text(encoding="utf-8")
     assert "taskWillLikelyUseSubtitles" in script
     assert "whisper_confirm_" in script
-    assert "sessionStorage" in script
-    assert "!whisperConfirmedThisSession(modelId)" in script
-    assert "rememberWhisperConfirm(modelId)" in script
+    assert "localStorage" in script
+    assert "!whisperDownloadConfirmed(modelId)" in script
+    assert "rememberWhisperDownloadConfirm(modelId)" in script
     assert "refreshWhisperModelHints();" in script
 
 
