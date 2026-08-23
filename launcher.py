@@ -24,7 +24,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.1.7"
+VERSION = "1.1.8"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
@@ -69,9 +69,16 @@ def configure_runtime_dirs() -> None:
 RUN_MODE = "portable" if is_frozen() else "dev"
 
 
-def server_alive(url: str, mode: str | None = None) -> bool:
-    """健康检查。mode 给定时仅当运行实例模式匹配才算“本程序已在运行”：
-    dev 服务与打包版互不复用，避免 dev 占用端口导致打包版不驻留托盘。"""
+def server_alive(
+    url: str,
+    mode: str | None = None,
+    version: str | None = None,
+) -> bool:
+    """健康检查；可同时隔离运行模式和应用版本。
+
+    新旧便携版不能只按 ``portable`` 复用，否则旧版服务会继续提供旧前端，
+    造成页面脚本、HTML 和后端版本混用。
+    """
     try:
         with urllib.request.urlopen(f"{url}/api/health", timeout=1.5) as response:
             if response.status != 200:
@@ -79,7 +86,9 @@ def server_alive(url: str, mode: str | None = None) -> bool:
             payload = json.loads(response.read().decode("utf-8"))
             if not (payload.get("status") == "ok" and payload.get("service") == "VideoToNo"):
                 return False
-            return mode is None or payload.get("mode") == mode
+            if mode is not None and payload.get("mode") != mode:
+                return False
+            return version is None or payload.get("version") == version
     except Exception:
         return False
 
@@ -97,7 +106,7 @@ def port_free(port: int) -> bool:
 def find_available_port() -> int:
     for port in range(DEFAULT_PORT, DEFAULT_PORT + PORT_SCAN_RANGE):
         url = f"http://127.0.0.1:{port}"
-        if server_alive(url, mode=RUN_MODE):
+        if server_alive(url, mode=RUN_MODE, version=VERSION):
             return port  # 同模式实例已在运行，直接复用
         if port_free(port):
             return port
@@ -129,10 +138,15 @@ def start_server(port: int) -> tuple[Any, threading.Thread]:
     return server, thread
 
 
-def wait_healthy(url: str, timeout: float = START_TIMEOUT_SECONDS) -> bool:
+def wait_healthy(
+    url: str,
+    timeout: float = START_TIMEOUT_SECONDS,
+    mode: str | None = None,
+    version: str | None = None,
+) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if server_alive(url):
+        if server_alive(url, mode=mode, version=version):
             return True
         time.sleep(0.2)
     return False
@@ -157,7 +171,7 @@ def run_console(url: str, workspace: Path, port: int) -> int:
     print("  正在启动服务，请稍候…", flush=True)
     try:
         server, _ = start_server(port)
-        if not wait_healthy(url):
+        if not wait_healthy(url, mode=RUN_MODE, version=VERSION):
             print(f"警告: {START_TIMEOUT_SECONDS} 秒内未就绪，请手动打开 {url}", flush=True)
         else:
             webbrowser.open(url)
@@ -326,7 +340,7 @@ def main() -> int:
 
     url = f"http://127.0.0.1:{port}"
 
-    if server_alive(url, mode=RUN_MODE):
+    if server_alive(url, mode=RUN_MODE, version=VERSION):
         # 同模式服务已在运行，直接打开界面
         if not no_browser:
             webbrowser.open(url)
@@ -339,7 +353,7 @@ def main() -> int:
     log_path = setup_file_logging(workspace)
     try:
         server, _ = start_server(port)
-        if not wait_healthy(url):
+        if not wait_healthy(url, mode=RUN_MODE, version=VERSION):
             server.should_exit = True
             show_error(f"服务启动超时，请查看日志：{log_path}")
             return 1

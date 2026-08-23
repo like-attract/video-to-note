@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.7"
+    assert health.json()["version"] == "1.1.8"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -46,7 +46,7 @@ def test_html_entry_is_no_store_and_assets_no_cache() -> None:
     page = client.get("/")
     assert page.headers["cache-control"] == "no-store"
     assert page.headers["content-security-policy"].startswith("default-src 'self'")
-    for asset in ("/style.css", "/script.js?v=20260822-1", "/theme-bootstrap.js"):
+    for asset in ("/style.css", "/script.js?v=20260824-1", "/theme-bootstrap.js"):
         response = client.get(asset)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-cache"
@@ -99,6 +99,27 @@ def test_note_metadata_and_footer_are_deterministic() -> None:
     assert "来源：https://www.bilibili.com/video/BV1xx" in footer
     assert "生成模型：deepseek · deepseek-v4-flash" in footer
     assert "笔记风格：详细复原（仅视频内容）" in footer
+
+
+def test_note_metadata_removes_model_duplicate_block() -> None:
+    info = {
+        "owner": "作者",
+        "upload_date": "20260821",
+        "duration": 90,
+        "like_count": 11780,
+    }
+    summary = (
+        "# 视频笔记：《测试》\n\n"
+        "作者：作者｜发布时间：2026-08-21｜时长：01:30｜文字来源：faster_whisper\n\n"
+        "正文内容"
+    )
+
+    body = main.add_note_header_metadata(summary, "测试", info)
+
+    assert body.count("发布时间：2026-08-21") == 1
+    assert body.count("时长：01:30") == 1
+    assert "文字来源：faster_whisper" not in body
+    assert body.endswith("正文内容")
 
 
 def test_recent_tasks_are_compact_and_do_not_include_markdown(monkeypatch) -> None:

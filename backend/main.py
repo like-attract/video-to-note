@@ -85,7 +85,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.7")
+app = FastAPI(title="VideoToNo API", version="1.1.8")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -1241,6 +1241,8 @@ def add_note_header_metadata(summary: str, title: str, info: dict[str, Any]) -> 
         heading = f"# 视频笔记：《{title}》"
         body = value
 
+    body = strip_model_metadata_block(body)
+
     metadata: list[str] = []
     owner = str(info.get("owner") or "").strip()
     published_at = format_publish_time(info)
@@ -1261,6 +1263,34 @@ def add_note_header_metadata(summary: str, title: str, info: dict[str, Any]) -> 
         return value or heading
     metadata_block = "> " + " · ".join(metadata)
     return f"{heading}\n\n{metadata_block}" + (f"\n\n{body}" if body else "")
+
+
+def strip_model_metadata_block(body: str) -> str:
+    """移除模型紧跟标题生成的重复元信息，保留正文内容。
+
+    提示词已经把作者、时间、时长和文字来源作为参考资料传给模型，
+    但模型仍可能输出一行 ``作者：…｜发布时间：…``。这些字段由代码
+    确定性写入标题下方，因此只清理标题后的重复元信息块。
+    """
+    lines = body.splitlines()
+    index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    start = index
+    metadata_labels = ("作者", "UP主", "发布时间", "时长", "播放", "点赞", "文字来源")
+    removed = 0
+    while index < len(lines):
+        line = lines[index].strip().lstrip("> ")
+        label_count = sum(f"{label}：" in line or f"{label}:" in line for label in metadata_labels)
+        if label_count < 2:
+            break
+        removed += 1
+        index += 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+    if not removed:
+        return body
+    return "\n".join(lines[index:]).lstrip()
 
 
 def summary_style_label(style: str) -> str:

@@ -10,6 +10,25 @@ def test_version_tuple_accepts_release_tags() -> None:
     assert launcher.version_tuple("invalid") == (0,)
 
 
+def test_server_alive_requires_matching_version(monkeypatch) -> None:
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"status":"ok","service":"VideoToNo","mode":"portable","version":"1.1.7"}'
+
+    monkeypatch.setattr(launcher.urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+
+    assert launcher.server_alive("http://127.0.0.1:8000", mode="portable", version="1.1.7")
+    assert not launcher.server_alive("http://127.0.0.1:8000", mode="portable", version="1.1.8")
+
+
 def test_configure_runtime_dirs_creates_custom_workspace(monkeypatch, tmp_path) -> None:
     """环境变量指定的 workdir 不存在时也要自动创建（打包版写日志前依赖此目录）。"""
     custom = tmp_path / "custom-ws"

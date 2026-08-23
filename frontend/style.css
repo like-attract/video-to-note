@@ -398,7 +398,13 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .recent-heading { margin-bottom: 12px; }
 .compact-button { min-height: 32px; padding: 5px 10px; font-size: 12px; }
-.recent-task-list { border-top: 1px solid var(--border); }
+.recent-task-list {
+    max-height: min(360px, 45vh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    border-top: 1px solid var(--border);
+}
 .recent-task-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-bottom: 1px solid var(--border); }
 .recent-task-item {
     width: 100%;

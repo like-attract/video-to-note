@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.7</h1>
+<h1 align="center">VideoToNo v1.1.8</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,57 +14,21 @@
 
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douyin, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-## 🆕 What's New (v1.1.6 → v1.1.7)
+## 🆕 What's New (v1.1.7 → v1.1.8)
 
-- Add single public Douyin share-link support: resolve and download media directly, with an isolated local browser for manual sign-in or verification when required
-- Reuse the existing Whisper and note-generation pipeline when Douyin has no usable captions; interrupted tasks can continue from saved audio and transcripts
-- Allow cancelled tasks to be deleted from the recent-task list together with their audio, transcripts, and screenshots
-
-## 🆕 What's New (v1.1.5 → v1.1.6)
-
-Bugfix-only release:
-
-- Stop the repeated “Whisper model missing” download confirmations: subtitle-path submissions skip it, once a download is confirmed it never asks again, and model cache status refreshes after tasks
-- Fix packaged startup crash when a custom work directory (VIDEOTONOTES_WORKSPACE) does not exist
-
-## 🆕 What's New (v1.1.4 → v1.1.5)
-
-Bugfix-only release:
-
-- Fix unresponsive page buttons caused by stale cached HTML (cache-disabled entry page, resilient script init, visible failure banner)
-- Fix MCP SSE request crash
-- Silence benign `lifespan` warning noise from the mcp SDK
-
-## 🆕 What's New (v1.1.3 → v1.1.4)
-
-- 📝 **Richer note metadata**: notes show available author, publish date, and duration details below the title, then append the source URL, model, and note style at the end.
-- 🎛️ **Consistent style handling**: all three styles can naturally use verified video metadata without forcing a rigid template or inventing missing fields.
-- 🔄 **Tray update check**: manually check the GitHub Release page from the system tray and open it after confirmation when a newer version is available.
-- 🧠 **More faithful Whisper selection**: the selected model is actually attempted first; fallback to a cached `base` model happens only after a real load/download failure.
-
-- 🛡️ **Reliable Bilibili downloads**: fixed HTTP 412 anti-bot rejections (real browser User-Agent, Cookies moved to yt-dlp's cookiefile channel, and missing risk cookies like buvid/b_nut/b_lsid now collected), so downloads work after signing in.
-- 🩺 **One-click LLM connection test**: a new “Test connection” button in the settings panel verifies Provider / API Key / Base URL in seconds and tells you whether a failed test is a bad key or a wrong endpoint.
-- ⚡ **Frontend updates apply instantly**: static assets now use a no-cache policy, so a simple refresh loads new pages/buttons instead of stale cached files.
+- Isolate local services by both run mode and application version, so a new build cannot reuse an old backend and stale frontend
+- Add a bounded, scrollable recent-task list for long histories
+- Remove duplicate author, publish time, duration, and transcript-source metadata from faithful notes
+- Make custom Base URL and model connection failures actionable by distinguishing key, endpoint, model, network, and timeout problems
 
 <details>
-<summary>v1.1.2 and earlier</summary>
+<summary>Previous releases (v1.1.7 and earlier)</summary>
 
-- 🔗 **Looser link input**: the URL field no longer requires an `https://` prefix — Bilibili share text, scheme-less `b23.tv` short links, and bare BV/av IDs are recognized and normalized automatically.
-- 🎨 **New 3D product icon**: the exe, system tray, web sidebar, and browser favicon all use the refreshed icon.
-- 🧠 **More reliable long answers**: long DeepSeek responses are streamed; reasoning defaults and request timeouts are aligned.
-- 🖥️ **Portable and dev instances can coexist**: the health endpoint reports the run mode and the launcher only reuses same-mode instances; a dev server on port 8000 no longer blocks the portable build's tray.
-- 📚 **Docs restored**: detailed MCP integration and FAQ guides are back in the README.
-
-</details>
-
-<details>
-<summary>v1.1.1 and earlier</summary>
-
-- 🎬 **More reliable long-video generation**: transcripts are split at segment boundaries and reduced hierarchically, with live chunk, draft, and analysis progress.
-- 📝 **Smoother output workflow**: copy complete notes, export Markdown / HTML / JSON / plain text / PNG, delete failed tasks, resume from saved transcripts, cancel jobs, and archive notes automatically.
-- 🧠 **Clearer model status**: when a model returns an empty body, the affected stage reports it immediately and retries once with reasoning disabled.
-- 🎨 **More consistent UI**: the product page, desktop app, and tray use the shared `sources/icon.png` asset; the six progress stages are evenly spaced; product screenshots were refreshed.
-- 🔌 **Better local integration**: multiple providers, custom model IDs, note styles, reasoning controls, and MCP access for clients such as Cherry Studio and Codex.
+- **v1.1.7**: single public Douyin links, browser-verification fallback, transcript reuse, and cancelled-task deletion.
+- **v1.1.6**: persistent Whisper download confirmation and packaged custom-workspace fixes.
+- **v1.1.5**: stale-page, MCP SSE, and startup-warning fixes.
+- **v1.1.4**: note metadata, tray update checks, more reliable Bilibili downloads, and Whisper fallback improvements.
+- **v1.1.3 and earlier**: Bilibili 412 handling, LLM connection testing, MCP integration, long-video chunking, task recovery, and multi-format exports.
 
 </details>
 
@@ -84,7 +48,7 @@ Bugfix-only release:
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.1.7-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.1.8-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
