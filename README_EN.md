@@ -18,7 +18,8 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouT
 
 Bugfix-only release:
 
-- Stop the repeated “Whisper model missing” confirmation: submissions that will use platform subtitles (Bilibili with credentials, Douyin verified) skip it, per-session it only asks once, and model cache status refreshes automatically after tasks
+- Stop the repeated “Whisper model missing” download confirmations: subtitle-path submissions skip it, once a download is confirmed it never asks again, and model cache status refreshes after tasks
+- Fix packaged startup crash when a custom work directory (VIDEOTONOTES_WORKSPACE) does not exist
 
 ## 🆕 What's New (v1.1.4 → v1.1.5)
 
