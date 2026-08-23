@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.6"
+    assert health.json()["version"] == "1.1.7"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -249,6 +249,25 @@ async def test_delete_failed_task_removes_record_and_artifacts(
 
     monkeypatch.setattr(main, "video_processor", FakeProcessor())
     main.tasks[task_id] = main.new_task("failed", task_id)
+
+    assert await main.delete_task(task_id) == {"deleted": True}
+    assert cleaned == [task_id]
+    assert task_id not in main.tasks
+
+
+@pytest.mark.asyncio
+async def test_delete_cancelled_task_removes_record_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "cancelled-task"
+    cleaned: list[str] = []
+
+    class FakeProcessor:
+        async def cleanup(self, value: str) -> None:
+            cleaned.append(value)
+
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    main.tasks[task_id] = main.new_task("cancelled", task_id)
 
     assert await main.delete_task(task_id) == {"deleted": True}
     assert cleaned == [task_id]

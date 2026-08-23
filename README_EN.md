@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.6</h1>
+<h1 align="center">VideoToNo v1.1.7</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -12,7 +12,13 @@
 
 <p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ Download the Windows portable build</strong></a></p>
 
-VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
+VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douyin, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
+
+## 🆕 What's New (v1.1.6 → v1.1.7)
+
+- Add single public Douyin share-link support: resolve and download media directly, with an isolated local browser for manual sign-in or verification when required
+- Reuse the existing Whisper and note-generation pipeline when Douyin has no usable captions; interrupted tasks can continue from saved audio and transcripts
+- Allow cancelled tasks to be deleted from the recent-task list together with their audio, transcripts, and screenshots
 
 ## 🆕 What's New (v1.1.5 → v1.1.6)
 
@@ -78,7 +84,7 @@ Bugfix-only release:
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.1.3-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.1.7-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
@@ -89,8 +95,9 @@ The portable build starts the local service and stays in the system tray. The fi
 
 ## ✨ Highlights
 
-- 🎥 **Flexible inputs**: Bilibili, YouTube, other URLs supported by the installed `yt-dlp`, and local audio/video files.
+- 🎥 **Flexible inputs**: Bilibili, Douyin, YouTube, other URLs supported by the installed `yt-dlp`, and local audio/video files.
 - 🇨🇳 **Bilibili integration**: fetches Bilibili AI captions after sign-in, with QR-code credential import in the UI.
+- 🎵 **Douyin single-link integration**: handles public share links directly and can retry after manual verification in an isolated local browser.
 - 🧾 **Real timestamps**: keeps segment start and end times from captions or Whisper instead of asking the model to invent them.
 - 🧠 **Long-transcript handling**: chunks, summarizes, and reduces long material while keeping context pressure under control.
 - 🖼️ **Multiple exports**: Markdown, HTML, JSON, plain text, and PNG, with optional video screenshots as note attachments.
@@ -110,9 +117,10 @@ LLM-generated timestamped Markdown note
 
 ## 🌍 Supported inputs
 
-- Bilibili, YouTube, and other `http` / `https` video URLs that the installed `yt-dlp` can parse;
+- Bilibili, Douyin, YouTube, and other `http` / `https` video URLs that the installed `yt-dlp` can parse;
+- single public Douyin share links, with an isolated local browser available for sign-in or verification when anonymous parsing is restricted;
 - local `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.mp4`, `.mkv`, `.mov`, `.webm`, and `.avi` files;
-- Douyin, iQiyi, and Tencent Video are not specially adapted, so support depends on access permissions, caption availability, and `yt-dlp` behavior.
+- iQiyi and Tencent Video are not specially adapted, so support depends on access permissions, caption availability, and `yt-dlp` behavior.
 
 ## ⚙️ Use and configure
 

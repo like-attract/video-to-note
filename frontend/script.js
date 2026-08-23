@@ -161,7 +161,7 @@ function bindEvents() {
         recentTaskList.addEventListener('click', (event) => {
             const deleteButton = event.target.closest('[data-delete-task-id]');
             if (deleteButton) {
-                deleteFailedTask(deleteButton.dataset.deleteTaskId);
+                deleteStoppedTask(deleteButton.dataset.deleteTaskId);
                 return;
             }
             const button = event.target.closest('[data-task-id]');
@@ -263,13 +263,14 @@ function renderRecentTasks(tasks) {
         text.append(title, meta);
         button.append(text, status);
         row.append(button);
-        if (task.status === 'failed') {
+        if (['failed', 'cancelled'].includes(task.status)) {
             const deleteButton = document.createElement('button');
             deleteButton.type = 'button';
             deleteButton.className = 'recent-task-delete';
             deleteButton.dataset.deleteTaskId = task.task_id;
-            deleteButton.title = '删除失败任务';
-            deleteButton.setAttribute('aria-label', `删除失败任务：${task.title || '未命名任务'}`);
+            const statusLabel = task.status === 'cancelled' ? '已取消任务' : '失败任务';
+            deleteButton.title = `删除${statusLabel}`;
+            deleteButton.setAttribute('aria-label', `删除${statusLabel}：${task.title || '未命名任务'}`);
             deleteButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg>';
             row.append(deleteButton);
         }
@@ -277,8 +278,8 @@ function renderRecentTasks(tasks) {
     });
 }
 
-async function deleteFailedTask(taskId) {
-    if (!window.confirm('将删除该失败任务及其音频、转录和截图，删除后无法继续复用。确定删除吗？')) return;
+async function deleteStoppedTask(taskId) {
+    if (!window.confirm('将删除该任务及其音频、转录和截图，删除后无法继续复用。确定删除吗？')) return;
     try {
         const response = await fetch(`${API_BASE}/task/${encodeURIComponent(taskId)}`, {
             method: 'DELETE'
@@ -289,7 +290,7 @@ async function deleteFailedTask(taskId) {
             byId('progressArea').hidden = true;
         }
         await loadRecentTasks(true);
-        showToast('失败任务已删除', 'success');
+        showToast('任务已删除', 'success');
     } catch (error) {
         showToast(`删除失败：${error.message}`, 'error');
         loadRecentTasks(true);
