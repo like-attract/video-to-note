@@ -46,21 +46,24 @@ def configure_runtime_dirs() -> None:
     """设置工作目录：打包模式默认放在 exe 旁边（便携），允许环境变量覆盖。"""
     if is_frozen():
         exe_dir = base_dir()
-        workspace = exe_dir / "workspace"
+        default_workspace = exe_dir / "workspace"
         try:
-            workspace.mkdir(parents=True, exist_ok=True)
-            probe = workspace / ".write_test"
+            default_workspace.mkdir(parents=True, exist_ok=True)
+            probe = default_workspace / ".write_test"
             probe.write_text("", encoding="utf-8")
             probe.unlink()
         except OSError:
             # exe 所在目录不可写时（如 Program Files），退回用户目录
             local_app_data = os.environ.get("LOCALAPPDATA")
             fallback_root = Path(local_app_data) if local_app_data else Path.home() / ".videotono"
-            workspace = fallback_root / "VideoToNo" / "workspace"
-            workspace.mkdir(parents=True, exist_ok=True)
+            default_workspace = fallback_root / "VideoToNo" / "workspace"
+            default_workspace.mkdir(parents=True, exist_ok=True)
     else:
-        workspace = base_dir() / "workspace"
-    os.environ.setdefault("VIDEOTONOTES_WORKSPACE", str(workspace))
+        default_workspace = base_dir() / "workspace"
+        default_workspace.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("VIDEOTONOTES_WORKSPACE", str(default_workspace))
+    # 环境变量覆盖的路径也要确保存在：打包版写日志文件前依赖此目录，缺失会启动崩溃
+    Path(os.environ["VIDEOTONOTES_WORKSPACE"]).mkdir(parents=True, exist_ok=True)
 
 
 RUN_MODE = "portable" if is_frozen() else "dev"
