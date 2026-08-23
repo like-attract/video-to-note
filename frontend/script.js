@@ -569,6 +569,32 @@ function hasBiliCredentials() {
     );
 }
 
+// ---- Whisper 未缓存确认的降噪逻辑 ----
+// 1) 明显走平台字幕、用不到 Whisper 的提交不弹；
+// 2) 同一页面会话内已确认过的模型不再重复弹（下拉框仍保留“未缓存”提示）。
+function taskWillLikelyUseSubtitles(request) {
+    if (!request || request.sourceType === 'local') return false;
+    if (isBilibiliUrl(request.videoUrl) && hasBiliCredentials()) return true;
+    if (isDouyinUrl(request.videoUrl) && douyinCookies) return true;
+    return false;
+}
+
+function whisperConfirmedThisSession(modelId) {
+    try {
+        return sessionStorage.getItem(`whisper_confirm_${modelId}`) === '1';
+    } catch (_error) {
+        return false;
+    }
+}
+
+function rememberWhisperConfirm(modelId) {
+    try {
+        sessionStorage.setItem(`whisper_confirm_${modelId}`, '1');
+    } catch (_error) {
+        // 隐私模式等无法写入存储时，只影响本次会话的重复提醒
+    }
+}
+
 function updateBiliHint(forceShow = false) {
     const value = byId('videoUrl').value.trim();
     const notLocal = byId('sourceType').value !== 'local';
@@ -829,13 +855,22 @@ async function startSummary(options = {}) {
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
 
-    // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）
-    if (!resumeTaskId) {
+    // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）。
+    // 以下情况跳过确认：复用转录/续跑（不用 Whisper）、明显走平台字幕的提交
+    // （B 站已填凭据、抖音已验证）、同一会话内已确认过的模型。
+    if (!resumeTaskId && forceRestart && !taskWillLikelyUseSubtitles(request)) {
         const whisperOption = byId('whisperModel').selectedOptions[0];
         const status = whisperOption ? whisperOption.dataset.status : 'missing';
-        if (whisperOption && status && status !== 'cached') {
+        const modelId = whisperOption ? whisperOption.value : '';
+        if (
+            whisperOption
+            && status
+            && status !== 'cached'
+            && modelId
+            && !whisperConfirmedThisSession(modelId)
+        ) {
             const modelLabel = (whisperOption.dataset.baseLabel || whisperOption.textContent).split('（')[0];
-            const size = WHISPER_MODEL_SIZES[whisperOption.value] || '';
+            const size = WHISPER_MODEL_SIZES[modelId] || '';
             const message = status === 'incomplete'
                 ? `所选模型「${modelLabel}」缓存不完整，将自动补全缺失文件（约 ${size}）。是否继续？`
                 : `当前缺少所选模型「${modelLabel}」。首次使用需从镜像下载约 ${size}（下载完成后自动开始转写）。是否继续？`;
@@ -843,6 +878,7 @@ async function startSummary(options = {}) {
                 showToast('已取消，任务未提交', 'info');
                 return;
             }
+            rememberWhisperConfirm(modelId);
         }
     }
 
@@ -1141,6 +1177,8 @@ function completeTask(result, elapsedSeconds = null) {
     setSubmitButton(false, '再次生成');
     showToast('视频笔记已生成', 'success');
     loadRecentTasks(true);
+    // 任务期间可能下载/补全了 Whisper 模型，自动纠正下拉框缓存状态，避免下次提交误弹确认
+    refreshWhisperModelHints();
 }
 
 function failTask(message, elapsedSeconds = null) {
@@ -1155,6 +1193,7 @@ function failTask(message, elapsedSeconds = null) {
     setSubmitButton(false, '重新提交');
     showToast(message, 'error');
     loadRecentTasks(true);
+    refreshWhisperModelHints();
 }
 
 async function cancelCurrentTask() {
@@ -1201,6 +1240,7 @@ function markTaskCancelled(message, elapsedSeconds = null) {
     setSubmitButton(false, '重新开始');
     showToast('任务已取消', 'info');
     loadRecentTasks(true);
+    refreshWhisperModelHints();
 }
 
 function setSubmitting(active, label = '开始生成') {
@@ -1289,6 +1329,8 @@ function updateLogs(logs) {
     ) {
         whisperFallbackNotified = true;
         showToast('注意：所选 Whisper 模型未缓存或无法加载，已自动降级为已缓存的模型', 'info');
+        // 降级说明本次实际使用了 base，顺手刷新下拉框状态
+        refreshWhisperModelHints();
     }
 }
 

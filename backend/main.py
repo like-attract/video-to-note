@@ -85,7 +85,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.5")
+app = FastAPI(title="VideoToNo API", version="1.1.6")
 
 
 def is_loopback_client(host: str | None) -> bool:

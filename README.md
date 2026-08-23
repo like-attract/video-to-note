@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.1.5</h1>
+<h1 align="center">VideoToNo v1.1.6</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -12,6 +12,12 @@
 <p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ 下载 Windows 便携版</strong></a></p>
 
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
+
+## 🆕 What's New（v1.1.5 → v1.1.6）
+
+纯修复版本：
+
+- 不再反复弹「缺少 Whisper 模型」确认：会走平台字幕的提交（B 站已填凭据、抖音已验证）直接跳过；同一页面会话内只确认一次；任务结束后自动刷新模型缓存状态
 
 ## 🆕 What's New（v1.1.4 → v1.1.5）
 

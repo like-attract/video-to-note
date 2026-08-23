@@ -15,7 +15,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.5"
+    assert health.json()["version"] == "1.1.6"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -69,6 +69,17 @@ def test_frontend_sanitizes_generated_markdown() -> None:
     assert "const body = renderMarkdown(markdown);" in script
     assert "const body = typeof marked" not in script
     assert "persistApiKeyIfRequested" not in script
+
+
+def test_frontend_whisper_confirm_dedup_logic() -> None:
+    """Whisper 未缓存确认的降噪逻辑：字幕链路跳过、会话内只确认一次、任务后自动刷新状态。"""
+    script = (main.FRONTEND_DIR / "script.js").read_text(encoding="utf-8")
+    assert "taskWillLikelyUseSubtitles" in script
+    assert "whisper_confirm_" in script
+    assert "sessionStorage" in script
+    assert "!whisperConfirmedThisSession(modelId)" in script
+    assert "rememberWhisperConfirm(modelId)" in script
+    assert "refreshWhisperModelHints();" in script
 
 
 def test_note_metadata_and_footer_are_deterministic() -> None:

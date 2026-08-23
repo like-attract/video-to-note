@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.5</h1>
+<h1 align="center">VideoToNo v1.1.6</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -13,6 +13,12 @@
 <p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ Download the Windows portable build</strong></a></p>
 
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
+
+## 🆕 What's New (v1.1.5 → v1.1.6)
+
+Bugfix-only release:
+
+- Stop the repeated “Whisper model missing” confirmation: submissions that will use platform subtitles (Bilibili with credentials, Douyin verified) skip it, per-session it only asks once, and model cache status refreshes automatically after tasks
 
 ## 🆕 What's New (v1.1.4 → v1.1.5)
 
