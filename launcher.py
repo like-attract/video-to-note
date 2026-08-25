@@ -24,7 +24,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.1.8"
+VERSION = "1.2.0"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60

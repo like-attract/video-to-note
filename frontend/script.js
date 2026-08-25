@@ -171,6 +171,7 @@ function bindEvents() {
     bindListener('llmProvider', 'change', handleProviderChange);
     bindListener('llmModel', 'change', toggleCustomConfig);
     bindListener('llmTestBtn', 'click', testLlmConnection);
+    bindListener('manualModelBtn', 'click', manualImportWhisperModel);
     bindListener('sourceType', 'change', toggleSourceType);
     const videoUrl = byId('videoUrl');
     if (videoUrl) {
@@ -194,6 +195,7 @@ function bindEvents() {
         stopPolling();
         stopElapsedTimer();
         stopDouyinLoginPolling();
+        stopManualImportPolling();
     });
 }
 
@@ -837,6 +839,73 @@ function formatBytes(bytes) {
     return `${(bytes / 1024 / 1024).toFixed(bytes > 10 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
+// ---- Whisper 模型手动导入（大模型下载慢/反复失败时的替代方案）----
+// 约定：把 4 个模型文件放入 workspace/_model_cache/manual/{model}/，
+// 后端实时扫描该目录，放入后自动识别为「已缓存」。
+const MANUAL_IMPORT_POLL_MS = 5000;
+const MANUAL_IMPORT_POLL_MAX_TICKS = 24; // 约 2 分钟后停止轮询
+let manualImportPollTimer = null;
+let manualImportPollRemaining = 0;
+
+function stopManualImportPolling() {
+    if (manualImportPollTimer) {
+        window.clearInterval(manualImportPollTimer);
+        manualImportPollTimer = null;
+    }
+}
+
+function startManualImportPolling(modelId) {
+    stopManualImportPolling();
+    manualImportPollRemaining = MANUAL_IMPORT_POLL_MAX_TICKS;
+    manualImportPollTimer = window.setInterval(async () => {
+        manualImportPollRemaining -= 1;
+        if (isTaskActive || manualImportPollRemaining <= 0) {
+            stopManualImportPolling();
+            return;
+        }
+        await refreshWhisperModelHints();
+        const option = byId('whisperModel').selectedOptions[0];
+        if (option && option.value === modelId && option.dataset.status === 'cached') {
+            stopManualImportPolling();
+            showToast(`已识别手动导入的模型文件（${modelId}）`, 'success');
+        }
+    }, MANUAL_IMPORT_POLL_MS);
+}
+
+async function manualImportWhisperModel() {
+    const option = byId('whisperModel').selectedOptions[0];
+    if (!option) return;
+    const modelId = option.value;
+    const modelLabel = (option.dataset.baseLabel || option.textContent).split('（')[0];
+    const confirmed = window.confirm(
+        `将为模型「${modelLabel}」打开手动导入文件夹。\n\n`
+        + '步骤：\n'
+        + '1. 用浏览器从镜像站下载该模型的 4 个文件：\n'
+        + `    config.json / model.bin / tokenizer.json / vocabulary.txt\n`
+        + `    下载页：https://hf-mirror.com/Systran/faster-whisper-${modelId}/tree/main\n`
+        + '2. 把 4 个文件放入即将打开的文件夹（不要改文件名）；\n'
+        + '3. 文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
+        + '现在打开文件夹吗？'
+    );
+    if (!confirmed) return;
+    try {
+        const response = await fetch(`${API_BASE}/whisper-models/manual-folder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelId })
+        });
+        const data = await readResponse(response, '打开模型文件夹失败');
+        if (data.opened) {
+            showToast(`已打开导入文件夹：${data.path}`, 'success');
+        } else {
+            window.prompt('未能自动打开文件夹，请手动前往以下路径放入模型文件：', data.path);
+        }
+        startManualImportPolling(modelId);
+    } catch (error) {
+        showToast(error.message || '打开模型文件夹失败', 'error');
+    }
+}
+
 function normalizeScreenshotInterval() {
     const input = byId('screenshotInterval');
     const value = Math.min(300, Math.max(5, Number.parseInt(input.value, 10) || 30));
@@ -1220,7 +1289,7 @@ async function cancelCurrentTask() {
         } else {
             setTaskState('processing', '取消中');
             byId('networkState').textContent = '等待当前步骤停止';
-            addLog('取消请求已发送；当前下载、转写或模型调用返回后将停止', 'warning');
+            addLog('取消请求已发送；转写会在当前音频段结束后停止，其他阻塞步骤返回后停止', 'warning');
             showToast('取消请求已发送', 'info');
         }
     } catch (error) {

@@ -8,14 +8,19 @@ from fastapi.testclient import TestClient
 import launcher
 from backend import main
 from backend.transcript import TranscriptSegment
-from backend.video_processor import SubtitleResult, VideoProcessor
+from backend.video_processor import (
+    BiliPage,
+    BiliSubtitleOutcome,
+    SubtitleResult,
+    VideoProcessor,
+)
 
 
 def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.1.8"
+    assert health.json()["version"] == "1.2.0"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -46,7 +51,7 @@ def test_html_entry_is_no_store_and_assets_no_cache() -> None:
     page = client.get("/")
     assert page.headers["cache-control"] == "no-store"
     assert page.headers["content-security-policy"].startswith("default-src 'self'")
-    for asset in ("/style.css", "/script.js?v=20260824-1", "/theme-bootstrap.js"):
+    for asset in ("/style.css", "/script.js?v=20260825-1", "/theme-bootstrap.js"):
         response = client.get(asset)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-cache"
@@ -80,6 +85,32 @@ def test_frontend_whisper_confirm_dedup_logic() -> None:
     assert "!whisperDownloadConfirmed(modelId)" in script
     assert "rememberWhisperDownloadConfirm(modelId)" in script
     assert "refreshWhisperModelHints();" in script
+
+
+def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """手动导入模型：创建并返回导入目录，模型 ID 校验，状态接口带 manual_dir。"""
+    monkeypatch.setattr(main, "WHISPER_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(main, "_open_in_file_manager", lambda _path: False)
+    client = TestClient(main.app)
+
+    response = client.post("/api/whisper-models/manual-folder", json={"model": "base"})
+    assert response.status_code == 200
+    data = response.json()
+    expected_dir = tmp_path / "cache" / "manual" / "base"
+    assert data == {
+        "path": str(expected_dir),
+        "opened": False,
+        "files": ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"],
+        "download_url": "https://hf-mirror.com/Systran/faster-whisper-base/tree/main",
+    }
+    assert expected_dir.is_dir()
+
+    status = client.get("/api/whisper-models")
+    assert status.status_code == 200
+    assert status.json()["manual_dir"] == str(tmp_path / "cache" / "manual")
+
+    invalid = client.post("/api/whisper-models/manual-folder", json={"model": "nope"})
+    assert invalid.status_code == 422
 
 
 def test_note_metadata_and_footer_are_deterministic() -> None:
@@ -248,6 +279,7 @@ async def test_cancel_task_requests_cooperative_stop_and_keeps_task_record() -> 
     assert result["cancelled"] is False
     assert result["status"] == "cancelling"
     assert main.tasks[task_id]["_cancel_requested"] is True
+    assert main.tasks[task_id]["_cancel_event"].is_set()
     assert not job.done()
     assert any("当前阻塞步骤结束后" in log for log in main.tasks[task_id]["logs"])
     job.cancel()
@@ -523,3 +555,171 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
     assert (tmp_path / new_task_id / "notes.md").read_text(encoding="utf-8").startswith(
         "# 复用成功"
     )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_merges_all_bilibili_pages_from_ai_subtitles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "分P测试视频", "source": "bilibili", "duration": 0, "owner": "作者"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return None
+
+    async def fake_bili_subtitles(*args, **kwargs):
+        pages = (
+            BiliPage(page=1, part="第一部分", cid=101, duration=60),
+            BiliPage(page=2, part="第二部分", cid=102, duration=90),
+        )
+        sub = SubtitleResult(
+            [TranscriptSegment(0, 5, "P1字幕"), TranscriptSegment(5, 9, "P1更多")],
+            "zh-CN",
+            "bilibili_ai_subtitle",
+        )
+        merged, _ = main.merge_bilibili_pages(pages, {1: sub}, {})
+        return BiliSubtitleOutcome(
+            SubtitleResult(merged, "zh-CN", "bilibili_ai_subtitle"),
+            "ok",
+            title="分P测试视频",
+            total_pages=2,
+            pages=pages,
+            subtitle_by_page=((1, sub),),
+        )
+
+    async def fail_download(*args, **kwargs):
+        raise AssertionError("多分P全有字幕，不应下载音频")
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        async def generate_summary(
+            self, title, segments, metadata, style="detailed", reasoning_effort="auto",
+            progress_callback=None,
+        ):
+            if progress_callback:
+                await progress_callback(78, "正在生成完整笔记")
+            return "# 测试笔记\n\n[00:00] 摘要"
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(processor, "fetch_bilibili_subtitles", fake_bili_subtitles)
+    monkeypatch.setattr(processor, "download_audio", fail_download)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+
+    task_id = "multi-p-subtitle"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    assert task["result"]["transcript_source"] == "bilibili_ai_subtitle"
+    assert any("共 2 个分 P" in log for log in task["logs"])
+    assert any("本次处理 1、2" in log for log in task["logs"])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "分P测试视频", "source": "bilibili", "duration": 0, "owner": "作者"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return None
+
+    async def fake_bili_subtitles(*args, **kwargs):
+        pages = (
+            BiliPage(page=1, part="第一部分", cid=101, duration=60),
+            BiliPage(page=2, part="第二部分", cid=102, duration=90),
+        )
+        sub = SubtitleResult(
+            [TranscriptSegment(0, 5, "P1字幕")], "zh-CN", "bilibili_ai_subtitle"
+        )
+        merged, _ = main.merge_bilibili_pages(pages, {1: sub}, {})
+        return BiliSubtitleOutcome(
+            SubtitleResult(merged, "zh-CN", "bilibili_ai_subtitle"),
+            "partial",
+            title="分P测试视频",
+            total_pages=2,
+            pages=pages,
+            subtitle_by_page=((1, sub),),
+            pages_to_transcribe=(pages[1],),
+        )
+
+    downloaded: list[tuple[str, str]] = []
+    captured_segments: list = []
+
+    async def fake_download(url, task_id, cookie=None, media_name="audio"):
+        downloaded.append((url, media_name))
+        return tmp_path / f"{media_name}.mp3"
+
+    class FakeTranscriber:
+        async def transcribe(
+            self, media_path, model_name="base", use_gpu=False,
+            initial_prompt=None, cancel_event=None,
+        ):
+            return {
+                "segments": [TranscriptSegment(0, 3, "P2语音内容")],
+                "language": "zh",
+                "duration": 90,
+                "device": "cpu",
+                "model": "base",
+                "requested_model": "base",
+            }
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        async def generate_summary(
+            self, title, segments, metadata, style="detailed", reasoning_effort="auto",
+            progress_callback=None,
+        ):
+            captured_segments.extend(segments)
+            if progress_callback:
+                await progress_callback(78, "正在生成完整笔记")
+            return "# 测试笔记\n\n[00:00] 摘要"
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(processor, "fetch_bilibili_subtitles", fake_bili_subtitles)
+    monkeypatch.setattr(processor, "download_audio", fake_download)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "transcriber", FakeTranscriber())
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+
+    task_id = "multi-p-partial"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    assert downloaded[0][0].endswith("?p=2")
+    assert downloaded[0][1] == "audio_p2"
+    assert any("分 P 2 语音转写完成" in log for log in task["logs"])
+    assert any("分 P 转录合并完成" in log for log in task["logs"])
+    assert len(captured_segments) == 2
+    assert captured_segments[0].text.startswith("【P1 第一部分】 P1字幕")
+    assert captured_segments[1].text.startswith("【P2 第二部分】 P2语音内容")
+    assert captured_segments[1].start == 60.0

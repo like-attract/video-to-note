@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.1.8</h1>
+<h1 align="center">VideoToNo v1.2.0</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -13,16 +13,17 @@
 
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、抖音、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
 
-## 🆕 What's New（v1.1.7 → v1.1.8）
+## 🆕 What's New（v1.1.8 → v1.2.0）
 
-- 启动器按“运行模式 + 应用版本”隔离本地服务，避免打开新版本时复用旧版本后端和旧前端
-- 最近任务列表增加最大高度和滚动条，历史任务较多时仍可方便浏览
-- 修复详细复原笔记标题下重复显示作者、发布时间、时长和文字来源的问题
-- 自定义 Base URL 或模型连接失败时，测试结果会区分 API Key、接口地址、模型、网络和超时问题
+- **B 站多分 P 视频**：粘贴多分 P 链接（不带 `?p`）会把整套视频的**全部分 P 合并成一份笔记**，分段带 `【P1 分P名】` 标记、时间轴连续；链接带 `?p=N` 则只处理对应分 P（此前只会识别第一个分 P）
+- **取消真正生效**：语音转写改为按音频段协作式中止，点取消后当前段落结束后立即停止，不再等整段音频转写跑完
+- **修复误报**：已登录 B 站但视频本身没有 AI 字幕时，不再错误提示“需要填写 SESSDATA”；字幕接口异常也会如实显示原因
+- **Whisper 模型手动导入**：模型下载慢/反复失败时，可在界面一键打开导入目录、放入模型文件后自动识别
 
 <details>
-<summary>历史版本摘要（v1.1.7 及更早）</summary>
+<summary>历史版本摘要（v1.1.8 及更早）</summary>
 
+- **v1.1.8**：运行模式与应用版本隔离、最近任务滚动条、详细复原元信息去重、自定义 Base URL 错误诊断
 - **v1.1.7**：抖音单条公开分享链接、浏览器验证回退、转写复用和已取消任务删除。
 - **v1.1.6**：Whisper 下载确认记忆和自定义工作目录修复。
 - **v1.1.5**：旧缓存页面、MCP SSE 和启动告警修复。
@@ -49,7 +50,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.1.8-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.2.0-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；
@@ -183,6 +184,16 @@ MCP server 会自动扫描 8000–8019 端口来找到已运行的 VideoToNo 服
 模型默认缓存在 `workspace/_model_cache/`。如需改到其他磁盘，可在 `.env` 中设置 `WHISPER_CACHE_DIR`。下载默认走 **hf-mirror.com 镜像**，支持断点续传和重试；如需切换，可设置 `HF_ENDPOINT`，例如 `HF_ENDPOINT=https://huggingface.co` 使用官方源。若仍失败，请检查网络、代理和缓存目录写入权限。
 
 应用默认禁用 Hugging Face Xet 下载后端，改用普通 HTTP 下载，以减少部分 Windows 网络下的 CAS 文件重建错误。如果所选模型尚未完整缓存、但本机已有可用的 `base`，任务会降级到 `base` 并在运行日志中注明，避免长期卡在不稳定的权重下载上。
+
+### 大模型（medium 及以上）下载反复失败怎么办？
+
+大模型体积大（medium 约 1.5GB），网络不佳时容易中断。除了重试（支持断点续传），推荐手动导入：
+
+1. 在「语音转写」设置中选择目标模型，点击「**手动导入模型**」按钮，程序会自动打开导入文件夹（`workspace/_model_cache/manual/<模型名>/`）；
+2. 用浏览器（或下载工具）从镜像站下载该模型的 4 个文件：`config.json`、`model.bin`、`tokenizer.json`、`vocabulary.txt`（下载页：`https://hf-mirror.com/Systran/faster-whisper-<模型名>/tree/main`，点开每个文件右上角的下载箭头）；
+3. 把 4 个文件原样放入打开的文件夹，程序几秒内自动识别，下拉框会显示「已缓存」。
+
+程序会对下载和缓存做完整性校验；检测到历史中断留下的损坏文件时会自动清理并重新下载，无需手动删除缓存。
 
 ### CPU 转写为什么比视频时长还久？
 

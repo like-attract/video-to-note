@@ -6,7 +6,9 @@ import ipaddress
 import json
 import os
 import shutil
+import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -48,7 +50,13 @@ from .transcript import (
     segments_to_prompt,
     transcript_quality,
 )
-from .video_processor import VideoProcessor, VideoSource, normalize_video_input
+from .video_processor import (
+    VideoProcessor,
+    VideoSource,
+    bilibili_page_url,
+    merge_bilibili_pages,
+    normalize_video_input,
+)
 from .whisper_asr import WhisperTranscriber
 
 
@@ -85,7 +93,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.1.8")
+app = FastAPI(title="VideoToNo API", version="1.2.0")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -250,6 +258,7 @@ def new_task(status: str = "pending", task_id: str | None = None) -> dict[str, A
         "elapsed_seconds": 0.0,
         "_task_id": task_id,
         "_cancel_requested": False,
+        "_cancel_event": threading.Event(),
         "_started_monotonic": time.monotonic(),
     }
 
@@ -616,7 +625,40 @@ async def whisper_models_status() -> dict[str, Any]:
         }
         for model_id in sorted(WHISPER_MODELS)
     ]
-    return {"models": models}
+    return {"models": models, "manual_dir": str(WHISPER_CACHE_DIR / "manual")}
+
+
+class WhisperManualFolderPayload(BaseModel):
+    model: str
+
+
+def _open_in_file_manager(path: Path) -> bool:
+    """用系统文件管理器打开目录；失败时返回 False（前端展示路径兜底）。"""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+        return True
+    except Exception:
+        return False
+
+
+@app.post("/api/whisper-models/manual-folder")
+async def open_whisper_manual_folder(payload: WhisperManualFolderPayload) -> dict[str, Any]:
+    """创建并打开手动导入模型的目标文件夹（大模型网络下载失败时的替代方案）。"""
+    if payload.model not in WHISPER_MODELS:
+        raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
+    manual_dir = WHISPER_CACHE_DIR / "manual" / payload.model
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "path": str(manual_dir),
+        "opened": _open_in_file_manager(manual_dir),
+        "files": list(WhisperTranscriber.WHISPER_MODEL_FILES),
+        "download_url": f"https://hf-mirror.com/Systran/faster-whisper-{payload.model}/tree/main",
+    }
 
 
 @app.get("/api/llm-config")
@@ -855,6 +897,9 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="任务已经结束")
 
     task["_cancel_requested"] = True
+    cancel_event = task.get("_cancel_event")
+    if cancel_event is not None:
+        cancel_event.set()
     task.update(status="cancelling", step_name="取消中", error=None)
     task["logs"].append("已收到取消请求；当前阻塞步骤结束后将停止任务")
     persist_task_runtime(task_id)
@@ -876,6 +921,12 @@ async def delete_task(task_id: str) -> dict[str, bool]:
     await video_processor.cleanup(task_id)
     tasks.pop(task_id, None)
     return {"deleted": True}
+
+
+def _format_page_nums(pages) -> str:
+    """把分 P 对象 / 页码列表格式化为 “1、2、3”。"""
+    nums = sorted(int(page.page if hasattr(page, "page") else page) for page in pages)
+    return "、".join(str(num) for num in nums)
 
 
 async def run_queued_video_task(task_id: str, request: SummarizeRequest) -> None:
@@ -924,6 +975,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         )
         cookie = douyin_cookie if source_kind == VideoSource.DOUYIN else bili_cookie
         transcript_result = load_transcript_result(resume_dir) if resume_dir else None
+        bili_pages_to_transcribe: list = []
 
         if transcript_result:
             set_progress(task, 1, "恢复任务信息", 8, "正在读取已有任务信息")
@@ -963,75 +1015,186 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     video_processor.detect_source(source_url or "")
                     == VideoSource.BILIBILI
                 )
-                subtitle = (
+                subtitle_outcome = (
                     await video_processor.fetch_bilibili_subtitles(source_url or "", cookie)
                     if is_bilibili
                     else None
                 )
-                if subtitle:
+                if subtitle_outcome is not None:
+                    bili_pages_to_transcribe = list(subtitle_outcome.pages_to_transcribe)
+                    if subtitle_outcome.title:
+                        info["title"] = subtitle_outcome.title
+                    if subtitle_outcome.pages:
+                        info["duration"] = sum(
+                            page.duration for page in subtitle_outcome.pages
+                        ) or info.get("duration")
+                    if subtitle_outcome.total_pages > 1:
+                        task["logs"].append(
+                            f"检测到 B 站分 P 视频：共 {subtitle_outcome.total_pages} 个分 P，"
+                            f"本次处理 {_format_page_nums(subtitle_outcome.pages)}"
+                        )
+                        update_task_manifest(task_id, info)
+                if subtitle_outcome is not None and subtitle_outcome.result:
                     transcript_result = {
-                        "segments": subtitle.segments,
-                        "language": subtitle.language,
-                        "source": subtitle.source,
+                        "segments": subtitle_outcome.result.segments,
+                        "language": subtitle_outcome.result.language,
+                        "source": subtitle_outcome.result.source,
                     }
                     task["logs"].append(
-                        f"已使用 B 站 AI 字幕：{subtitle.language}，共 {len(subtitle.segments)} 段"
+                        f"已使用 B 站 AI 字幕：{subtitle_outcome.result.language}，"
+                        f"共 {len(subtitle_outcome.result.segments)} 段"
                     )
-                else:
-                    if is_bilibili:
+                    if bili_pages_to_transcribe:
+                        task["logs"].append(
+                            "分 P "
+                            f"{_format_page_nums(bili_pages_to_transcribe)}"
+                            " 无 AI 字幕，将通过语音转写补齐"
+                        )
+                elif subtitle_outcome is not None:
+                    reason = subtitle_outcome.reason
+                    if reason == "credentials_missing":
                         task["logs"].append(
                             "未读取到可用的 B 站字幕轨；AI 字幕需要填写当前账号的 "
                             "SESSDATA 等访问凭据"
                         )
+                    elif reason == "no_track":
+                        task["logs"].append(
+                            "当前账号已登录，但该视频没有可用的 AI 字幕轨"
+                        )
+                    elif reason == "error":
+                        task["logs"].append(
+                            "读取 B 站 AI 字幕失败（网络或接口异常，"
+                            f"{subtitle_outcome.detail}）"
+                        )
+                    elif reason == "empty":
+                        task["logs"].append("B 站字幕轨存在但内容为空")
+                    if bili_pages_to_transcribe:
+                        task["logs"].append(
+                            f"分 P {_format_page_nums(bili_pages_to_transcribe)} 将通过语音转写"
+                        )
                     task["logs"].append("未找到可用平台字幕，将进行语音转写")
+            title = info["title"]
 
         raise_if_cancel_requested(task)
-        if transcript_result is None:
+        if transcript_result is None or bili_pages_to_transcribe:
             set_progress(task, 3, "准备音频", 25, "正在准备音频")
-            reused_audio = None
-            if resume_dir:
-                reused_audio = next(
-                    (path for path in resume_dir.glob("audio.*") if path.is_file()), None
+            if bili_pages_to_transcribe:
+                # 多分 P：对没有 AI 字幕的分 P 逐个下载音频并转写，再按顺序合并
+                whisper_by_page: dict[int, dict] = {}
+                for page in bili_pages_to_transcribe:
+                    raise_if_cancel_requested(task)
+                    set_progress(
+                        task, 3, "准备音频", 25, f"正在下载分 P {page.page} 音频"
+                    )
+                    media_path = await video_processor.download_audio(
+                        bilibili_page_url(source_url or "", page.page),
+                        task_id,
+                        cookie,
+                        media_name=f"audio_p{page.page}",
+                    )
+                    raise_if_cancel_requested(task)
+                    set_progress(
+                        task,
+                        4,
+                        "语音转写",
+                        38,
+                        f"正在转写分 P {page.page}（{request.whisper_model} 模型）",
+                    )
+                    whisper_result = await transcriber.transcribe(
+                        media_path,
+                        request.whisper_model,
+                        request.use_gpu,
+                        initial_prompt=title,
+                        cancel_event=task.get("_cancel_event"),
+                    )
+                    raise_if_cancel_requested(task)
+                    whisper_by_page[page.page] = whisper_result
+                    task["logs"].append(
+                        f"分 P {page.page} 语音转写完成：{len(whisper_result['segments'])} 段，"
+                        f"设备 {whisper_result['device']}"
+                    )
+                    if whisper_result["model"] != whisper_result["requested_model"]:
+                        task["logs"].append(
+                            f"所选 Whisper {whisper_result['requested_model']} 未缓存或无法加载，"
+                            f"已自动降级为本机缓存的 {whisper_result['model']}"
+                        )
+                if subtitle_outcome is not None and subtitle_outcome.pages:
+                    merged_segments, language = merge_bilibili_pages(
+                        subtitle_outcome.pages,
+                        dict(subtitle_outcome.subtitle_by_page),
+                        whisper_by_page,
+                    )
+                else:
+                    merged_segments = [
+                        seg
+                        for whisper in whisper_by_page.values()
+                        for seg in (whisper.get("segments") or [])
+                    ]
+                    language = next(
+                        (
+                            str(whisper.get("language") or "zh")
+                            for whisper in whisper_by_page.values()
+                        ),
+                        "zh",
+                    )
+                transcript_result = {
+                    "segments": merged_segments,
+                    "language": language,
+                    "source": "bilibili_multi_page",
+                }
+                if not info.get("duration"):
+                    info["duration"] = sum(
+                        float(whisper.get("duration") or 0)
+                        for whisper in whisper_by_page.values()
+                    )
+                task["logs"].append(f"分 P 转录合并完成：共 {len(merged_segments)} 段")
+            elif transcript_result is None:
+                set_progress(task, 3, "准备音频", 25, "正在准备音频")
+                reused_audio = None
+                if resume_dir:
+                    reused_audio = next(
+                        (path for path in resume_dir.glob("audio.*") if path.is_file()), None
+                    )
+                if reused_audio:
+                    media_path = reused_audio
+                    task["logs"].append(f"复用已有音频：{reused_audio.name}")
+                elif is_local:
+                    media_path = Path(uploaded_path)
+                else:
+                    media_path = await video_processor.download_audio(
+                        source_url or "", task_id, cookie
+                    )
+                raise_if_cancel_requested(task)
+                set_progress(
+                    task,
+                    4,
+                    "语音转写",
+                    38,
+                    f"正在加载 faster-whisper {request.whisper_model}（未缓存时可能下载模型）",
                 )
-            if reused_audio:
-                media_path = reused_audio
-                task["logs"].append(f"复用已有音频：{reused_audio.name}")
-            elif is_local:
-                media_path = Path(uploaded_path)
-            else:
-                media_path = await video_processor.download_audio(
-                    source_url or "", task_id, cookie
+                whisper_result = await transcriber.transcribe(
+                    media_path,
+                    request.whisper_model,
+                    request.use_gpu,
+                    initial_prompt=title,
+                    cancel_event=task.get("_cancel_event"),
                 )
-            raise_if_cancel_requested(task)
-            set_progress(
-                task,
-                4,
-                "语音转写",
-                38,
-                f"正在加载 faster-whisper {request.whisper_model}（未缓存时可能下载模型）",
-            )
-            whisper_result = await transcriber.transcribe(
-                media_path,
-                request.whisper_model,
-                request.use_gpu,
-                initial_prompt=title,
-            )
-            raise_if_cancel_requested(task)
-            transcript_result = {
-                "segments": whisper_result["segments"],
-                "language": whisper_result["language"],
-                "source": "faster_whisper",
-            }
-            if not info.get("duration"):
-                info["duration"] = whisper_result["duration"]
-            task["logs"].append(
-                f"语音转写完成：{len(whisper_result['segments'])} 段，设备 {whisper_result['device']}"
-            )
-            if whisper_result["model"] != whisper_result["requested_model"]:
+                raise_if_cancel_requested(task)
+                transcript_result = {
+                    "segments": whisper_result["segments"],
+                    "language": whisper_result["language"],
+                    "source": "faster_whisper",
+                }
+                if not info.get("duration"):
+                    info["duration"] = whisper_result["duration"]
                 task["logs"].append(
-                    f"所选 Whisper {whisper_result['requested_model']} 未缓存或无法加载，"
-                    f"已自动降级为本机缓存的 {whisper_result['model']}"
+                    f"语音转写完成：{len(whisper_result['segments'])} 段，设备 {whisper_result['device']}"
                 )
+                if whisper_result["model"] != whisper_result["requested_model"]:
+                    task["logs"].append(
+                        f"所选 Whisper {whisper_result['requested_model']} 未缓存或无法加载，"
+                        f"已自动降级为本机缓存的 {whisper_result['model']}"
+                    )
 
         segments: list[TranscriptSegment] = transcript_result["segments"]
         if not segments:

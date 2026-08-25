@@ -18,7 +18,7 @@
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
-                <h1>VideoToNo <span id="appVersion" class="app-version">v1.1.8</span></h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.2.0</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
@@ -100,6 +100,10 @@
                     <option value="turbo">turbo（高精度，需更多内存）</option>
                 </select>
             </label>
+            <div class="manual-model-row">
+                <button id="manualModelBtn" class="button ghost compact-button" type="button">手动导入模型</button>
+                <small>大模型下载慢或反复失败？手动下载后放入指定文件夹即可</small>
+            </div>
             <label class="check-field">
                 <input type="checkbox" id="useGpu">
                 <span>启用 NVIDIA GPU 加速</span>
@@ -324,6 +328,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260824-1"></script>
+<script src="script.js?v=20260825-2"></script>
 </body>
 </html>

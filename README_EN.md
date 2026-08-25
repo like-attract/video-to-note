@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.1.8</h1>
+<h1 align="center">VideoToNo v1.2.0</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,16 +14,17 @@
 
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douyin, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-## 🆕 What's New (v1.1.7 → v1.1.8)
+## 🆕 What's New (v1.1.8 → v1.2.0)
 
-- Isolate local services by both run mode and application version, so a new build cannot reuse an old backend and stale frontend
-- Add a bounded, scrollable recent-task list for long histories
-- Remove duplicate author, publish time, duration, and transcript-source metadata from faithful notes
-- Make custom Base URL and model connection failures actionable by distinguishing key, endpoint, model, network, and timeout problems
+- **Bilibili multi-part videos**: pasting a multi-P link (without `?p`) now merges **all parts into one note**, with `【P1 part-name】` markers per part and a continuous timeline; a link with `?p=N` processes only that part (previously only the first part was recognized)
+- **Cancel now actually works**: Whisper transcription uses cooperative per-segment abort — after cancel, the task stops at the end of the current audio segment instead of waiting for the whole file
+- **False-positive fix**: when logged in but the video simply has no AI subtitles, the log no longer wrongly asks for SESSDATA; subtitle API errors are now reported accurately
+- **Manual Whisper model import**: when downloads are slow or repeatedly fail, open the import folder from the UI, drop the model files in, and it is recognized automatically
 
 <details>
-<summary>Previous releases (v1.1.7 and earlier)</summary>
+<summary>Previous releases (v1.1.8 and earlier)</summary>
 
+- **v1.1.8**: run-mode & app-version service isolation, recent-task scrollbar, faithful-note metadata de-duplication, custom Base URL diagnostics
 - **v1.1.7**: single public Douyin links, browser-verification fallback, transcript reuse, and cancelled-task deletion.
 - **v1.1.6**: persistent Whisper download confirmation and packaged custom-workspace fixes.
 - **v1.1.5**: stale-page, MCP SSE, and startup-warning fixes.
@@ -48,7 +49,7 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douy
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.1.8-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.2.0-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
@@ -182,6 +183,16 @@ The MCP server automatically scans ports 8000–8019 to locate a running VideoTo
 Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk. Downloads use the **hf-mirror.com mirror** by default with resume and retry support; set `HF_ENDPOINT` to switch sources, for example `HF_ENDPOINT=https://huggingface.co` for the official host. If downloads still fail, check network connectivity, proxy settings, and write access to the cache directory.
 
 The app disables Hugging Face's Xet download backend by default and uses regular HTTP downloads to avoid CAS reconstruction failures on some Windows networks. If the selected model is incomplete but a usable `base` model is already cached, the job falls back to `base` and records that decision in the task log rather than waiting indefinitely for a weight download.
+
+### What if large models (medium and above) keep failing to download?
+
+Large models are big (medium ≈ 1.5 GB) and prone to interruptions on unstable networks. Besides retrying (resume supported), you can import a model manually:
+
+1. Pick the model under the transcription settings and click "**手动导入模型**" (Import model manually). The app opens the import folder (`workspace/_model_cache/manual/<model>/`);
+2. Download the model's 4 files in a browser: `config.json`, `model.bin`, `tokenizer.json`, `vocabulary.txt` from `https://hf-mirror.com/Systran/faster-whisper-<model>/tree/main`;
+3. Drop the 4 files into that folder unchanged. The app detects them within seconds and marks the model as cached.
+
+Downloads and cached files are verified for integrity; corrupt leftovers from interrupted downloads are cleaned up and re-downloaded automatically.
 
 ### Why is CPU transcription slower than the video duration?
 

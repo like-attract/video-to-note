@@ -13,8 +13,8 @@ import urllib.request
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator
-from urllib.parse import urlencode, urlparse
+from typing import Any, Iterator, Sequence
+from urllib.parse import parse_qs, urlencode, urlparse, urlunsplit
 
 import yt_dlp
 
@@ -34,6 +34,102 @@ class SubtitleResult:
     segments: list[TranscriptSegment]
     language: str
     source: str
+
+
+@dataclass(frozen=True)
+class BiliPage:
+    """B 站分 P：页码（1 起）、分 P 名、cid（该 P 独立媒体/字幕 id）、时长。"""
+
+    page: int
+    part: str
+    cid: int
+    duration: int
+
+
+@dataclass(frozen=True)
+class BiliSubtitleOutcome:
+    """B 站 AI 字幕抓取结果：成功时 result 非空；失败时 reason 说明原因，
+    避免把「没填凭据」与「视频没有字幕」两种失败混为一谈。
+
+    reason: ok | partial | credentials_missing | no_track | error | empty
+
+    多分 P 视频按链接 `?p=N` 或全部 P 处理：
+    - total_pages：视频全部分 P 数
+    - pages：本次选中的分 P（顺序），subtitle_by_page：有 AI 字幕的分 P
+    - pages_to_transcribe：没有 AI 字幕、需要语音转写的分 P
+    """
+
+    result: SubtitleResult | None
+    reason: str
+    detail: str = ""
+    title: str = ""
+    total_pages: int = 0
+    pages: tuple[BiliPage, ...] = ()
+    subtitle_by_page: tuple[tuple[int, SubtitleResult], ...] = ()
+    pages_to_transcribe: tuple[BiliPage, ...] = ()
+
+
+def bilibili_page_url(url: str, page: int) -> str:
+    """给 B 站链接补/改 ?p=N（保留其他查询参数）。"""
+    parsed = urlparse(url)
+    query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
+    query["p"] = str(page)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
+
+
+def _page_requested(url: str) -> int:
+    """从链接解析 ?p=N；没有或无效返回 0（表示全部）。"""
+    try:
+        return int(str(parse_qs(urlparse(url).query).get("p", [""])[-1] or "") or 0)
+    except (ValueError, IndexError):
+        return 0
+
+
+def merge_bilibili_pages(
+    selected_pages: Sequence[BiliPage],
+    subtitle_by_page: dict[int, SubtitleResult],
+    whisper_by_page: dict[int, dict[str, Any]],
+) -> tuple[list[TranscriptSegment], str]:
+    """按分 P 顺序把各 P 的 AI 字幕 / 语音转写合并为统一时间轴。
+
+    每个分 P 的片段时间戳向前序分 P 累计时长偏移，时间锚点因此连贯；
+    多分 P 时每个分 P 的首段文本前加「【P{n} 分P名】」标记，便于 LLM 区分。
+    返回 (合并片段, 首选语言)。
+    """
+    merged: list[TranscriptSegment] = []
+    language = "zh"
+    cumulative = 0.0
+    first = True
+    multi = len(selected_pages) > 1
+    for page in selected_pages:
+        segment_items: list[TranscriptSegment] = []
+        lang_hint = ""
+        if page.page in subtitle_by_page:
+            sub = subtitle_by_page[page.page]
+            segment_items = sub.segments
+            lang_hint = sub.language
+        elif page.page in whisper_by_page:
+            whisper = whisper_by_page[page.page]
+            segment_items = whisper.get("segments") or []
+            lang_hint = str(whisper.get("language") or "zh")
+        if segment_items and first:
+            language = lang_hint or language
+            first = False
+        if segment_items:
+            marker = f"【P{page.page} {page.part}】"
+            for index, seg in enumerate(segment_items):
+                prefix = f"{marker} " if (multi and index == 0) else ""
+                merged.append(
+                    TranscriptSegment(
+                        max(0.0, cumulative + seg.start),
+                        max(0.0, cumulative + seg.end),
+                        prefix + seg.text,
+                    )
+                )
+        cumulative += float(page.duration or 0)
+    return merged, language
 
 
 _EMBEDDED_LINK_RE = re.compile(
@@ -154,38 +250,138 @@ class VideoProcessor:
         self,
         url: str,
         cookie: dict[str, str] | None = None,
-    ) -> SubtitleResult | None:
-        """B 站 AI 字幕专属通道。
+    ) -> BiliSubtitleOutcome:
+        """B 站 AI 字幕专属通道（支持多分 P）。
 
         yt-dlp 的 bilibili 提取器不暴露 AI 字幕（ai-*）轨道，这里直调
         player API 获取字幕清单并下载。需要登录凭据（SESSDATA），下载
         字幕文件时需携带 Origin 头。
+
+        多分 P 视频：链接带 ?p=N 则只处理该分 P，否则处理全部分 P。返回
+        BiliSubtitleOutcome 而非裸 None：调用方需要区分「凭据缺失」、「视频
+        没有字幕」等不同原因，也能知道哪些分 P 需要语音转写补齐。
         """
         match = re.search(r"BV[0-9A-Za-z]{10}", url)
-        if not match or not self._cookie_header(cookie):
-            return None
-        try:
+        if not match:
+            return BiliSubtitleOutcome(None, "no_track", "未解析到视频 BV 号")
+        bvid = match.group(0)
+        headers = {
+            "User-Agent": VideoProcessor.BILI_USER_AGENT,
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
+        }
+        cookie_header = self._cookie_header(cookie)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        view = await asyncio.to_thread(
+            self._bilibili_get_json,
+            "https://api.bilibili.com/x/web-interface/view",
+            {"bvid": bvid},
+            headers,
+        )
+        view_data = view.get("data") or {}
+        pages = [
+            BiliPage(
+                page=int(item.get("page") or 0),
+                part=str(item.get("part") or f"P{item.get('page')}"),
+                cid=int(item.get("cid") or 0),
+                duration=int(item.get("duration") or 0),
+            )
+            for item in (view_data.get("pages") or [])
+            if item.get("cid")
+        ]
+        if not pages:
+            return BiliSubtitleOutcome(
+                None, "no_track", "接口未返回分 P 信息（网络或风控异常）"
+            )
+        title = str(view_data.get("title") or "")
+        p_param = _page_requested(url)
+        if p_param > 0:
+            selected = [page for page in pages if page.page == p_param] or list(pages)
+        else:
+            selected = list(pages)
+        if not self._cookie_header(cookie):
+            return BiliSubtitleOutcome(
+                None,
+                "credentials_missing",
+                title=title,
+                total_pages=len(pages),
+                pages=tuple(selected),
+                pages_to_transcribe=tuple(selected),
+            )
+        subtitle_by_page: dict[int, SubtitleResult] = {}
+        pages_to_transcribe: list[BiliPage] = []
+        first_error = ""
+        saw_track_without_segments = False
+        for page in selected:
             track = await asyncio.to_thread(
-                self._bilibili_subtitle_track, match.group(0), cookie
+                self._bilibili_subtitle_track, bvid, page.cid, cookie
             )
             if not track:
-                return None
-            payload = await asyncio.to_thread(
-                self._download_text,
-                track["url"],
-                url,
-                cookie,
-                {"Origin": "https://www.bilibili.com"},
+                pages_to_transcribe.append(page)
+                continue
+            try:
+                payload = await asyncio.to_thread(
+                    self._download_text,
+                    track["url"],
+                    url,
+                    cookie,
+                    {"Origin": "https://www.bilibili.com"},
+                )
+                segments = parse_subtitle_payload(payload, "json")
+            except Exception as exc:
+                pages_to_transcribe.append(page)
+                first_error = first_error or f"{type(exc).__name__}: {exc}"
+                continue
+            if not segments:
+                pages_to_transcribe.append(page)
+                saw_track_without_segments = True
+                continue
+            subtitle_by_page[page.page] = SubtitleResult(
+                segments=segments,
+                language=track["language"],
+                source="bilibili_ai_subtitle",
             )
-            segments = parse_subtitle_payload(payload, "json")
-        except Exception:
-            return None
-        if not segments:
-            return None
-        return SubtitleResult(
-            segments=segments,
-            language=track["language"],
-            source="bilibili_ai_subtitle",
+        if subtitle_by_page:
+            merged, language = merge_bilibili_pages(selected, subtitle_by_page, {})
+            return BiliSubtitleOutcome(
+                SubtitleResult(
+                    segments=merged, language=language, source="bilibili_ai_subtitle"
+                ),
+                "partial" if pages_to_transcribe else "ok",
+                detail=first_error,
+                title=title,
+                total_pages=len(pages),
+                pages=tuple(selected),
+                subtitle_by_page=tuple(subtitle_by_page.items()),
+                pages_to_transcribe=tuple(pages_to_transcribe),
+            )
+        if first_error:
+            return BiliSubtitleOutcome(
+                None,
+                "error",
+                first_error,
+                title=title,
+                total_pages=len(pages),
+                pages=tuple(selected),
+                pages_to_transcribe=tuple(selected),
+            )
+        if saw_track_without_segments:
+            return BiliSubtitleOutcome(
+                None,
+                "empty",
+                title=title,
+                total_pages=len(pages),
+                pages=tuple(selected),
+                pages_to_transcribe=tuple(selected),
+            )
+        return BiliSubtitleOutcome(
+            None,
+            "no_track",
+            title=title,
+            total_pages=len(pages),
+            pages=tuple(selected),
+            pages_to_transcribe=tuple(selected),
         )
 
     BILI_SUBTITLE_LANGUAGES = (
@@ -203,23 +399,17 @@ class VideoProcessor:
 
     @classmethod
     def _bilibili_subtitle_track(
-        cls, bvid: str, cookie: dict[str, str] | None
+        cls, bvid: str, cid: int, cookie: dict[str, str] | None
     ) -> dict[str, Any] | None:
+        """拉取某个分 P（cid）的字幕清单，返回首个可用 AI 字幕轨。"""
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+            "User-Agent": VideoProcessor.BILI_USER_AGENT,
             "Referer": "https://www.bilibili.com/",
             "Origin": "https://www.bilibili.com",
         }
         cookie_header = cls._cookie_header(cookie)
         if cookie_header:
             headers["Cookie"] = cookie_header
-        view = cls._bilibili_get_json(
-            "https://api.bilibili.com/x/web-interface/view", {"bvid": bvid}, headers
-        )
-        cid = (view.get("data") or {}).get("cid")
-        if not cid:
-            return None
         player = cls._bilibili_get_json(
             "https://api.bilibili.com/x/player/wbi/v2",
             {"bvid": bvid, "cid": cid},
@@ -273,7 +463,11 @@ class VideoProcessor:
         return signed
 
     async def download_audio(
-        self, url: str, task_id: str, cookie: dict[str, str] | None = None
+        self,
+        url: str,
+        task_id: str,
+        cookie: dict[str, str] | None = None,
+        media_name: str = "audio",
     ) -> Path:
         task_dir = self._task_dir(task_id)
 
@@ -284,13 +478,13 @@ class VideoProcessor:
                     cookie,
                     cookie_domain=self._cookie_domain_for_url(url),
                     format="bestaudio/best",
-                    outtmpl=str(task_dir / "audio.%(ext)s"),
+                    outtmpl=str(task_dir / f"{media_name}.%(ext)s"),
                     noplaylist=True,
                 ) as ydl:
                     ydl.extract_info(url, download=True)
                 matches = [
                     item
-                    for item in task_dir.glob("audio.*")
+                    for item in task_dir.glob(f"{media_name}.*")
                     if item.suffix not in {".part", ".ytdl"}
                 ]
                 if matches:

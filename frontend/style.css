@@ -215,6 +215,16 @@ button, select { cursor: pointer; }
 .field:first-of-type { margin-top: 0; }
 .field small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 
+.manual-model-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 9px;
+}
+
+.manual-model-row small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.manual-model-row .compact-button { flex-shrink: 0; }
+
 input, select {
     width: 100%;
     min-height: 40px;

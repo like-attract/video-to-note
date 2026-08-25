@@ -72,7 +72,7 @@ def test_check_for_updates_opens_new_release_after_confirmation(monkeypatch) -> 
     monkeypatch.setattr(
         launcher,
         "latest_release_info",
-        lambda: {"tag_name": "v1.2.0", "html_url": "https://github.com/example/release"},
+        lambda: {"tag_name": "v9.9.9", "html_url": "https://github.com/example/release"},
     )
     monkeypatch.setattr(launcher, "show_update_message", lambda *args, **kwargs: 6)
     monkeypatch.setattr(launcher.webbrowser, "open", opened.append)

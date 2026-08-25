@@ -3,7 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from backend.video_processor import VideoProcessor, VideoSource, normalize_video_input
+from backend.video_processor import (
+    BiliPage,
+    SubtitleResult,
+    VideoProcessor,
+    VideoSource,
+    bilibili_page_url,
+    merge_bilibili_pages,
+    normalize_video_input,
+)
+from backend.transcript import TranscriptSegment
 
 
 def test_detect_known_sources(tmp_path: Path) -> None:
@@ -213,3 +222,182 @@ def test_cookie_header_omits_empty_values() -> None:
         {"sessdata": "secret", "bili_jct": "", "buvid3": "device"}
     )
     assert header == "SESSDATA=secret; buvid3=device"
+
+
+# ---- B 站 AI 字幕抓取与多分 P ----
+
+_FAKE_VIEW = {
+    "code": 0,
+    "data": {
+        "title": "分P测试视频",
+        "pages": [
+            {"page": 1, "part": "第一部分", "cid": 101, "duration": 60},
+            {"page": 2, "part": "第二部分", "cid": 102, "duration": 90},
+        ],
+    },
+}
+
+_SUBTITLE_JSON = '{"body": [{"from": 0, "to": 5, "content": "字幕内容"}, {"from": 5, "to": 9, "content": "继续"}]}'
+
+
+def _monkeypatch_view(monkeypatch: pytest.MonkeyPatch, view: dict) -> None:
+    monkeypatch.setattr(
+        VideoProcessor,
+        "_bilibili_get_json",
+        staticmethod(lambda url, params, headers: view),
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_reports_missing_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt", cookie=None
+    )
+    assert outcome.result is None
+    assert outcome.reason == "credentials_missing"
+    assert outcome.total_pages == 2
+    assert [p.page for p in outcome.pages_to_transcribe] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_reports_no_track_when_logged_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
+    monkeypatch.setattr(
+        processor, "_bilibili_subtitle_track", lambda bvid, cid, cookie: None
+    )
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt", cookie={"sessdata": "abc"}
+    )
+    assert outcome.result is None
+    assert outcome.reason == "no_track"
+    assert [p.page for p in outcome.pages_to_transcribe] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_reports_download_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
+    monkeypatch.setattr(
+        processor,
+        "_bilibili_subtitle_track",
+        lambda bvid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
+    )
+
+    def raise_error(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(processor, "_download_text", raise_error)
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt", cookie={"sessdata": "abc"}
+    )
+    assert outcome.result is None
+    assert outcome.reason == "error"
+    assert "boom" in outcome.detail
+    assert [p.page for p in outcome.pages_to_transcribe] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_merges_all_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
+    monkeypatch.setattr(
+        processor,
+        "_bilibili_subtitle_track",
+        lambda bvid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
+    )
+    monkeypatch.setattr(
+        processor, "_download_text", lambda *args, **kwargs: _SUBTITLE_JSON
+    )
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt", cookie={"sessdata": "abc"}
+    )
+    assert outcome.reason == "ok"
+    assert outcome.result is not None
+    assert outcome.total_pages == 2
+    assert outcome.pages_to_transcribe == ()
+    merged = outcome.result.segments
+    assert len(merged) == 4
+    assert merged[0].start == 0.0
+    assert merged[2].start == 60.0
+    assert merged[2].text.startswith("【P2 第二部分】")
+    assert merged[0].text.startswith("【P1 第一部分】")
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_respects_p_param(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
+
+    def fake_track(bvid, cid, cookie):
+        return {"language": "ai-zh", "url": "https://example.com/sub.json"}
+
+    monkeypatch.setattr(processor, "_bilibili_subtitle_track", fake_track)
+    monkeypatch.setattr(
+        processor, "_download_text", lambda *args, **kwargs: _SUBTITLE_JSON
+    )
+    # ?p=2 只处理第二个分P
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt?p=2", cookie={"sessdata": "abc"}
+    )
+    assert outcome.total_pages == 2
+    assert [p.page for p in outcome.pages] == [2]
+    assert outcome.result is not None
+    assert len(outcome.result.segments) == 2
+
+
+def test_bilibili_page_url_keeps_query_and_sets_p() -> None:
+    assert (
+        bilibili_page_url("https://www.bilibili.com/video/BV1xM4y1z7Kt", 2)
+        == "https://www.bilibili.com/video/BV1xM4y1z7Kt?p=2"
+    )
+    assert "p=3" in bilibili_page_url(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt?p=1&t=10", 3
+    )
+
+
+def test_merge_bilibili_pages_offsets_and_labels() -> None:
+    pages = [
+        BiliPage(page=1, part="第一部分", cid=101, duration=60),
+        BiliPage(page=2, part="第二部分", cid=102, duration=90),
+    ]
+    sub1 = SubtitleResult(
+        [TranscriptSegment(0, 10, "P1开头"), TranscriptSegment(10, 20, "P1结尾")],
+        "zh-CN",
+        "bilibili_ai_subtitle",
+    )
+    whisper2 = {
+        "segments": [TranscriptSegment(0, 5, "P2开头"), TranscriptSegment(5, 8, "P2结尾")],
+        "language": "zh",
+    }
+    merged, language = merge_bilibili_pages(pages, {1: sub1}, {2: whisper2})
+    assert language == "zh-CN"
+    assert merged[0].text.startswith("【P1 第一部分】")
+    assert merged[0].start == 0.0
+    assert merged[2].start == 60.0
+    assert merged[2].text.startswith("【P2 第二部分】 P2开头")
+    assert merged[3].start == 65.0
+    assert merged[3].text == "P2结尾"
+
+
+def test_merge_bilibili_pages_single_no_marker() -> None:
+    pages = [BiliPage(page=1, part="唯一", cid=101, duration=30)]
+    whisper = {"segments": [TranscriptSegment(0, 4, "台词")]}
+    merged, _ = merge_bilibili_pages(pages, {}, {1: whisper})
+    assert merged[0].text == "台词"
