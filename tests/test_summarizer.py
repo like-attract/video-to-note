@@ -11,6 +11,21 @@ from backend.llm_summarizer import (
 from backend.transcript import TranscriptSegment
 
 
+def _stream_response(content: str | None, finish_reason: str = "stop"):
+    """构造一个假的大模型流式响应（_complete 现按流式逐块读取）。"""
+    async def gen():
+        yield SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=content),
+                    finish_reason=finish_reason,
+                )
+            ]
+        )
+
+    return gen()
+
+
 def test_note_prompt_forbids_invented_timestamps() -> None:
     prompt = LLMSummarizer._note_prompt(
         "测试视频",
@@ -167,9 +182,7 @@ async def test_gpt5_chat_completion_uses_supported_token_parameter() -> None:
 
     async def create(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="摘要"))]
-        )
+        return _stream_response("摘要")
 
     summarizer = object.__new__(LLMSummarizer)
     summarizer.model_type = "openai"
@@ -190,9 +203,7 @@ async def test_custom_deepseek_uses_explicit_high_thinking_with_safe_output_budg
 
     async def create(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="摘要"))]
-        )
+        return _stream_response("摘要")
 
     summarizer = object.__new__(LLMSummarizer)
     summarizer.model_type = "custom"
@@ -241,14 +252,9 @@ async def test_empty_thinking_response_retries_with_thinking_disabled() -> None:
 
     async def create(**kwargs):
         requests.append(kwargs)
-        content = None if len(requests) == 1 else "重试成功"
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=content), finish_reason="length"
-                )
-            ]
-        )
+        if len(requests) == 1:
+            return _stream_response(None, "length")
+        return _stream_response("重试成功")
 
     summarizer = object.__new__(LLMSummarizer)
     summarizer.model_type = "glm"
@@ -280,3 +286,72 @@ async def test_empty_thinking_response_retries_with_thinking_disabled() -> None:
     assert summarizer.warnings == [
         "正在补充点评与分析：模型首次未返回正文，已关闭深度思考并重试"
     ]
+
+
+@pytest.mark.asyncio
+async def test_complete_aborts_before_call_when_cancelled() -> None:
+    called = []
+
+    async def create(**kwargs):
+        called.append(kwargs)
+        return _stream_response("摘要")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "glm"
+    summarizer.model = "glm-4.5-flash"
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    import asyncio
+
+    with pytest.raises(asyncio.CancelledError):
+        await summarizer._complete("测试", 800, "high", should_abort=lambda: True)
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_complete_aborts_mid_stream_when_cancelled() -> None:
+    import asyncio
+
+    async def create(**kwargs):
+        async def gen():
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="前"), finish_reason=None)]
+            )
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="后"), finish_reason="stop")]
+            )
+
+        return gen()
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "glm"
+    summarizer.model = "glm-4.5-flash"
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    # 第一个块后置位 should_abort：第二个块读取前应中断
+    state = {"called": 0}
+
+    def should_abort():
+        state["called"] += 1
+        return state["called"] >= 2
+
+    with pytest.raises(asyncio.CancelledError):
+        await summarizer._complete("测试", 800, "high", should_abort=should_abort)
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_aborts_immediately_when_cancelled() -> None:
+    import asyncio
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    segments = [TranscriptSegment(0, 5, "一段内容")]
+
+    with pytest.raises(asyncio.CancelledError):
+        await summarizer.generate_summary(
+            "标题", segments, should_abort=lambda: True
+        )

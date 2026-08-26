@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Sequence
@@ -154,6 +155,7 @@ class LLMSummarizer:
         style: str = "detailed",
         reasoning_effort: str = "auto",
         progress_callback: ProgressCallback | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> str:
         if not segments:
             raise ValueError("Cannot summarize an empty transcript")
@@ -161,6 +163,8 @@ class LLMSummarizer:
             raise ValueError(f"Unsupported summary style: {style}")
         if reasoning_effort not in {"auto", "off", "high", "max"}:
             raise ValueError(f"Unsupported reasoning effort: {reasoning_effort}")
+        if should_abort is not None and should_abort():
+            raise asyncio.CancelledError("任务已取消")
 
         await self._report_progress(progress_callback, 2, "正在分析转录内容")
         chunks = chunk_segments(segments, max_characters=SUMMARY_CHUNK_CHARACTERS)
@@ -169,6 +173,8 @@ class LLMSummarizer:
         else:
             condensed_chunks: list[str] = []
             for index, chunk in enumerate(chunks, start=1):
+                if should_abort is not None and should_abort():
+                    raise asyncio.CancelledError("任务已取消")
                 chunk_progress = 5 + int(52 * (index - 1) / len(chunks))
                 chunk_stage = f"正在整理第 {index}/{len(chunks)} 个转录片段"
                 await self._report_progress(
@@ -184,6 +190,7 @@ class LLMSummarizer:
                         progress_callback=progress_callback,
                         progress=chunk_progress,
                         stage=chunk_stage,
+                        should_abort=should_abort,
                     )
                 )
             await self._report_progress(
@@ -195,6 +202,7 @@ class LLMSummarizer:
                 reasoning_effort,
                 style,
                 progress_callback,
+                should_abort,
             )
             source = "\n\n".join(
                 f"### 片段 {index}\n{note}"
@@ -212,6 +220,7 @@ class LLMSummarizer:
             progress_callback=progress_callback,
             progress=draft_progress,
             stage=draft_stage,
+            should_abort=should_abort,
         )
         await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
         if style == "detailed":
@@ -225,6 +234,7 @@ class LLMSummarizer:
                 progress_callback=progress_callback,
                 progress=analysis_progress,
                 stage=analysis_stage,
+                should_abort=should_abort,
             )
             draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
         await self._report_progress(progress_callback, 99, "正在保存笔记")
@@ -237,15 +247,20 @@ class LLMSummarizer:
         reasoning_effort: str,
         style: str,
         progress_callback: ProgressCallback | None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> list[str]:
         level = 0
         while sum(len(note) for note in notes) > MERGE_INPUT_CHARACTERS:
+            if should_abort is not None and should_abort():
+                raise asyncio.CancelledError("任务已取消")
             groups = self._group_notes(notes, MERGE_INPUT_CHARACTERS)
             if len(groups) >= len(notes):
                 break
             level += 1
             merged: list[str] = []
             for index, group in enumerate(groups, start=1):
+                if should_abort is not None and should_abort():
+                    raise asyncio.CancelledError("任务已取消")
                 merge_progress = min(75, 61 + level * 4 + int(4 * index / len(groups)))
                 merge_stage = f"正在归并第 {level} 层内容 {index}/{len(groups)} 组"
                 await self._report_progress(
@@ -261,6 +276,7 @@ class LLMSummarizer:
                         progress_callback=progress_callback,
                         progress=merge_progress,
                         stage=merge_stage,
+                        should_abort=should_abort,
                     )
                 )
             notes = merged
@@ -306,6 +322,7 @@ class LLMSummarizer:
         progress_callback: ProgressCallback | None = None,
         progress: int = 0,
         stage: str = "模型调用",
+        should_abort: Callable[[], bool] | None = None,
     ) -> str:
         request: dict[str, Any] = {
             "model": self.model,
@@ -332,8 +349,34 @@ class LLMSummarizer:
             )
         self._apply_reasoning(request, effort)
 
-        response = await self.client.chat.completions.create(**request)
-        content = response.choices[0].message.content if response.choices else None
+        if should_abort is not None and should_abort():
+            raise asyncio.CancelledError("任务已取消")
+
+        # 流式读取：既能在模型开始返回后逐块更新，也能在取消时立即中止本次请求
+        stream = await self.client.chat.completions.create(**request, stream=True)
+        parts: list[str] = []
+        finish_reason = "unknown"
+        try:
+            async for chunk in stream:
+                if should_abort is not None and should_abort():
+                    raise asyncio.CancelledError("任务已取消")
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                content = getattr(delta, "content", None) if delta is not None else None
+                if content:
+                    parts.append(content)
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                closed = close()
+                if inspect.isawaitable(closed):
+                    await closed
+
+        content = "".join(parts)
         if not content:
             if retry_empty and effort != "off" and self._can_control_reasoning():
                 warning = f"{stage}：模型首次未返回正文，已关闭深度思考并重试"
@@ -347,8 +390,8 @@ class LLMSummarizer:
                     progress_callback=progress_callback,
                     progress=progress,
                     stage=stage,
+                    should_abort=should_abort,
                 )
-            finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
             raise RuntimeError(
                 f"模型未返回正文（finish_reason={finish_reason}）。"
                 "可尝试关闭深度思考、缩短转录或更换模型。"

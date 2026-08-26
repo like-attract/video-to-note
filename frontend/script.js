@@ -783,7 +783,7 @@ function updateFileInfo() {
     const file = byId('localFile').files[0];
     byId('fileInfo').textContent = file
         ? `${file.name} · ${formatBytes(file.size)}`
-        : '支持常见视频格式，单个文件不超过 500 MB';
+        : '支持常见视频格式，单个文件不超过 2 GB；大文件未勾选截图时自动只保留音频'
 }
 
 function toggleScreenshotSettings() {
@@ -979,7 +979,7 @@ async function startSummary(options = {}) {
 
         if (request.sourceType === 'local' && !resumeTaskId) {
             addLog('正在上传本地视频');
-            const uploadResult = await uploadLocalFile(request.file);
+            const uploadResult = await uploadLocalFile(request.file, byId('includeScreenshots').checked);
             videoUrl = uploadResult.file_path;
             uploadTaskId = uploadResult.task_id;
             addLog(`上传完成：${uploadResult.filename || request.file.name}`, 'success');
@@ -1099,9 +1099,10 @@ function buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId = null, force
     return config;
 }
 
-async function uploadLocalFile(file) {
+async function uploadLocalFile(file, includeScreenshots = false) {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('include_screenshots', includeScreenshots ? '1' : '0');
     const response = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
     return readResponse(response, '上传失败');
 }
@@ -1289,7 +1290,7 @@ async function cancelCurrentTask() {
         } else {
             setTaskState('processing', '取消中');
             byId('networkState').textContent = '等待当前步骤停止';
-            addLog('取消请求已发送；转写会在当前音频段结束后停止，其他阻塞步骤返回后停止', 'warning');
+            addLog('取消请求已发送；正在停止当前下载 / 转写 / 生成（转写最多等当前音频段结束）', 'warning');
             showToast('取消请求已发送', 'info');
         }
     } catch (error) {

@@ -13,7 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 from urllib.parse import parse_qs, urlencode, urlparse, urlunsplit
 
 import yt_dlp
@@ -468,18 +468,27 @@ class VideoProcessor:
         task_id: str,
         cookie: dict[str, str] | None = None,
         media_name: str = "audio",
+        should_abort: Callable[[], bool] | None = None,
     ) -> Path:
         task_dir = self._task_dir(task_id)
+
+        def _abort_hook(_status: dict[str, Any]) -> None:
+            if should_abort is not None and should_abort():
+                raise asyncio.CancelledError("任务已取消")
 
         def _download() -> Path:
             ydl_error: Exception = RuntimeError("yt-dlp completed without producing an audio file")
             try:
+                extra: dict[str, Any] = {}
+                if should_abort is not None:
+                    extra["progress_hooks"] = [_abort_hook]
                 with self._ydl(
                     cookie,
                     cookie_domain=self._cookie_domain_for_url(url),
                     format="bestaudio/best",
                     outtmpl=str(task_dir / f"{media_name}.%(ext)s"),
                     noplaylist=True,
+                    **extra,
                 ) as ydl:
                     ydl.extract_info(url, download=True)
                 matches = [
@@ -504,18 +513,30 @@ class VideoProcessor:
         return await asyncio.to_thread(_download)
 
     async def download_preview_video(
-        self, url: str, task_id: str, cookie: dict[str, str] | None = None
+        self,
+        url: str,
+        task_id: str,
+        cookie: dict[str, str] | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> Path:
         task_dir = self._task_dir(task_id)
 
+        def _abort_hook(_status: dict[str, Any]) -> None:
+            if should_abort is not None and should_abort():
+                raise asyncio.CancelledError("任务已取消")
+
         def _download() -> Path:
             try:
+                extra: dict[str, Any] = {}
+                if should_abort is not None:
+                    extra["progress_hooks"] = [_abort_hook]
                 with self._ydl(
                     cookie,
                     cookie_domain=self._cookie_domain_for_url(url),
                     format="worstvideo[height>=360]/bestvideo[height<=720]/worst",
                     outtmpl=str(task_dir / "preview.%(ext)s"),
                     noplaylist=True,
+                    **extra,
                 ) as ydl:
                     ydl.extract_info(url, download=True)
                 matches = [
@@ -538,6 +559,44 @@ class VideoProcessor:
 
         return await asyncio.to_thread(_download)
 
+    @staticmethod
+    def extract_audio_track(source: Path, target: Path) -> Path | None:
+        """用 PyAV 把视频/音频文件的音轨提取为 16kHz 单声道 m4a（aac）。
+
+        供大文件上传时只保留音频（与在线视频一致，减小工作目录体积）。
+        失败或没有音轨时返回 None，调用方保留原文件直接用 faster-whisper 转写。
+        """
+        try:
+            import av  # 截图功能已依赖 PyAV；未安装时返回 None 保持原逻辑
+        except ImportError:
+            return None
+        try:
+            container = av.open(str(source))
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is None:
+                container.close()
+                return None
+            container.seek(0)
+            output = av.open(str(target), "w")
+            output_stream = output.add_stream("aac", rate=16000)
+            resampler = av.AudioResampler(format="fltp", layout="mono", rate=16000)
+            try:
+                for frame in container.decode(stream):
+                    for resampled in resampler.resample(frame):
+                        for packet in output_stream.encode(resampled):
+                            output.mux(packet)
+                for packet in output_stream.encode(None):
+                    output.mux(packet)
+            finally:
+                output.close()
+                container.close()
+            if target.is_file() and target.stat().st_size > 0:
+                return target
+            return None
+        except Exception:
+            target.unlink(missing_ok=True)
+            return None
+
     async def copy_local_media(self, source: Path, task_id: str) -> Path:
         task_dir = self._task_dir(task_id)
         source = source.resolve()
@@ -547,16 +606,24 @@ class VideoProcessor:
         return target
 
     async def extract_frames(
-        self, video_path: Path, task_id: str, interval: int
+        self,
+        video_path: Path,
+        task_id: str,
+        interval: int,
+        should_abort: Callable[[], bool] | None = None,
     ) -> list[Path]:
         if interval <= 0:
             return []
         return await asyncio.to_thread(
-            self._extract_frames_sync, video_path, task_id, interval
+            self._extract_frames_sync, video_path, task_id, interval, should_abort
         )
 
     def _extract_frames_sync(
-        self, video_path: Path, task_id: str, interval: int
+        self,
+        video_path: Path,
+        task_id: str,
+        interval: int,
+        should_abort: Callable[[], bool] | None = None,
     ) -> list[Path]:
         try:
             import av
@@ -573,6 +640,8 @@ class VideoProcessor:
             if duration <= 0:
                 return []
             for timestamp in range(0, int(duration) + 1, interval):
+                if should_abort is not None and should_abort():
+                    raise asyncio.CancelledError("任务已取消")
                 container.seek(int(timestamp * av.time_base), backward=True)
                 frame = next(container.decode(video=0), None)
                 if frame is None:

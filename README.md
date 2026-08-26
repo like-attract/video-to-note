@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.2.0</h1>
+<h1 align="center">VideoToNo v1.2.1</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -11,18 +11,20 @@
 
 <p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ 下载 Windows 便携版</strong></a></p>
 
+<p align="center">🎬 宣传视频：<a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ 交流群：<code>739200648</code></p>
+
 VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、抖音、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
 
-## 🆕 What's New（v1.1.8 → v1.2.0）
+## 🆕 What's New（v1.2.0 → v1.2.1）
 
-- **B 站多分 P 视频**：粘贴多分 P 链接（不带 `?p`）会把整套视频的**全部分 P 合并成一份笔记**，分段带 `【P1 分P名】` 标记、时间轴连续；链接带 `?p=N` 则只处理对应分 P（此前只会识别第一个分 P）
-- **取消真正生效**：语音转写改为按音频段协作式中止，点取消后当前段落结束后立即停止，不再等整段音频转写跑完
-- **修复误报**：已登录 B 站但视频本身没有 AI 字幕时，不再错误提示“需要填写 SESSDATA”；字幕接口异常也会如实显示原因
-- **Whisper 模型手动导入**：模型下载慢/反复失败时，可在界面一键打开导入目录、放入模型文件后自动识别
+- **取消真正立即生效**：LLM 生成改为流式+逐块取消、yt-dlp 下载和 Whisper 模型下载加钩子取消、截图逐帧检查取消——下载/模型下载/生成阶段均可在秒级内停止，转写最多等当前音频段结束
+- **上传上限提升 + 超大文件自动提音频**：本地视频上传上限从 500MB 提升至 2GB；未勾选截图时，≥300MB 的视频会在上传后自动提取 16kHz 音频并清理原视频，工作目录只留音频（和在线视频一致）
+- **Whisper base 模型导入包**：Release 附件附带 `faster-whisper-base.zip`（约 127 MB）及详细手动导入说明，无法自动下载模型的用户可直接使用
 
 <details>
-<summary>历史版本摘要（v1.1.8 及更早）</summary>
+<summary>历史版本摘要（v1.2.0 及更早）</summary>
 
+- **v1.2.0**：B 站多分 P 视频（全部/指定分P合并笔记）、语音转写段粒度取消、B 站无字幕误报修正、Whisper 手动导入模型界面
 - **v1.1.8**：运行模式与应用版本隔离、最近任务滚动条、详细复原元信息去重、自定义 Base URL 错误诊断
 - **v1.1.7**：抖音单条公开分享链接、浏览器验证回退、转写复用和已取消任务删除。
 - **v1.1.6**：Whisper 下载确认记忆和自定义工作目录修复。
@@ -50,7 +52,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.2.0-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.2.1-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；
@@ -220,6 +222,11 @@ VideoToNo 会从 `workspace/<task-id>/task.json` 恢复最近任务。已完成�
 这表示模型这一次真实返回了空正文，并非仅仅是界面显示问题。应用会立即在当前生成阶段提示，并自动关闭深度思考重试一次；若重试后仍无正文，任务会按实际错误状态处理。
 
 </details>
+
+## 🎬 宣传视频与交流群
+
+- 🎬 宣传视频（B 站）：<a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">BV1Qwby6DEu1</a>
+- 👥 QQ 交流群：<code>739200648</code>（欢迎反馈问题、提建议、获取模型附件）
 
 ## 📄 开源许可
 

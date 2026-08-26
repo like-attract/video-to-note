@@ -95,7 +95,7 @@ class WhisperTranscriber:
             raise TranscriptionCancelledError()
         model_to_load = self._preferred_model(model_name)
         cache_key, device = self._ensure_model(
-            WhisperModel, model_name, model_to_load, use_gpu
+            WhisperModel, model_name, model_to_load, use_gpu, cancel_event
         )
         if cancel_event is not None and cancel_event.is_set():
             raise TranscriptionCancelledError()
@@ -142,6 +142,7 @@ class WhisperTranscriber:
         model_name: str,
         model_to_load: str,
         use_gpu: bool,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[tuple[str, str], str]:
         """Load each shared model once, including first-download and GPU fallback."""
         device = "cuda" if use_gpu else "cpu"
@@ -152,13 +153,13 @@ class WhisperTranscriber:
                 return cache_key, device
             try:
                 self._models[cache_key] = self._load_model(
-                    model_class, model_to_load, device, compute_type
+                    model_class, model_to_load, device, compute_type, cancel_event
                 )
                 self._actual_models[cache_key] = model_to_load
             except Exception as gpu_error:
                 if not use_gpu:
                     self._load_cached_base_or_raise(
-                        model_class, cache_key, model_name, device, gpu_error
+                        model_class, cache_key, model_name, device, gpu_error, cancel_event
                     )
                 else:
                     device = "cpu"
@@ -166,12 +167,12 @@ class WhisperTranscriber:
                     if cache_key not in self._models:
                         try:
                             self._models[cache_key] = self._load_model(
-                                model_class, model_to_load, device, "int8"
+                                model_class, model_to_load, device, "int8", cancel_event
                             )
                             self._actual_models[cache_key] = model_to_load
                         except Exception as cpu_error:
                             self._load_cached_base_or_raise(
-                                model_class, cache_key, model_name, device, cpu_error
+                                model_class, cache_key, model_name, device, cpu_error, cancel_event
                             )
         return cache_key, device
 
@@ -181,11 +182,12 @@ class WhisperTranscriber:
         model_name: str,
         device: str,
         compute_type: str,
+        cancel_event: threading.Event | None = None,
     ) -> Any:
         cached_path = self._cached_model_path(model_name)
         if not cached_path and self.download_root:
             # 自建下载（默认 hf-mirror 镜像），避免 huggingface_hub 对镜像的兼容问题
-            cached_path = self._download_model_files(model_name)
+            cached_path = self._download_model_files(model_name, cancel_event)
             # 不要在自建下载失败后再让 huggingface_hub 重复请求同一个地址；
             # 那会把真正的网络/证书错误包装成“找不到 snapshot”。
             if not cached_path and self._last_download_error:
@@ -210,7 +212,9 @@ class WhisperTranscriber:
             ):
                 self._discard_corrupt_model(Path(cached_path))
                 refreshed = (
-                    self._download_model_files(model_name) if self.download_root else None
+                    self._download_model_files(model_name, cancel_event)
+                    if self.download_root
+                    else None
                 )
                 if refreshed:
                     return model_class(str(refreshed), **options)
@@ -218,7 +222,9 @@ class WhisperTranscriber:
 
     WHISPER_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
 
-    def _download_model_files(self, model_name: str) -> Path | None:
+    def _download_model_files(
+        self, model_name: str, cancel_event: threading.Event | None = None
+    ) -> Path | None:
         """下载 Whisper 模型到标准缓存目录结构。
 
         新版 huggingface_hub 校验重定向响应的 X-Repo-Commit 头，hf-mirror
@@ -236,7 +242,9 @@ class WhisperTranscriber:
 
         for candidate in endpoints:
             try:
-                snapshot = self._download_model_files_from_endpoint(model_name, candidate)
+                snapshot = self._download_model_files_from_endpoint(
+                    model_name, candidate, cancel_event
+                )
                 if snapshot:
                     return snapshot
             except Exception as exc:
@@ -244,7 +252,7 @@ class WhisperTranscriber:
         return None
 
     def _download_model_files_from_endpoint(
-        self, model_name: str, endpoint: str
+        self, model_name: str, endpoint: str, cancel_event: threading.Event | None = None
     ) -> Path | None:
         """从单个 Hugging Face endpoint 下载完整快照。"""
         repo = f"Systran/faster-whisper-{model_name}"
@@ -270,11 +278,15 @@ class WhisperTranscriber:
         )
         snapshot.mkdir(parents=True, exist_ok=True)
         for filename in self.WHISPER_MODEL_FILES:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("任务已取消")
             target = snapshot / filename
             # 已有文件必须通过完整性下限校验；损坏/截断的遗留文件会被重新下载
             if self._file_complete(target):
                 continue
-            if not self._download_one_file(f"{base_url}/{filename}", target, headers):
+            if not self._download_one_file(
+                f"{base_url}/{filename}", target, headers, cancel_event
+            ):
                 if self._last_download_error:
                     raise self._last_download_error
                 return None
@@ -282,11 +294,19 @@ class WhisperTranscriber:
             return None
         return snapshot
 
-    def _download_one_file(self, url: str, target: Path, headers: dict[str, str]) -> bool:
+    def _download_one_file(
+        self,
+        url: str,
+        target: Path,
+        headers: dict[str, str],
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
         """单文件下载：断点续传（Range）+ 重试三次 + Content-Length 完整性校验。"""
         part = target.with_suffix(target.suffix + ".part")
         self._last_download_error = None
         for attempt in range(3):
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("任务已取消")
             try:
                 resume = part.stat().st_size if part.is_file() else 0
                 request_headers = dict(headers)
@@ -305,6 +325,8 @@ class WhisperTranscriber:
                     mode = "ab" if resume else "wb"
                     with open(part, mode) as out:
                         while True:
+                            if cancel_event is not None and cancel_event.is_set():
+                                raise asyncio.CancelledError("任务已取消")
                             chunk = response.read(256 * 1024)
                             if not chunk:
                                 break
@@ -337,11 +359,12 @@ class WhisperTranscriber:
         requested_model: str,
         device: str,
         original_error: Exception,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         if requested_model == "base" or not self._cached_model_path("base"):
             raise self._model_load_error(requested_model, original_error) from original_error
         self._models[cache_key] = self._load_model(
-            model_class, "base", device, "int8"
+            model_class, "base", device, "int8", cancel_event
         )
         self._actual_models[cache_key] = "base"
 

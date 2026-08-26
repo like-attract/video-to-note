@@ -401,3 +401,62 @@ def test_merge_bilibili_pages_single_no_marker() -> None:
     whisper = {"segments": [TranscriptSegment(0, 4, "台词")]}
     merged, _ = merge_bilibili_pages(pages, {}, {1: whisper})
     assert merged[0].text == "台词"
+
+
+def test_download_audio_aborts_on_cancel_via_progress_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    processor = VideoProcessor(tmp_path)
+    captured: dict = {}
+
+    class FakeYdl:
+        def __init__(self, **options):
+            captured.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            # 模拟 yt-dlp 下载过程中触发进度钩子：取消生效则立即抛 CancelledError
+            for hook in captured.get("progress_hooks") or []:
+                hook({"status": "downloading"})
+            return {}
+
+    monkeypatch.setattr(processor, "_ydl", lambda *a, **k: FakeYdl(**k))
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await processor.download_audio(
+                "https://example.com/a.mp4", "t1", should_abort=lambda: True
+            )
+
+    asyncio.run(run())
+    assert captured["progress_hooks"]
+
+
+def test_extract_audio_track_produces_m4a(tmp_path: Path) -> None:
+    import math
+    import struct
+    import wave
+
+    source = tmp_path / "in.wav"
+    sr = 16000
+    frames = bytearray()
+    for i in range(sr):
+        frames += struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / sr)))
+    with wave.open(str(source), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(bytes(frames))
+
+    target = tmp_path / "out.m4a"
+    result = VideoProcessor.extract_audio_track(source, target)
+
+    assert result == target
+    assert target.is_file() and target.stat().st_size > 0

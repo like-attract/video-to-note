@@ -29,7 +29,7 @@ def test_model_loader_uses_project_cache(
             captured.update(model_name=model_name, **kwargs)
 
     transcriber = WhisperTranscriber(tmp_path / "models")
-    monkeypatch.setattr(transcriber, "_download_model_files", lambda name: None)
+    monkeypatch.setattr(transcriber, "_download_model_files", lambda name, cancel_event=None: None)
     transcriber._load_model(FakeModel, "small", "cpu", "int8")
 
     assert captured["model_name"] == "small"
@@ -58,7 +58,7 @@ def test_load_model_prefers_local_snapshot(
     transcriber = WhisperTranscriber(tmp_path)
     download_calls: list[str] = []
     monkeypatch.setattr(
-        transcriber, "_download_model_files", lambda name: download_calls.append(name) or None
+        transcriber, "_download_model_files", lambda name, cancel_event=None: download_calls.append(name) or None
     )
     transcriber._load_model(FakeModel, "base", "cpu", "int8")
 
@@ -145,7 +145,7 @@ def test_download_replaces_undersized_existing_file(
 
     downloaded: list[str] = []
 
-    def fake_download_one(url: str, target: Path, headers: dict[str, str]) -> bool:
+    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None) -> bool:
         downloaded.append(target.name)
         target.write_bytes(b"0" * 64)
         return True
@@ -193,7 +193,7 @@ def test_download_replaces_undersized_existing_file(
 
     downloaded: list[str] = []
 
-    def fake_download_one(url: str, target: Path, headers: dict[str, str]) -> bool:
+    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None) -> bool:
         downloaded.append(target.name)
         target.write_bytes(b"0" * 2048)
         return True
@@ -271,7 +271,7 @@ def test_load_model_self_heals_corrupt_snapshot(
                     "File model.bin is incomplete: failed to read a buffer of size 1 at position 0"
                 )
 
-    def fake_download(name: str) -> Path | None:
+    def fake_download(name: str, cancel_event=None) -> Path | None:
         # 自愈路径：模拟重新下载成功（损坏文件已被删除）
         assert not (snapshot / "model.bin").exists()
         return snapshot
@@ -304,7 +304,7 @@ def test_model_download_falls_back_to_official_endpoint(
     calls: list[str] = []
     expected = tmp_path / "snapshot"
 
-    def fake_download(model_name: str, endpoint: str) -> Path | None:
+    def fake_download(model_name: str, endpoint: str, cancel_event=None) -> Path | None:
         calls.append(endpoint)
         if endpoint == "https://hf-mirror.com":
             raise RuntimeError("certificate verify failed")
@@ -324,7 +324,7 @@ def test_load_model_does_not_repeat_hub_download_after_custom_failure(
     original = RuntimeError("certificate verify failed")
     transcriber._last_download_error = original
     monkeypatch.setattr(transcriber, "_cached_model_path", lambda name: None)
-    monkeypatch.setattr(transcriber, "_download_model_files", lambda name: None)
+    monkeypatch.setattr(transcriber, "_download_model_files", lambda name, cancel_event=None: None)
 
     class FailIfCalled:
         def __init__(self, *_args, **_kwargs):
@@ -424,3 +424,17 @@ async def test_transcribe_converts_cancel_to_cancelled_error(
     cancel_event.set()
     with pytest.raises(asyncio.CancelledError):
         await transcriber.transcribe(tmp_path / "audio.mp3", cancel_event=cancel_event)
+
+
+def test_download_one_file_aborts_when_cancelled(tmp_path: Path) -> None:
+    import asyncio
+    import threading
+
+    transcriber = WhisperTranscriber(tmp_path / "models")
+    cancel_event = threading.Event()
+    cancel_event.set()
+    with pytest.raises(asyncio.CancelledError):
+        transcriber._download_one_file(
+            "https://example.com/model.bin", tmp_path / "model.bin", {}, cancel_event
+        )
+

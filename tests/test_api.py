@@ -20,7 +20,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.2.0"
+    assert health.json()["version"] == "1.2.1"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -281,7 +281,7 @@ async def test_cancel_task_requests_cooperative_stop_and_keeps_task_record() -> 
     assert main.tasks[task_id]["_cancel_requested"] is True
     assert main.tasks[task_id]["_cancel_event"].is_set()
     assert not job.done()
-    assert any("当前阻塞步骤结束后" in log for log in main.tasks[task_id]["logs"])
+    assert any("已收到取消请求" in log for log in main.tasks[task_id]["logs"])
     job.cancel()
     with pytest.raises(asyncio.CancelledError):
         await job
@@ -452,7 +452,7 @@ async def test_pipeline_uses_platform_subtitles_without_downloading_audio(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None,
+            progress_callback=None, should_abort=None,
         ):
             if progress_callback:
                 await progress_callback(78, "正在生成完整笔记")
@@ -524,7 +524,7 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None,
+            progress_callback=None, should_abort=None,
         ):
             assert title == "旧任务标题"
             assert style == "detailed"
@@ -598,7 +598,7 @@ async def test_pipeline_merges_all_bilibili_pages_from_ai_subtitles(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None,
+            progress_callback=None, should_abort=None,
         ):
             if progress_callback:
                 await progress_callback(78, "正在生成完整笔记")
@@ -663,7 +663,7 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
     downloaded: list[tuple[str, str]] = []
     captured_segments: list = []
 
-    async def fake_download(url, task_id, cookie=None, media_name="audio"):
+    async def fake_download(url, task_id, cookie=None, media_name="audio", **kwargs):
         downloaded.append((url, media_name))
         return tmp_path / f"{media_name}.mp3"
 
@@ -687,7 +687,7 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None,
+            progress_callback=None, should_abort=None,
         ):
             captured_segments.extend(segments)
             if progress_callback:
@@ -723,3 +723,112 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
     assert captured_segments[0].text.startswith("【P1 第一部分】 P1字幕")
     assert captured_segments[1].text.startswith("【P2 第二部分】 P2语音内容")
     assert captured_segments[1].start == 60.0
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_llm_generation_marks_task_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """验证取消能从主流程贯通到 LLM 生成阶段（should_abort 接线正确）。"""
+    processor = VideoProcessor(tmp_path)
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "取消测试", "source": "youtube", "duration": 30, "owner": "作者"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return SubtitleResult(
+            [TranscriptSegment(0, 5, "测试内容")], "zh", "platform_subtitle"
+        )
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        async def generate_summary(self, *args, **kwargs):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+
+    task_id = "cancel-during-llm"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    request = main.SummarizeRequest(
+        video_url="https://www.youtube.com/watch?v=abc",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "cancelled"
+    assert task["step_name"] == "已取消"
+
+
+def test_upload_rejects_file_over_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 100)
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/upload",
+        files={"file": ("big.mp4", b"x" * 200, "video/mp4")},
+    )
+    assert response.status_code == 413
+    assert "上限" in response.json()["detail"]
+
+
+def test_upload_large_video_auto_extracts_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LARGE_UPLOAD_EXTRACT_BYTES", 1)
+
+    def fake_extract(source, target):
+        target.write_bytes(b"_audio_stream_")
+        return target
+
+    monkeypatch.setattr(
+        main.video_processor, "extract_audio_track", staticmethod(fake_extract)
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/upload",
+        files={"file": ("video.mp4", b"bits" * 1000, "video/mp4")},
+        data={"include_screenshots": "0"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["filename"] == "video.mp4"
+    assert data["file_path"].endswith("input.m4a")
+    task = main.tasks[data["task_id"]]
+    assert task["uploaded_file_path"].endswith("input.m4a")
+    assert any("提取音频" in log for log in task["logs"])
+
+
+def test_upload_keeps_video_when_screenshots_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LARGE_UPLOAD_EXTRACT_BYTES", 1)
+    called = {"extract": False}
+
+    def fake_extract(source, target):
+        called["extract"] = True
+        target.write_bytes(b"_audio_stream_")
+        return target
+
+    monkeypatch.setattr(
+        main.video_processor, "extract_audio_track", staticmethod(fake_extract)
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/upload",
+        files={"file": ("video.mp4", b"bits" * 1000, "video/mp4")},
+        data={"include_screenshots": "1"},
+    )
+    assert response.status_code == 200
+    assert called["extract"] is False
+    assert response.json()["file_path"].endswith("input.mp4")

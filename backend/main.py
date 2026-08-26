@@ -19,7 +19,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiofiles
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -72,7 +72,12 @@ WHISPER_CACHE_DIR = Path(
 FRONTEND_DIR = BASE_DIR / "frontend"
 APP_ICON_PATH = BASE_DIR / "sources" / "icon.png"
 FAVICON_PATH = BASE_DIR / "sources" / "icon.ico"
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "2048"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+# 超过该体积的本地视频上传后自动提取音频（16kHz m4a）并删除原视频，
+# 保留与在线视频一致的轻量工作目录；勾选“视频截图”时保留原视频。
+LARGE_UPLOAD_EXTRACT_MB = int(os.getenv("LARGE_UPLOAD_EXTRACT_MB", "300"))
+LARGE_UPLOAD_EXTRACT_BYTES = LARGE_UPLOAD_EXTRACT_MB * 1024 * 1024
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("MAX_CONCURRENT_TASKS", "1")))
 TASK_HISTORY_LIMIT = max(10, int(os.getenv("TASK_HISTORY_LIMIT", "100")))
 ALLOWED_MEDIA_SUFFIXES = {
@@ -93,7 +98,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.2.0")
+app = FastAPI(title="VideoToNo API", version="1.2.1")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -812,8 +817,15 @@ async def douyin_login_cancel() -> dict[str, Any]:
     return await douyin_login_manager.cancel()
 
 
+# 视频容器后缀（可能带音轨、需要时提取）；纯音频后缀直接使用
+VIDEO_CONTAINER_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
+
+
 @app.post("/api/upload")
-async def upload_video(file: UploadFile = File(...)) -> dict[str, str]:
+async def upload_video(
+    file: UploadFile = File(...),
+    include_screenshots: str | None = Form(default=None),
+) -> dict[str, str]:
     filename = Path(file.filename or "upload.bin").name
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_MEDIA_SUFFIXES:
@@ -823,13 +835,19 @@ async def upload_video(file: UploadFile = File(...)) -> dict[str, str]:
     task_dir = WORKSPACE_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=False)
     file_path = task_dir / f"input{suffix}"
+    wants_screenshots = (include_screenshots or "").strip().lower() in {
+        "1", "true", "yes"
+    }
     written = 0
     try:
         async with aiofiles.open(file_path, "wb") as destination:
             while chunk := await file.read(1024 * 1024):
                 written += len(chunk)
                 if written > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="上传文件超过大小限制")
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"上传文件超过大小限制（上限 {MAX_UPLOAD_MB} MB）",
+                    )
                 await destination.write(chunk)
     except Exception:
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -837,11 +855,39 @@ async def upload_video(file: UploadFile = File(...)) -> dict[str, str]:
     finally:
         await file.close()
 
+    log_lines: list[str] = [f"文件已上传：{filename}"]
+    # 大视频且不需要截图时：提取音频、删除原视频，减少工作目录体积
+    if (
+        written >= LARGE_UPLOAD_EXTRACT_BYTES
+        and suffix in VIDEO_CONTAINER_SUFFIXES
+        and not wants_screenshots
+    ):
+        audio_path = task_dir / "input.m4a"
+        try:
+            extracted = await asyncio.to_thread(
+                video_processor.extract_audio_track, file_path, audio_path
+            )
+        except Exception:
+            extracted = None
+        if extracted is not None and extracted.is_file():
+            original_size = written
+            file_path.unlink(missing_ok=True)
+            file_path = audio_path
+            log_lines.append(
+                f"大视频已提取音频：{format_bytes_size(original_size)} → "
+                f"{format_bytes_size(audio_path.stat().st_size)}（原视频已清理；"
+                "如需截图请取消勾选该任务后重新上传）"
+            )
+        else:
+            log_lines.append(
+                "视频较大，未能提取音频，将直接用原文件转写（不影响使用）"
+            )
+
     tasks[task_id] = new_task(status="uploaded", task_id=task_id)
     tasks[task_id].update(
         uploaded_file_path=str(file_path),
         uploaded_filename=filename,
-        logs=[f"文件已上传：{filename}"],
+        logs=log_lines,
     )
     write_upload_manifest(task_id, filename)
     persist_task_runtime(task_id)
@@ -901,7 +947,7 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     if cancel_event is not None:
         cancel_event.set()
     task.update(status="cancelling", step_name="取消中", error=None)
-    task["logs"].append("已收到取消请求；当前阻塞步骤结束后将停止任务")
+    task["logs"].append("已收到取消请求；正在尽快停止当前步骤")
     persist_task_runtime(task_id)
     return {
         "cancelled": False,
@@ -951,6 +997,10 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     task = tasks[task_id]
     task["status"] = "processing"
     persist_task_runtime(task_id)
+
+    def should_abort() -> bool:
+        return bool(task.get("_cancel_requested"))
+
     bili_cookie = (
         request.bilibili_cookie.model_dump()
         if request.bilibili_cookie
@@ -1091,6 +1141,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         task_id,
                         cookie,
                         media_name=f"audio_p{page.page}",
+                        should_abort=should_abort,
                     )
                     raise_if_cancel_requested(task)
                     set_progress(
@@ -1162,7 +1213,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     media_path = Path(uploaded_path)
                 else:
                     media_path = await video_processor.download_audio(
-                        source_url or "", task_id, cookie
+                        source_url or "", task_id, cookie, should_abort=should_abort
                     )
                 raise_if_cancel_requested(task)
                 set_progress(
@@ -1218,11 +1269,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 Path(uploaded_path)
                 if is_local
                 else await video_processor.download_preview_video(
-                    source_url or "", task_id, cookie
+                    source_url or "", task_id, cookie, should_abort=should_abort
                 )
             )
             screenshots = await video_processor.extract_frames(
-                video_path, task_id, request.screenshot_interval
+                video_path, task_id, request.screenshot_interval, should_abort
             )
             raise_if_cancel_requested(task)
             task["logs"].append(f"已提取 {len(screenshots)} 张截图")
@@ -1275,6 +1326,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             style=request.summary_style,
             reasoning_effort=request.reasoning_effort,
             progress_callback=report_llm_progress,
+            should_abort=should_abort,
         )
         raise_if_cancel_requested(task)
         for warning in getattr(summarizer, "warnings", []):
@@ -1373,6 +1425,14 @@ def format_duration(seconds: float) -> str:
     if not seconds:
         return "未知"
     return format_timestamp(float(seconds))
+
+
+def format_bytes_size(num_bytes: float) -> str:
+    """把字节数格式化为人类可读大小（MB / GB）。"""
+    size = max(0.0, float(num_bytes))
+    if size >= 1024 * 1024 * 1024:
+        return f"{size / (1024 ** 3):.2f} GB"
+    return f"{size / (1024 ** 2):.2f} MB"
 
 
 def format_publish_time(info: dict[str, Any]) -> str:

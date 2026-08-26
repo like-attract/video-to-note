@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.2.0</h1>
+<h1 align="center">VideoToNo v1.2.1</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -12,18 +12,20 @@
 
 <p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ Download the Windows portable build</strong></a></p>
 
+<p align="center">🎬 Promo video (Bilibili): <a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ group: <code>739200648</code></p>
+
 VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douyin, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
 
-## 🆕 What's New (v1.1.8 → v1.2.0)
+## 🆕 What's New (v1.2.0 → v1.2.1)
 
-- **Bilibili multi-part videos**: pasting a multi-P link (without `?p`) now merges **all parts into one note**, with `【P1 part-name】` markers per part and a continuous timeline; a link with `?p=N` processes only that part (previously only the first part was recognized)
-- **Cancel now actually works**: Whisper transcription uses cooperative per-segment abort — after cancel, the task stops at the end of the current audio segment instead of waiting for the whole file
-- **False-positive fix**: when logged in but the video simply has no AI subtitles, the log no longer wrongly asks for SESSDATA; subtitle API errors are now reported accurately
-- **Manual Whisper model import**: when downloads are slow or repeatedly fail, open the import folder from the UI, drop the model files in, and it is recognized automatically
+- **Cancel now works immediately**: LLM generation uses streaming with per-chunk abort; yt-dlp downloads and Whisper model downloads have per-chunk cancel hooks; screenshot frame extraction checks cancel per frame — downloads, model loading, and text generation stop within seconds; transcription stops within the current audio segment
+- **Upload limit raised + auto audio extraction for large files**: local video upload limit raised from 500 MB to 2 GB; files ≥ 300 MB (configurable) and without screenshots requested now extract a 16 kHz mono audio track after upload and remove the original video, keeping only a few MB of audio
+- **Whisper base model bundle**: the Release now includes `faster-whisper-base.zip` (~127 MB) with a detailed manual import guide — users who cannot download models automatically can use the pre-packaged bundle
 
 <details>
-<summary>Previous releases (v1.1.8 and earlier)</summary>
+<summary>Previous releases (v1.2.0 and earlier)</summary>
 
+- **v1.2.0**: Bilibili multi-part video support, per-segment Whisper cancellation, false-positive SESSDATA fix, manual Whisper model import UI
 - **v1.1.8**: run-mode & app-version service isolation, recent-task scrollbar, faithful-note metadata de-duplication, custom Base URL diagnostics
 - **v1.1.7**: single public Douyin links, browser-verification fallback, transcript reuse, and cancelled-task deletion.
 - **v1.1.6**: persistent Whisper download confirmation and packaged custom-workspace fixes.
@@ -49,7 +51,7 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douy
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.2.0-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.2.1-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;

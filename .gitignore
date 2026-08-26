@@ -36,6 +36,8 @@ Thumbs.db
 
 # 视频宣传脚本
 /promo/
+# 大文件 Release 附件（手动补传，不入库）
+/release-assets/*.zip
 # harmonyos开发
 /harmonyos/
 /scripts/read_bili_cookie.py
