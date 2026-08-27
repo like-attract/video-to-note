@@ -14,9 +14,9 @@
 
 <p align="center">🎬 Promo video (Bilibili): <a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ group: <code>739200648</code></p>
 
-VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: feed it a Bilibili, Douyin, YouTube, or local video; it prefers platform captions (with deep Bilibili AI-caption integration), falls back to local faster-whisper transcription when none exist, then has your chosen LLM write timestamped Markdown notes. Whisper and LLMs are commodity components — VideoToNo's value is in pipeline integration, platform counter-measures, long-content engineering, and reliability. The same pipeline ships in three forms: **desktop app, MCP tools, and an Agent Skill**.
+VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: give it a Bilibili, Douyin, YouTube link or a local video; it prefers platform captions including Bilibili AI captions, falls back to local faster-whisper transcription when none exist, then has your chosen LLM write timestamped Markdown notes. 
 
-> 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.claude/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
+> 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
 ## 🆕 What's New (v1.2.1 → v1.2.2)
 
@@ -175,6 +175,34 @@ codex mcp add local videotono -- python -m backend.mcp_server
 The MCP server automatically scans ports 8000–8019 to locate a running VideoToNo service. Set `VIDEOTONOTES_BACKEND_URL` to explicitly choose the backend URL.
 
 > Privacy: `save_llm_config` and `save_bilibili_credentials` store plaintext files under the local workspace: `workspace/llm_config.json` and `workspace/bili_credentials.json`. Do not share them. Nothing is persisted unless you explicitly call a save tool; `workspace/` is excluded by `.gitignore` and is not committed to this repository.
+
+</details>
+
+<details>
+<summary>🧩 Agent Skill (advanced)</summary>
+
+Besides MCP, VideoToNo also ships an **Agent Skill** (`skills/video-to-note/`) for skill-capable coding agents such as Claude Code and pi: the agent reads `SKILL.md`, then drives the bundled script through the full flow — submit a task, stream progress, and fetch the finished note. **Start VideoToNo first**; like MCP, tasks run through the local backend.
+
+### Install
+
+Copy the whole `skills/video-to-note/` directory from this repo into your agent's skills directory, for example:
+
+```text
+C:\Users\<you>\.agents\skills\video-to-note\        # pi / common convention
+~/.claude/skills/video-to-note/                       # Claude Code
+```
+
+### Usage
+
+After installing, just ask in one sentence:
+
+```text
+Turn this Bilibili video into notes: https://www.bilibili.com/video/BV1xx
+```
+
+The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the full Markdown note. Common options: `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
+
+> First use requires an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`; or save it once with the MCP `save_llm_config` tool and it is no longer needed.
 
 </details>
 

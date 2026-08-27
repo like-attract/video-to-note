@@ -13,15 +13,14 @@
 
 <p align="center">🎬 宣传视频：<a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ 交流群：<code>739200648</code></p>
 
-VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地优先**的服务：输入 B 站、抖音、YouTube 链接或本地视频，优先读取平台字幕（对 B 站 AI 字幕做了深度适配），无字幕时用本地 faster-whisper 离线转写，再由你选择的大模型生成带时间轴的 Markdown 笔记。whisper 和大模型都是现成组件，VideoToNo 的价值在**链路集成、平台对抗、长内容工程与可靠性**——同一条链路提供三种接入形态：**桌面应用 / MCP 工具 / Agent Skill**。
+VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地优先**的服务：输入 B 站、抖音、YouTube 链接或本地视频，优先读取平台字幕、B 站 AI 字幕，无字幕时用本地 faster-whisper 离线转写，再由你选择的大模型生成带时间轴的 Markdown 笔记。
 
-> 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（如 `~/.claude/skills/`），即可让 Claude Code、pi 等直接一句话生成视频笔记。详见该目录下的 `SKILL.md`。
+> 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（如 `C:/Users/用户名/.agents/skills/`），即可让 Claude Code、pi 等直接一句话生成视频笔记。详见该目录下的 `SKILL.md`。
 
 ## 🆕 What's New（v1.2.1 → v1.2.2）
 
 - **Agent Skill 接入**：新增 `skills/video-to-note/`（SKILL.md + 一条命令完成提交/轮询/取笔记的脚本），Claude Code、pi 等支持技能的 agent 可直接一句话生成视频笔记——与桌面应用、MCP 并列的第三种接入形态
 - **任务结果 Windows 通知**：打包模式下任务完成/失败时通过托盘气泡弹系统通知，无需盯页面等待
-- 仓库与文档定位重写：明确「本地优先的视频→结构化笔记服务，三种接入形态」的产品定位
 
 <details>
 <summary>历史版本摘要（v1.2.1 及更早）</summary>
@@ -176,6 +175,34 @@ codex mcp add local videotono -- python -m backend.mcp_server
 MCP server 会自动扫描 8000–8019 端口来找到已运行的 VideoToNo 服务；也可以用环境变量 `VIDEOTONOTES_BACKEND_URL` 显式指定服务地址。
 
 > 隐私说明：`save_llm_config` / `save_bilibili_credentials` 会将内容以明文保存在本机工作目录的 `workspace/llm_config.json` 和 `workspace/bili_credentials.json`。请勿分享这些文件；未显式调用保存工具时，凭据不会落盘。`workspace/` 已被 `.gitignore` 排除，不会进入 Git 仓库。
+
+</details>
+
+<details>
+<summary>🧩 Agent Skill（进阶）</summary>
+
+除了 MCP，VideoToNo 也提供 **Agent Skill**（`skills/video-to-note/`），供 Claude Code、pi 等支持技能的编码类 agent 使用：agent 读取 `SKILL.md` 后，会自动调用本仓库附带的脚本完成「提交任务 → 轮询进度 → 取回笔记」全流程。**使用前请先启动 VideoToNo**，与 MCP 相同，任务由本地后端执行。
+
+### 安装
+
+把仓库里的 `skills/video-to-note/` 整个目录复制到 agent 的技能目录，例如：
+
+```text
+C:\Users\<用户名>\.agents\skills\video-to-note\        # pi / 通用约定
+~/.claude/skills/video-to-note/                         # Claude Code
+```
+
+### 使用
+
+安装后直接对 agent 说一句话即可：
+
+```text
+帮我把这个 B 站视频做成笔记：https://www.bilibili.com/video/BV1xx
+```
+
+agent 会调用技能附带的 `scripts/video_note.py`，自动探测服务端口、提交任务、实时打印运行日志，完成后输出（或保存）完整 Markdown 笔记。常用参数：`--style detailed|faithful|concise`、`--wait 秒数`、`--out 文件路径`；本地视频文件路径也可直接作为输入。
+
+> 首次使用同样需要大模型 API Key：agent 会向你要，用 `--provider` / `--api-key` 传入；或先用 MCP 的 `save_llm_config` 保存过配置，则无需再传。
 
 </details>
 
