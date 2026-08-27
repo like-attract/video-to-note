@@ -1,4 +1,8 @@
-# VideoToNo · Whisper base 模型手动导入说明
+# faster-whisper-base 手动导入说明 / Manual Import Guide
+
+> 中文说明（English note at the bottom）
+
+
 
 > 适用版本：v1.2.0 及以上（带「手动导入模型」按钮，位于「语音转写」设置区）
 > 本说明长期有效：即便群文件或本附件过期，也随时可自行按【方式二】从镜像站下载。
