@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.2.1</h1>
+<h1 align="center">VideoToNo v1.2.2</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,18 +14,21 @@
 
 <p align="center">🎬 Promo video (Bilibili): <a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ group: <code>739200648</code></p>
 
-VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douyin, YouTube, or other supported video URL—or a local media file. It prefers platform captions, falls back to local `faster-whisper` transcription when needed, and asks your selected language model to produce timestamped Markdown notes.
+VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: feed it a Bilibili, Douyin, YouTube, or local video; it prefers platform captions (with deep Bilibili AI-caption integration), falls back to local faster-whisper transcription when none exist, then has your chosen LLM write timestamped Markdown notes. Whisper and LLMs are commodity components — VideoToNo's value is in pipeline integration, platform counter-measures, long-content engineering, and reliability. The same pipeline ships in three forms: **desktop app, MCP tools, and an Agent Skill**.
 
-## 🆕 What's New (v1.2.0 → v1.2.1)
+> 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.claude/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-- **Cancel now works immediately**: LLM generation uses streaming with per-chunk abort; yt-dlp downloads and Whisper model downloads have per-chunk cancel hooks; screenshot frame extraction checks cancel per frame — downloads, model loading, and text generation stop within seconds; transcription stops within the current audio segment
-- **Upload limit raised + auto audio extraction for large files**: local video upload limit raised from 500 MB to 2 GB; files ≥ 300 MB (configurable) and without screenshots requested now extract a 16 kHz mono audio track after upload and remove the original video, keeping only a few MB of audio
-- **Whisper base model bundle**: the Release now includes `faster-whisper-base.zip` (~127 MB) with a detailed manual import guide — users who cannot download models automatically can use the pre-packaged bundle
+## 🆕 What's New (v1.2.1 → v1.2.2)
+
+- **Agent Skill integration**: new `skills/video-to-note/` (SKILL.md + a one-command submit/poll/fetch script) — skill-capable agents like Claude Code or pi can now generate video notes from a single sentence; the third access form alongside the desktop app and MCP
+- **Windows task notifications**: in packaged tray mode, task completion/failure pops a system toast — no more watching the page
+- Repositioned the repo and docs: a local-first "video → structured notes" service with three access forms
 
 <details>
-<summary>Previous releases (v1.2.0 and earlier)</summary>
+<summary>Previous releases (v1.2.1 and earlier)</summary>
 
-- **v1.2.0**: Bilibili multi-part video support, per-segment Whisper cancellation, false-positive SESSDATA fix, manual Whisper model import UI
+- **v1.2.1**: immediate cancellation across all stages (LLM streaming/download hooks/model download per-chunk), upload limit 2 GB + auto audio extraction for large videos, Whisper base model bundle
+- **v1.2.0**: Bilibili multi-part support, per-segment Whisper cancellation, false-positive SESSDATA fix, manual Whisper model import UI
 - **v1.1.8**: run-mode & app-version service isolation, recent-task scrollbar, faithful-note metadata de-duplication, custom Base URL diagnostics
 - **v1.1.7**: single public Douyin links, browser-verification fallback, transcript reuse, and cancelled-task deletion.
 - **v1.1.6**: persistent Whisper download confirmation and packaged custom-workspace fixes.
@@ -51,7 +54,7 @@ VideoToNo is a local, personal-use video-to-notes tool. Give it a Bilibili, Douy
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.2.1-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.2.2-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;

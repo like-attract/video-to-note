@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.2.1</h1>
+<h1 align="center">VideoToNo v1.2.2</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -13,17 +13,20 @@
 
 <p align="center">🎬 宣传视频：<a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ 交流群：<code>739200648</code></p>
 
-VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站、抖音、YouTube 等视频链接或本地媒体，优先读取平台字幕；没有可用字幕时使用 `faster-whisper` 转写，最后调用你选择的大模型生成带时间轴的 Markdown 笔记。
+VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地优先**的服务：输入 B 站、抖音、YouTube 链接或本地视频，优先读取平台字幕（对 B 站 AI 字幕做了深度适配），无字幕时用本地 faster-whisper 离线转写，再由你选择的大模型生成带时间轴的 Markdown 笔记。whisper 和大模型都是现成组件，VideoToNo 的价值在**链路集成、平台对抗、长内容工程与可靠性**——同一条链路提供三种接入形态：**桌面应用 / MCP 工具 / Agent Skill**。
 
-## 🆕 What's New（v1.2.0 → v1.2.1）
+> 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（如 `~/.claude/skills/`），即可让 Claude Code、pi 等直接一句话生成视频笔记。详见该目录下的 `SKILL.md`。
 
-- **取消真正立即生效**：LLM 生成改为流式+逐块取消、yt-dlp 下载和 Whisper 模型下载加钩子取消、截图逐帧检查取消——下载/模型下载/生成阶段均可在秒级内停止，转写最多等当前音频段结束
-- **上传上限提升 + 超大文件自动提音频**：本地视频上传上限从 500MB 提升至 2GB；未勾选截图时，≥300MB 的视频会在上传后自动提取 16kHz 音频并清理原视频，工作目录只留音频（和在线视频一致）
-- **Whisper base 模型导入包**：Release 附件附带 `faster-whisper-base.zip`（约 127 MB）及详细手动导入说明，无法自动下载模型的用户可直接使用
+## 🆕 What's New（v1.2.1 → v1.2.2）
+
+- **Agent Skill 接入**：新增 `skills/video-to-note/`（SKILL.md + 一条命令完成提交/轮询/取笔记的脚本），Claude Code、pi 等支持技能的 agent 可直接一句话生成视频笔记——与桌面应用、MCP 并列的第三种接入形态
+- **任务结果 Windows 通知**：打包模式下任务完成/失败时通过托盘气泡弹系统通知，无需盯页面等待
+- 仓库与文档定位重写：明确「本地优先的视频→结构化笔记服务，三种接入形态」的产品定位
 
 <details>
-<summary>历史版本摘要（v1.2.0 及更早）</summary>
+<summary>历史版本摘要（v1.2.1 及更早）</summary>
 
+- **v1.2.1**：取消真正立即生效（LLM 流式/下载钩子/模型下载逐块取消）、上传上限 2GB + 超大视频自动提音频、Whisper base 模型导入包
 - **v1.2.0**：B 站多分 P 视频（全部/指定分P合并笔记）、语音转写段粒度取消、B 站无字幕误报修正、Whisper 手动导入模型界面
 - **v1.1.8**：运行模式与应用版本隔离、最近任务滚动条、详细复原元信息去重、自定义 Base URL 错误诊断
 - **v1.1.7**：抖音单条公开分享链接、浏览器验证回退、转写复用和已取消任务删除。
@@ -52,7 +55,7 @@ VideoToNo 是一个面向个人使用的本地视频笔记工具：输入 B 站�
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.2.1-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.2.2-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；

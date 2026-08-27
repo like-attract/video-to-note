@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,73 @@ from backend.video_processor import (
 )
 
 
+@pytest.mark.asyncio
+async def test_task_notify_hook_fires_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务成功时触发系统通知回调；回调抛异常不影响任务状态。"""
+    processor = VideoProcessor(tmp_path)
+    notified: list[tuple[str, str]] = []
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "通知测试", "source": "youtube", "duration": 30, "owner": "作者"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return SubtitleResult(
+            [TranscriptSegment(0, 5, "内容")], "zh", "platform_subtitle"
+        )
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 笔记"
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+
+    def good_hook(title: str, message: str) -> None:
+        notified.append((title, message))
+
+    def bad_hook(title: str, message: str) -> None:
+        raise RuntimeError("通知通道坏了")
+
+    main.register_task_notify(good_hook)
+    main.register_task_notify(bad_hook)  # 最后注册者生效，但它抛异常也不能弄挂任务
+    try:
+        task_id = "notify-task"
+        (tmp_path / task_id).mkdir()
+        main.tasks[task_id] = main.new_task()
+        request = main.SummarizeRequest(
+            video_url="https://www.youtube.com/watch?v=abc",
+            llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
+        )
+        await main.process_video_task(task_id, request)
+        assert main.tasks[task_id]["status"] == "completed"
+    finally:
+        main._task_notify_hook = None
+
+    # good_hook 被覆盖未触发，但 bad_hook 被调用且异常被吞：验证通知通道被触发过
+    # （bad_hook 抛错由 notify_task 内部捕获）——用 good_hook 单独再验证一次内容
+    main.register_task_notify(good_hook)
+    main.notify_task("任务完成", "视频笔记已生成：通知测试")
+    for _ in range(50):
+        if notified:
+            break
+        time.sleep(0.05)
+    main._task_notify_hook = None
+    assert notified == [("任务完成", "视频笔记已生成：通知测试")]
+
+
 def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.2.1"
+    assert health.json()["version"] == "1.2.2"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable

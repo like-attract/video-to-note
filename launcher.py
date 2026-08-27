@@ -24,7 +24,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
@@ -319,6 +319,15 @@ def run_tray(url: str, workspace: Path, server: Any) -> int:
         pystray.MenuItem("退出", on_quit),
     )
     icon = pystray.Icon("videotono", tray_icon_image(), APP_NAME, menu)
+    # 任务结果通知：把 backend 的完成/失败事件接到托盘气泡（Windows 通知）
+    try:
+        from backend import main as backend_main
+
+        backend_main.register_task_notify(
+            lambda title, message: icon.notify(message, f"VideoToNo · {title}")
+        )
+    except Exception:
+        pass  # 通知注册失败不影响服务
     icon.run()
     return 0
 

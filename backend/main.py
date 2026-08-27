@@ -98,7 +98,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.2.1")
+app = FastAPI(title="VideoToNo API", version="1.2.2")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -336,6 +336,32 @@ def persist_task_runtime(task_id: str) -> None:
 def raise_if_cancel_requested(task: dict[str, Any]) -> None:
     if task.get("_cancel_requested"):
         raise asyncio.CancelledError
+
+
+# 任务结果系统通知：由启动器把托盘气泡接进来（打包模式才有效），
+# backend 不直接依赖 pystray，避免引入循环依赖。
+_task_notify_hook: Callable[[str, str], None] | None = None
+
+
+def register_task_notify(callback: Callable[[str, str], None]) -> None:
+    """注册通知回调：callback(title, message)。"""
+    global _task_notify_hook
+    _task_notify_hook = callback
+
+
+def notify_task(title: str, message: str) -> None:
+    """发送系统通知；异步执行且绝不影响任务主流程。"""
+    callback = _task_notify_hook
+    if callback is None:
+        return
+
+    def _run() -> None:
+        try:
+            callback(title, message)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def normalize_source_url(value: str) -> str:
@@ -1370,6 +1396,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             status="completed", step=7, step_name="完成", progress=100, error=None
         )
         task["logs"].append("视频笔记生成完成")
+        notify_task("任务完成", f"视频笔记已生成：{title}")
         persist_task_runtime(task_id)
     except asyncio.CancelledError:
         finish_task_timing(task)
@@ -1382,6 +1409,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         message = friendly_task_error(str(exc))
         task.update(status="failed", error=message)
         task["logs"].append(f"处理失败：{message}")
+        notify_task("任务失败", f"{title}\n{message}")
         persist_task_runtime(task_id)
 
 
