@@ -24,6 +24,7 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 - **Fixed "Faithful" style hanging in the generation stage**: on long videos a note that simply omits timestamps was mistaken for a truncated one, triggering an extra regeneration of the whole remaining transcript. Three guardrails now bound the gap, the input size and the wall-clock time; a genuinely missing tail (within 10 minutes) is still patched automatically
 - **Generation progress heartbeat**: while the model streams, progress reports "model produced N characters" or "deep thinking (N characters so far)" every 20 seconds, so a thinking phase no longer looks like a deadlock
 - **Reasoning effort adapts to the note style**: on DeepSeek-compatible channels `auto` now picks a higher thinking level for Detailed/Faithful notes and a medium one for Concise summaries; the task log prints the effective level (more tokens consumed — pin a level explicitly under "Reasoning effort" if you prefer)
+- **No more hard-coded vendor parameters**: thinking is controlled with the standard `reasoning_effort` (the private `thinking` field is only used to disable thinking on the official DeepSeek API), and when a channel rejects a parameter VideoToNo degrades automatically (`reasoning_effort` → `reasoning.effort` → send nothing; an over-large `max_tokens` also falls back), remembering the outcome instead of failing the task
 
 <details>
 <summary>Previous releases (v1.2.2 and earlier)</summary>
@@ -252,6 +253,22 @@ The app downloads the best available audio stream and runs `faster-whisper` loca
 ### Why does the log say that the model returned no body and reasoning was disabled for a retry?
 
 That message means the model actually returned an empty body; it is not merely a display issue. The app reports it immediately at the current generation stage and retries once with reasoning disabled. If the retry is also empty, the task follows its actual error path.
+
+### What about a 400 `unsupported_parameter` for `thinking` / `reasoning_effort`?
+
+OpenAI-compatible channels differ a lot in how thinking is controlled: many only accept the standard `reasoning_effort` and reject the vendor-specific `thinking` field with a 400. VideoToNo now **sends standard parameters by default** (the private `thinking` field is only used to disable thinking on the official DeepSeek API) and degrades automatically when a channel rejects a parameter: `reasoning_effort` → nested `reasoning.effort` → no parameter at all (model default), logging "this channel does not support the X parameter". The same applies to the output budget: if the `max_tokens` we raise for the thinking chain exceeds your gateway's cap, it falls back to the note length and finally omits the parameter. To skip the first doomed request, declare the capability up front via an environment variable (comma-separated; `thinking`, `reasoning_effort`, `reasoning`, `enable_thinking`):
+
+```powershell
+$env:VIDEOTONOTES_REJECTED_LLM_PARAMS = "thinking,reasoning_effort"
+```
+
+### Why does the task keep going when the Bilibili video page is unreachable?
+
+In some networks the Bilibili video page is risk-controlled (`HTTP 412`) while the `api.bilibili.com` open endpoints still work. VideoToNo automatically falls back to those endpoints for metadata, audio and preview streams (multi-part videos included) and writes "fell back to the open API" into the run log, so you do not need to resubmit. Nothing here bypasses platform permissions: sign-in-only and VIP content still needs valid credentials.
+
+### Why does progress sit on "deep thinking" for a while?
+
+Detailed and Faithful notes default to a higher thinking level, so long videos can spend several minutes producing reasoning only. The UI refreshes "deep thinking (N characters so far)" or "model produced N characters" every 20 seconds, which means the task is still moving. Pick a lower level explicitly under Reasoning effort if you prefer speed or cost. Tasks can be cancelled at any time and transcripts are kept.
 
 </details>
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Sequence
+from urllib.parse import urlparse
 
 from .transcript import (
     TranscriptSegment,
@@ -59,6 +61,36 @@ LLM_HEARTBEAT_SECONDS = 20.0
 _NOTE_TIMESTAMP_RE = re.compile(
     r"\[(\d{1,3}:\d{2}(?::\d{2})?)(?:\s*[-–—~]\s*(\d{1,3}:\d{2}(?::\d{2})?))?\]"
 )
+# 思考类参数兼容差异：官方 DeepSeek 认私有 thinking，很多第三方 OpenAI 兼容网关
+# 只认标准 reasoning_effort（v1.2.3 用户反馈 400 unsupported_parameter "thinking"）。
+# 被拒过的参数按 (provider, model, base_url) 记住，同进程后续任务不再重复踩。
+REASONING_PARAM_NAMES = ("thinking", "reasoning_effort", "enable_thinking", "reasoning")
+# 输出额度参数也可能被第三方网关拒绝（值超过它的上限）
+TOKEN_BUDGET_PARAM_NAMES = ("max_tokens", "max_completion_tokens")
+_DEGRADABLE_PARAM_NAMES = REASONING_PARAM_NAMES + TOKEN_BUDGET_PARAM_NAMES
+_UNSUPPORTED_PARAM_RE = re.compile(
+    r"""["'`](thinking|reasoning_effort|enable_thinking|reasoning|max_tokens|max_completion_tokens)["'`]
+    [^"',()]{0,40}?\s+(?:is|are|was|were|seems\s+to\s+be)\s+not\s+supported""",
+    re.IGNORECASE | re.VERBOSE,
+)
+_REJECTED_REASONING_PARAMS: dict[tuple[str, str, str], set[str]] = {}
+# 参数被拒后的最多降级次数（thinking → reasoning_effort → 不注入）
+MAX_PARAM_RETRIES = 2
+
+def _rejected_params_from_env() -> set[str]:
+    """逃生口：`VIDEOTONOTES_REJECTED_LLM_PARAMS=thinking,reasoning_effort`。
+
+    跟 pi/pivi 的 `compat.supportsReasoningEffort` 同一思路：通道能力靠声明而不是
+    猜名字。自动降级能覆盖绝大多数情况，但“每阶段都先吃一次 400 再重试”仍然很浪费
+    时，遇到这种通道让用户一行环境变量声明掉即可（多个用逗号分隔）。
+    """
+    raw = (os.getenv("VIDEOTONOTES_REJECTED_LLM_PARAMS") or "").lower()
+    return {
+        name.strip()
+        for name in raw.replace(" ", ",").split(",")
+        if name.strip() in REASONING_PARAM_NAMES
+    }
+
 ProgressCallback = Callable[[int, str], Awaitable[None] | None]
 
 
@@ -99,6 +131,8 @@ class LLMSummarizer:
         self.base_url = base_url or ""
         self.model = model
         self.warnings: list[str] = []
+        # rejected_params（该配置已被拒的思考参数）由同名属性从全局缓存按需读取，
+        # 同进程内后续任务不会再重复踩同一个 400
 
     async def test_connection(self, timeout_seconds: float = 20.0) -> tuple[bool, str, float]:
         """轻量连通性测试：发一个极小请求，返回 (是否成功, 可读消息, 耗时秒)。"""
@@ -515,24 +549,43 @@ class LLMSummarizer:
 
     def describe_effort(self, reasoning_effort: str, style: str) -> str:
         """返回用于任务日志的推理设置说明（auto 解析成实际档位）。"""
+        rejected = (
+            "；该通道不支持 " + "/".join(sorted(self.rejected_params))
+            if self.rejected_params
+            else ""
+        )
         if reasoning_effort in {"off", "high", "max"}:
-            return reasoning_effort
+            return f"{reasoning_effort}{rejected}"
         if self._uses_deepseek_compatibility():
             resolved = STYLE_DEFAULT_EFFORT.get(style, "high")
-            return f"auto（DeepSeek 通道按风格默认：{resolved}）"
+            return f"auto（DeepSeek 通道按风格默认：{resolved}{rejected}）"
         return "auto（使用模型默认）"
 
-    async def _complete(
-        self,
-        prompt: str,
-        max_tokens: int,
-        effort: str = "auto",
-        retry_empty: bool = True,
-        progress_callback: ProgressCallback | None = None,
-        progress: int = 0,
-        stage: str = "模型调用",
-        should_abort: Callable[[], bool] | None = None,
-    ) -> str:
+    def _param_cache_key(self) -> tuple[str, str, str]:
+        return (
+            str(getattr(self, "model_type", "")),
+            str(getattr(self, "model", "")).lower(),
+            str(getattr(self, "base_url", "")).lower(),
+        )
+
+    @property
+    def rejected_params(self) -> set[str]:
+        """该配置已确认不被接受的思考参数（同一进程内按配置共用 + 环境变量声明）。"""
+        cached = getattr(self, "_rejected_params", None)
+        if cached is None:
+            cached = set(_REJECTED_REASONING_PARAMS.get(self._param_cache_key(), ()))
+            cached |= _rejected_params_from_env()
+            self._rejected_params = cached
+        return cached
+
+    def _build_request(
+        self, prompt: str, max_tokens: int, effort: str, budget: str = "auto"
+    ) -> dict[str, Any]:
+        """budget: auto（思考档抬高输出预算）/ requested（只用调用方额度）/ omit（不下发）。
+
+        思考链计入输出 token，所以默认要给足额度；但第三方网关的上限常常比官方低
+        （拒绝时一般报 param=max_tokens），因此留出两级降级，不让任务卡在参数上。
+        """
         request: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -546,23 +599,65 @@ class LLMSummarizer:
                 {"role": "user", "content": prompt},
             ],
         }
-        if self.model_type == "openai" and self.model.startswith("gpt-5"):
-            request["max_completion_tokens"] = max_tokens
-        else:
-            request["max_tokens"] = (
-                max(max_tokens * 3, DEEPSEEK_HIGH_TOKEN_BUDGET)
-                if self._uses_deepseek_compatibility() and effort == "max"
-                else DEEPSEEK_HIGH_TOKEN_BUDGET
-                if self._uses_deepseek_compatibility() and effort != "off"
-                else max_tokens
-            )
+        token_key = (
+            "max_completion_tokens"
+            if self.model_type == "openai" and str(self.model).startswith("gpt-5")
+            else "max_tokens"
+        )
+        thinking_budget = (
+            max(max_tokens * 3, DEEPSEEK_HIGH_TOKEN_BUDGET)
+            if self._uses_deepseek_compatibility() and effort == "max"
+            else DEEPSEEK_HIGH_TOKEN_BUDGET
+            if self._uses_deepseek_compatibility() and effort != "off"
+            else max_tokens
+        )
+        if budget != "omit":
+            request[token_key] = thinking_budget if budget == "auto" else max_tokens
         self._apply_reasoning(request, effort)
+        return request
 
+    async def _complete(
+        self,
+        prompt: str,
+        max_tokens: int,
+        effort: str = "auto",
+        retry_empty: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        progress: int = 0,
+        stage: str = "模型调用",
+        should_abort: Callable[[], bool] | None = None,
+        param_attempts: int = MAX_PARAM_RETRIES,
+        budget: str = "auto",
+    ) -> str:
         if should_abort is not None and should_abort():
             raise asyncio.CancelledError("任务已取消")
 
-        # 流式读取：既能在模型开始返回后逐块更新，也能在取消时立即中止本次请求
-        stream = await self.client.chat.completions.create(**request, stream=True)
+        request = self._build_request(prompt, max_tokens, effort, budget)
+        try:
+            # 流式建连：既能逐块读取，也能在取消时立即中止本次请求
+            stream = await self.client.chat.completions.create(**request, stream=True)
+        except Exception as exc:
+            # 通道不认我们下发的参数时，按下一级写法重试，而不是直接判任务失败
+            rejected = self._rejected_request_params(exc, request)
+            if not rejected or param_attempts <= 0:
+                raise
+            budget, note = self._degrade_rejected(rejected, budget)
+            warning = f"{stage}：该通道不支持 {'/'.join(rejected)} 参数，{note}后重试"
+            self._warn_once(warning)
+            await self._report_progress(progress_callback, progress, warning)
+            return await self._complete(
+                prompt,
+                max_tokens,
+                effort,
+                retry_empty=retry_empty,
+                progress_callback=progress_callback,
+                progress=progress,
+                stage=stage,
+                should_abort=should_abort,
+                param_attempts=param_attempts - 1,
+                budget=budget,
+            )
+
         parts: list[str] = []
         content_characters = 0
         reasoning_characters = 0
@@ -604,7 +699,7 @@ class LLMSummarizer:
 
         content = "".join(parts)
         if not content:
-            if retry_empty and effort != "off" and self._can_control_reasoning():
+            if retry_empty and effort != "off" and self._can_disable_thinking():
                 warning = f"{stage}：模型首次未返回正文，已关闭深度思考并重试"
                 self.warnings.append(warning)
                 await self._report_progress(progress_callback, progress, warning)
@@ -617,6 +712,8 @@ class LLMSummarizer:
                     progress=progress,
                     stage=stage,
                     should_abort=should_abort,
+                    param_attempts=param_attempts,
+                    budget=budget,
                 )
             raise RuntimeError(
                 f"模型未返回正文（finish_reason={finish_reason}）。"
@@ -644,13 +741,25 @@ class LLMSummarizer:
         return f"{stage}：等待模型返回首个数据块"
 
     def _apply_reasoning(self, request: dict[str, Any], effort: str) -> None:
-        if effort == "auto" and not self._uses_deepseek_compatibility():
+        # auto 含义统一：不注入任何思考参数，交给通道默认行为
+        # （generate_summary 会先把用户的 auto 按风格解析成 high/max）
+        if effort == "auto":
             return
         enabled = effort != "off"
         if self._uses_deepseek_compatibility():
-            request["extra_body"] = {"thinking": {"type": "enabled" if enabled else "disabled"}}
+            # 开思考只用标准写法（flat reasoning_effort → 嵌套 reasoning.effort），
+            # 私有 thinking 仅用于官方 DeepSeek 的“关掉思考”：那是它唯一能关思考的写法。
+            # 很多兼容网关不认 thinking，包括“选了 DeepSeek 预设但填了代理 Base URL”
+            # 的情况（v1.2.3 用户反馈 400 unsupported_parameter "thinking"）。
             if enabled:
-                request["reasoning_effort"] = "max" if effort == "max" else "high"
+                if not self._send_reasoning_effort(
+                    request, "max" if effort == "max" else "high"
+                ):
+                    self._warn_once("该通道不支持思考强度参数，已按模型默认思考设置生成")
+            elif self._is_official_deepseek() and "thinking" not in self.rejected_params:
+                request["extra_body"] = {"thinking": {"type": "disabled"}}
+            elif not self._send_reasoning_effort(request, "none"):
+                self._warn_once("该通道不支持关闭深度思考，已按模型默认思考设置生成")
         elif self.model_type == "glm":
             request["extra_body"] = {"thinking": {"type": "enabled" if enabled else "disabled"}}
         elif self.model_type == "qwen":
@@ -665,16 +774,107 @@ class LLMSummarizer:
                 f"{self.model_type} 未配置通用推理强度映射，已使用模型默认设置"
             )
 
+    def _warn_once(self, message: str) -> None:
+        if message not in self.warnings:
+            self.warnings.append(message)
+
+    def _send_reasoning_effort(self, request: dict[str, Any], value: str) -> bool:
+        """按兼容性阶梯下发思考档位，返回是否找到了可用写法。
+
+        先试通用的 flat `reasoning_effort`；被拒后改试嵌套 `reasoning.effort`（同一条
+        400 提示里就并列给了这两种写法）。两种写法不会同时下发。
+        """
+        rejected = self.rejected_params
+        if "reasoning_effort" not in rejected:
+            request["reasoning_effort"] = value
+            return True
+        if "reasoning" not in rejected:
+            # 嵌套写法不是 openai SDK 的具名参数，必须走 extra_body（会被合并进 JSON body）
+            extra = request.setdefault("extra_body", {})
+            if isinstance(extra, dict):
+                extra["reasoning"] = {"effort": value}
+            else:
+                request["reasoning_effort"] = value
+            return True
+        return False
+
     def _uses_deepseek_compatibility(self) -> bool:
         provider = str(getattr(self, "model_type", "")).lower()
         model = str(getattr(self, "model", "")).lower()
         base_url = str(getattr(self, "base_url", "")).lower()
         return provider == "deepseek" or "deepseek" in model or "deepseek" in base_url
 
-    def _can_control_reasoning(self) -> bool:
-        return self._uses_deepseek_compatibility() or self.model_type in {
-            "openai", "glm", "qwen"
-        }
+    def _is_official_deepseek(self) -> bool:
+        """只有官方 DeepSeek API 认私有 thinking 参数。"""
+        if str(getattr(self, "model_type", "")).lower() == "deepseek":
+            return True
+        host = (urlparse(str(self.base_url)).hostname or "").lower()
+        return host == "api.deepseek.com" or host.endswith(".deepseek.com")
+
+    def _rejected_request_params(
+        self, exc: Exception, request: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """从报错里认出“被拒的思考参数”，且只处理本次确实下发过的参数。
+
+        不能简单“看消息里提到了哪个名字”：拒绝提示会同时推荐另一个参数
+        （"thinking" is not supported ... use "reasoning_effort"），所以只取服务端
+        标出的 param 字段，或引号包住且紧跟 is/was not supported 的那个名字。
+        """
+        text = str(exc)
+        lowered = text.lower()
+        if not any(
+            hint in lowered
+            for hint in (
+                "unsupported_parameter",
+                "not supported",
+                "unsupported parameter",
+                "unknown parameter",
+                "unrecognized",
+            )
+        ):
+            return ()
+        names: set[str] = set()
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict) and error.get("param"):
+                names.add(str(error["param"]).strip().lower())
+        names.update(match.group(1).lower() for match in _UNSUPPORTED_PARAM_RE.finditer(text))
+        sent = set(request)
+        extra_body = request.get("extra_body")
+        if isinstance(extra_body, dict):
+            sent.update(extra_body)
+        return tuple(sorted(names & sent & set(_DEGRADABLE_PARAM_NAMES)))
+
+    def _degrade_rejected(
+        self, rejected: tuple[str, ...], budget: str
+    ) -> tuple[str, str]:
+        """记下被拒的思考参数、选下一级输出额度，返回 (额度档, 提示语)。"""
+        notes: list[str] = []
+        reasoning = [name for name in rejected if name in REASONING_PARAM_NAMES]
+        if reasoning:
+            self.rejected_params.update(reasoning)
+            _REJECTED_REASONING_PARAMS.setdefault(
+                self._param_cache_key(), set()
+            ).update(reasoning)
+            notes.append("已改用下一级思考写法")
+        if any(name in TOKEN_BUDGET_PARAM_NAMES for name in rejected):
+            budget = "requested" if budget == "auto" else "omit"
+            notes.append(
+                "已把输出额度上限降回笔记长度"
+                if budget == "requested"
+                else "已不再下发输出额度上限"
+            )
+        return budget, ("，".join(notes) if notes else "已去掉该参数")
+
+    def _can_disable_thinking(self) -> bool:
+        """空正文重试只在“确实有办法关掉思考”的通道上做，否则只是白跑一次请求。"""
+        if self._uses_deepseek_compatibility():
+            if self._is_official_deepseek() and "thinking" not in self.rejected_params:
+                return True
+            rejected = self.rejected_params
+            return "reasoning_effort" not in rejected or "reasoning" not in rejected
+        return self.model_type in {"openai", "glm", "qwen"}
 
     @staticmethod
     def _chunk_prompt(

@@ -23,6 +23,7 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 - **修复「详细复原」卡在生成阶段不动**：长视频笔记省略时间戳会被误判为丢尾，进而自动补写整段剩余转录；现已加上缺口、材料规模、耗时三道护栏，真丢尾（≤10 分钟）仍会自动补写结尾
 - **生成进度心跳**：模型输出期间每 20 秒上报「已输出 N 字」或「正在深度思考（已累计 N 字）」，深度思考阶段不再与死锁同形
 - **推理强度按风格自适应**：`auto` 档在 DeepSeek 兼容通道对「详细笔记 + 点评」/「详细复原」默认取更高思考量，「精简摘要」取中档；任务日志会打印实际生效档位（Token 消耗相应增加，可在「推理强度」里显式选定）
+- **思考参数不再写死给兼容网关**：默认只发标准 `reasoning_effort`（私有 `thinking` 仅用于官方 DeepSeek 关思考），通道拒绝某个参数时自动按下一级写法重试（`reasoning_effort` → `reasoning.effort` → 不注入；`max_tokens` 过大时也会退回笔记长度），并把结论记住，不再因为一个参数把任务打死
 
 <details>
 <summary>历史版本摘要（v1.2.2 及更早）</summary>
@@ -261,6 +262,14 @@ VideoToNo 会从 `workspace/<task-id>/task.json` 恢复最近任务。已完成�
 ### 为什么进度会停在“模型正在深度思考”一段时间？
 
 详细笔记与详细复原默认使用更高思考档，长视频可能几分钟只产生思考链。界面每 20 秒会刷新一次“正在深度思考（已累计 N 字）”或“模型已输出 N 字”，说明任务仍在推进；若希望更快或更省 Token，可把推理强度显式改为“关闭深度思考”或“高”。任何时候都可以取消任务，已生成的转录会被保留。
+
+### 大模型报 400 `unsupported_parameter`（`thinking` / `reasoning_effort`）怎么办？
+
+不同 OpenAI 兼容通道对「思考控制参数」的支持差别很大：有的只认标准的 `reasoning_effort`，收到厂商私有的 `thinking` 字段就直接 400。应用现在**默认只发标准参数**（私有的 `thinking` 仅用于官方 DeepSeek 关闭思考），并且真的被拒时会自动降级重试：`reasoning_effort` → 嵌套 `reasoning.effort` → 不注入（用模型默认思考）；同理，当我们为思考链抬高的 `max_tokens` 超过网关上限时，也会自动退回笔记长度甚至不下发该参数。日志会写明「该通道不支持 xxx 参数」。若想跳过「第一次先失败」的那一次请求，可用环境变量直接声明通道能力（逗号分隔，可取 `thinking` / `reasoning_effort` / `reasoning` / `enable_thinking`）：
+
+```powershell
+$env:VIDEOTONOTES_REJECTED_LLM_PARAMS = "thinking,reasoning_effort"
+```
 
 </details>
 

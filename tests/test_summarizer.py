@@ -96,18 +96,51 @@ def test_note_and_analysis_prompts_are_focused() -> None:
 def test_reasoning_effort_maps_by_provider() -> None:
     summarizer = object.__new__(LLMSummarizer)
     summarizer.warnings = []
+    # 不读全局“被拒参数”缓存，只看映射规则本身
+    summarizer._rejected_params = set()
 
+    # 官方 DeepSeek：开思考只用标准参数，只有“关掉思考”才需要私有 thinking
     summarizer.model_type = "deepseek"
     summarizer.model = "deepseek-v4-flash"
     summarizer.base_url = "https://api.deepseek.com"
     deepseek_request = {}
     summarizer._apply_reasoning(deepseek_request, "max")
     assert deepseek_request["reasoning_effort"] == "max"
-    assert deepseek_request["extra_body"]["thinking"]["type"] == "enabled"
+    assert "extra_body" not in deepseek_request
+    off_request = {}
+    summarizer._apply_reasoning(off_request, "off")
+    assert off_request["extra_body"]["thinking"]["type"] == "disabled"
+    assert "reasoning_effort" not in off_request
+    # auto 不注入任何思考参数（风格默认在 _stage_effort 里已解析掉）
     default_request = {}
     summarizer._apply_reasoning(default_request, "auto")
-    assert default_request["reasoning_effort"] == "high"
-    assert default_request["extra_body"]["thinking"]["type"] == "enabled"
+    assert default_request == {}
+
+    # 第三方网关托管的 deepseek 模型：只发标准参数，不发私有 thinking
+    # （v1.2.3 用户反馈：custom 通道下发 thinking 会被直接 400 拒掉）
+    summarizer.model_type = "custom"
+    summarizer.model = "deepseek-ai/DeepSeek-V4-Flash"
+    summarizer.base_url = "https://api-inference.modelscope.cn/v1/"
+    gateway_request = {}
+    summarizer._apply_reasoning(gateway_request, "max")
+    assert gateway_request["reasoning_effort"] == "max"
+    assert "extra_body" not in gateway_request
+    gateway_off = {}
+    summarizer._apply_reasoning(gateway_off, "off")
+    assert gateway_off["reasoning_effort"] == "none"
+    assert "extra_body" not in gateway_off
+    # flat 写法被拒后改试嵌套 reasoning.effort（报错提示里并列给了这两种）
+    summarizer._rejected_params = {"reasoning_effort"}
+    nested = {}
+    summarizer._apply_reasoning(nested, "high")
+    assert nested == {"extra_body": {"reasoning": {"effort": "high"}}}
+    # 两种写法都被拒后不再猜，只记一条告警
+    summarizer._rejected_params = {"thinking", "reasoning_effort", "reasoning"}
+    given_up = {}
+    summarizer._apply_reasoning(given_up, "high")
+    assert given_up == {}
+    assert any("不支持思考强度参数" in warning for warning in summarizer.warnings)
+    summarizer._rejected_params = set()
 
     summarizer.model_type = "openai"
     summarizer.model = "gpt-5.6-terra"
@@ -498,7 +531,7 @@ async def test_gpt5_chat_completion_uses_supported_token_parameter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_custom_deepseek_uses_explicit_high_thinking_with_safe_output_budget() -> None:
+async def test_custom_deepseek_uses_standard_param_with_safe_output_budget() -> None:
     captured: dict = {}
 
     async def create(**kwargs):
@@ -509,19 +542,345 @@ async def test_custom_deepseek_uses_explicit_high_thinking_with_safe_output_budg
     summarizer.model_type = "custom"
     summarizer.model = "deepseek-ai/DeepSeek-R1"
     summarizer.base_url = "https://gateway.example/v1"
+    summarizer.warnings = []
     summarizer.client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
 
-    assert await summarizer._complete("测试", 800, "auto") == "摘要"
+    assert await summarizer._complete("测试", 800, "high") == "摘要"
     assert captured["max_tokens"] == 12_000
     assert "temperature" not in captured
+    # 非官方通道不得收到私有 thinking 字段
     assert captured["reasoning_effort"] == "high"
-    assert captured["extra_body"]["thinking"]["type"] == "enabled"
+    assert "extra_body" not in captured
 
     captured.clear()
-    assert await summarizer._complete("测试", 4_600, "auto") == "摘要"
-    assert captured["max_tokens"] == 12_000
+    assert await summarizer._complete("测试", 4_600, "max") == "摘要"
+    assert captured["max_tokens"] == 13_800
+
+
+def test_is_official_deepseek_only_matches_deepseek_endpoints() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "deepseek"
+    summarizer.model = "deepseek-v4-flash"
+    summarizer.base_url = "https://api.deepseek.com"
+    assert summarizer._is_official_deepseek()
+
+    summarizer.model_type = "custom"
+    summarizer.base_url = "https://api.deepseek.com/v1"
+    assert summarizer._is_official_deepseek()
+
+    summarizer.base_url = "https://api-inference.modelscope.cn/v1/"
+    assert not summarizer._is_official_deepseek()
+    summarizer.base_url = "https://notdeepseek.example.com/v1"
+    assert not summarizer._is_official_deepseek()
+
+
+def test_env_declared_rejected_params_skip_injection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """逃生口：用环境变量声明通道不支持的思考参数（对齐 pi/pivi 的 compat 能力声明）。"""
+    monkeypatch.setenv("VIDEOTONOTES_REJECTED_LLM_PARAMS", "thinking, reasoning_effort, reasoning , bogus")
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "deepseek"
+    summarizer.model = "deepseek-v4-flash"
+    summarizer.base_url = "https://api.deepseek.com"
+    summarizer.warnings = []
+
+    assert summarizer.rejected_params == {"thinking", "reasoning_effort", "reasoning"}
+    for effort in ("max", "high"):
+        request = {}
+        summarizer._apply_reasoning(request, effort)
+        assert request == {}
+    off_request = {}
+    summarizer._apply_reasoning(off_request, "off")
+    assert off_request == {}
+    assert any("不支持思考强度参数" in warning for warning in summarizer.warnings)
+    assert summarizer._can_disable_thinking() is False
+
+
+@pytest.mark.asyncio
+async def test_rejected_thinking_param_retries_without_it_and_remembers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """官方通道也开始拒 thinking 时：去掉参数重试，不直接判任务失败。"""
+    import backend.llm_summarizer as module
+
+    monkeypatch.setattr(module, "_REJECTED_REASONING_PARAMS", {})
+    attempts: list[dict] = []
+
+    class RejectThinking(Exception):
+        status_code = 400
+        body = {"error": {"message": "\"thinking\" is not supported", "param": "thinking",
+                          "code": "unsupported_parameter"}}
+
+        def __str__(self):
+            return (
+                "Error code: 400 - {'error': {'message': '\"thinking\" is not supported "
+                "on /v1/chat/completions', 'type': 'invalid_request_error', "
+                "'param': 'thinking', 'code': 'unsupported_parameter'}}"
+            )
+
+    async def create(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise RejectThinking()
+        return _stream_response("摘要")
+
+    def build():
+        summarizer = object.__new__(LLMSummarizer)
+        summarizer.model_type = "deepseek"
+        summarizer.model = "deepseek-v4-flash"
+        summarizer.base_url = "https://api.deepseek.com"
+        summarizer.warnings = []
+        summarizer.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        return summarizer
+
+    summarizer = build()
+    progress: list[tuple[int, str]] = []
+
+    async def report(value: int, message: str) -> None:
+        progress.append((value, message))
+
+    # 官方通道只有“关思考”会用到私有 thinking，就从这个入口验证降级
+    assert (
+        await summarizer._complete(
+            "测试", 800, "off", progress_callback=report, progress=78, stage="成稿"
+        )
+        == "摘要"
+    )
+    assert attempts[0]["extra_body"]["thinking"]["type"] == "disabled"
+    assert "extra_body" not in attempts[1]
+    assert any("不支持 thinking 参数" in message for _value, message in progress)
+    # 同配置的新实例不再下发被拒参数（不会每个阶段重吃一次 400）
+    fresh = build()
+    request = fresh._build_request("测试", 800, "off")
+    assert "extra_body" not in request
+    assert request["reasoning_effort"] == "none"
+    # 还能用标准写法关思考，所以空正文重试仍可做
+    assert fresh._can_disable_thinking()
+
+
+@pytest.mark.asyncio
+async def test_rejected_reasoning_effort_falls_back_to_model_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.llm_summarizer as module
+
+    monkeypatch.setattr(module, "_REJECTED_REASONING_PARAMS", {})
+    attempts: list[dict] = []
+
+    class RejectEffort(Exception):
+        status_code = 400
+        body = {"error": {"message": "unsupported parameter", "param": "reasoning_effort"}}
+
+        def __str__(self):
+            return "Error code: 400 - invalid reasoning_effort: unsupported parameter"
+
+    async def create(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise RejectEffort()
+        return _stream_response("摘要")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "deepseek-ai/DeepSeek-V4"
+    summarizer.base_url = "https://gateway.example/v1"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 800, "high") == "摘要"
+    assert len(attempts) == 2
+    assert "reasoning_effort" not in attempts[1]
+    # 下一级：嵌套 reasoning.effort（经 extra_body 合并进 body）
+    assert attempts[1]["extra_body"]["reasoning"] == {"effort": "high"}
+    # 后续阶段不再重复下发 flat 参数
+    request = summarizer._build_request("测试", 800, "high")
+    assert "reasoning_effort" not in request
+    assert request["max_tokens"] == 12_000
+    # 同一配置的新实例也从缓存里读到该结论
+    fresh = object.__new__(LLMSummarizer)
+    fresh.model_type = "custom"
+    fresh.model = "deepseek-ai/DeepSeek-V4"
+    fresh.base_url = "https://gateway.example/v1"
+    fresh.warnings = []
+    assert "reasoning_effort" not in fresh._build_request("测试", 800, "high")
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_ladder_flat_then_nested_then_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """flat reasoning_effort → 嵌套 reasoning.effort → 不注入，逐档降级。"""
+    import backend.llm_summarizer as module
+
+    monkeypatch.setattr(module, "_REJECTED_REASONING_PARAMS", {})
+    attempts: list[dict] = []
+
+    class RejectParam(Exception):
+        status_code = 400
+
+        def __init__(self, param: str):
+            super().__init__(f'Error code: 400 - "{param}" is not supported')
+            self.body = {"error": {"message": f"{param} unsupported", "param": param}}
+
+    async def create(**kwargs):
+        attempts.append(dict(kwargs))
+        extra = kwargs.get("extra_body") or {}
+        if "reasoning_effort" in kwargs:
+            raise RejectParam("reasoning_effort")
+        if isinstance(extra, dict) and "reasoning" in extra:
+            raise RejectParam("reasoning")
+        return _stream_response("摘要")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "deepseek-ai/DeepSeek-V4"
+    summarizer.base_url = "https://gateway.example/v1"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 800, "high") == "摘要"
+    assert len(attempts) == 3
+    assert attempts[0]["reasoning_effort"] == "high"
+    assert attempts[1]["extra_body"]["reasoning"] == {"effort": "high"}
+    assert "reasoning_effort" not in attempts[2]
+    assert "extra_body" not in attempts[2]
+    assert summarizer.rejected_params == {"reasoning_effort", "reasoning"}
+    assert any("不支持思考强度参数" in warning for warning in summarizer.warnings)
+    assert not summarizer._can_disable_thinking()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_max_tokens_degrades_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第三方网关的输出额度上限常低于我们给思考档抬高的预算。"""
+    import backend.llm_summarizer as module
+
+    monkeypatch.setattr(module, "_REJECTED_REASONING_PARAMS", {})
+    attempts: list[dict] = []
+
+    class RejectTokens(Exception):
+        status_code = 400
+
+        def __init__(self, message: str):
+            super().__init__(message)
+            self.body = {
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "param": "max_tokens",
+                    "code": "unsupported_parameter",
+                }
+            }
+
+    async def create(**kwargs):
+        attempts.append(dict(kwargs))
+        if kwargs.get("max_tokens", 0) > 8_000:
+            raise RejectTokens(
+                "Error code: 400 - 'max_tokens' is not supported with this model "
+                "(limit 8192)"
+            )
+        return _stream_response("摘要")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "DeepSeek-V4-Flash"
+    summarizer.base_url = "https://developer.amd.com.cn/radeon/v1"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 4_600, "max") == "摘要"
+    assert len(attempts) == 2
+    assert attempts[0]["max_tokens"] == 13_800  # max 档抬高后的预算
+    assert attempts[1]["max_tokens"] == 4_600  # 退回调用方额度
+    # 思考参数不受影响，仍然带着
+    assert attempts[1]["reasoning_effort"] == "max"
+    assert any("不支持 max_tokens 参数" in warning for warning in summarizer.warnings)
+    assert summarizer.rejected_params == set()  # 额度问题不该被记成“参数不支持”
+
+    # 额度参数彻底不支持时，改为不下发
+    attempts.clear()
+
+    async def create_always_reject(**kwargs):
+        attempts.append(dict(kwargs))
+        if "max_tokens" in kwargs:
+            raise RejectTokens("Error code: 400 - 'max_tokens' is not supported")
+        return _stream_response("摘要")
+
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create_always_reject))
+    )
+    summarizer.warnings = []
+    assert await summarizer._complete("测试", 4_600, "high") == "摘要"
+    assert [a.get("max_tokens") for a in attempts] == [12_000, 4_600, None]
+    assert any("已不再下发输出额度上限" in warning for warning in summarizer.warnings)
+
+
+@pytest.mark.asyncio
+async def test_other_400_errors_still_fail_the_call() -> None:
+
+    async def create(**kwargs):
+        raise RuntimeError("Error code: 400 - {'error': {'message': 'maximum context length exceeded'}}")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "deepseek-ai/DeepSeek-V4"
+    summarizer.base_url = "https://gateway.example/v1"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(RuntimeError, match="maximum context length"):
+        await summarizer._complete("测试", 800, "high")
+
+
+def test_rejected_request_params_only_reports_sent_params() -> None:
+    """拒绝提示里会同时推荐另一个参数，不得把推荐项也当成被拒参数。"""
+
+    class FakeError(Exception):
+        status_code = 400
+        body = {
+            "error": {
+                "message": (
+                    '"thinking" is not supported on /v1/chat/completions and was '
+                    'not applied. Use "reasoning_effort" (or "reasoning.effort") '
+                    "to control thinking."
+                ),
+                "type": "invalid_request_error",
+                "param": "thinking",
+                "code": "unsupported_parameter",
+            }
+        }
+
+        def __str__(self):
+            return (
+                "Error code: 400 - {'error': {'message': '\"thinking\" is not supported "
+                "on /v1/chat/completions and was not applied. Use \"reasoning_effort\" "
+                "(or \"reasoning.effort\") to control thinking.', "
+                "'type': 'invalid_request_error', 'param': 'thinking', "
+                "'code': 'unsupported_parameter'}}"
+            )
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    request = {"model": "m", "reasoning_effort": "max", "extra_body": {"thinking": {"type": "enabled"}}}
+    assert summarizer._rejected_request_params(FakeError(), request) == ("thinking",)
+
+    # 本次请求没下发 thinking 时不应误判可重试
+    assert summarizer._rejected_request_params(FakeError(), {"model": "m"}) == ()
+
+    other = RuntimeError("Error code: 400 - {'error': {'message': 'invalid model'}}")
+    assert summarizer._rejected_request_params(other, request) == ()
 
 
 def test_auto_resolves_style_default_only_on_deepseek_compatible_channels() -> None:
