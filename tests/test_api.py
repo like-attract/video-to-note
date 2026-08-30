@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import launcher
 from backend import main
+from backend.config_store import ConfigStore
 from backend.transcript import TranscriptSegment
 from backend.video_processor import (
     BiliPage,
@@ -1091,3 +1092,144 @@ async def test_pipeline_logs_bilibili_api_fallback_note(
     task = main.tasks[task_id]
     assert task["status"] == "completed"
     assert any("开放接口直连" in log for log in task["logs"])
+
+
+# ---- 本机 API Key 只按接口地址复用 ----
+
+DEEPSEEK_HOST = "https://api.deepseek.com"
+CORP_GATEWAY = "https://gateway.corp.example/v1"
+
+
+def _run_to_generation_stage(monkeypatch, tmp_path: Path, captured: list) -> None:
+    """把任务推到"生成笔记"阶段：字幕直接给，LLM 只记录构造参数，不发请求。"""
+    processor = VideoProcessor(tmp_path)
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "档案测试", "source": "bilibili", "duration": 30, "owner": "UP"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return SubtitleResult([TranscriptSegment(0, 5, "内容")], "zh", "platform_subtitle")
+
+    class RecordingSummarizer:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+            self.model = kwargs.get("model")
+            self.base_url = kwargs.get("base_url")
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return "模型默认"
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 笔记"
+
+        async def test_connection(self):
+            return True, "连接正常", 0.01
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", RecordingSummarizer)
+
+
+@pytest.mark.asyncio
+async def test_task_reuses_key_saved_for_the_same_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    main.config_store.put_key(
+        provider="custom", base_url=CORP_GATEWAY, api_key="sk-saved-here", label="公司代理"
+    )
+    captured: list = []
+    _run_to_generation_stage(monkeypatch, tmp_path, captured)
+
+    task_id = "same-endpoint-key"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    try:
+        await main.process_video_task(
+            task_id,
+            main.SummarizeRequest(
+                video_url="https://www.bilibili.com/video/BV1xx",
+                llm_config=main.LLMConfig(
+                    model_type="custom", base_url=CORP_GATEWAY, model="kimi-k2.6"
+                ),
+            ),
+        )
+        task = main.tasks[task_id]
+
+        assert task["status"] == "completed"
+        assert captured[0]["api_key"] == "sk-saved-here"
+        assert any("Key=本机已存 sk-s****（公司代理）" in log for log in task["logs"])
+    finally:
+        main.tasks.pop(task_id, None)
+
+
+@pytest.mark.asyncio
+async def test_task_never_borrows_a_key_for_another_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """换 Provider / 换网关时不许"顺手"用本机另一把 Key：那正是密钥外流的形状。"""
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    main.config_store.put_key(provider="deepseek", base_url=DEEPSEEK_HOST, api_key="sk-deepseek")
+    captured: list = []
+    _run_to_generation_stage(monkeypatch, tmp_path, captured)
+
+    task_id = "cross-endpoint-key"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    try:
+        await main.process_video_task(
+            task_id,
+            main.SummarizeRequest(
+                video_url="https://www.bilibili.com/video/BV1xx",
+                llm_config=main.LLMConfig(
+                    model_type="custom", base_url=CORP_GATEWAY, model="kimi-k2.6"
+                ),
+            ),
+        )
+        task = main.tasks[task_id]
+
+        assert task["status"] == "failed"
+        assert captured == []  # 连客户端都没构造，不可能有出站请求
+        assert CORP_GATEWAY in task["error"]
+        assert "sk-deepseek" not in task["error"]
+    finally:
+        main.tasks.pop(task_id, None)
+
+
+def test_llm_test_resolves_key_by_endpoint_without_mixing_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    captured: list = []
+    _run_to_generation_stage(monkeypatch, tmp_path, captured)
+    client = TestClient(main.app)
+
+    rejected = client.post(
+        "/api/llm-test",
+        json={"model_type": "custom", "base_url": CORP_GATEWAY, "model": "kimi-k2.6"},
+    ).json()
+    assert rejected["ok"] is False
+    assert CORP_GATEWAY in rejected["error"]
+    assert captured == []
+
+    main.config_store.put_key(
+        provider="custom", base_url=CORP_GATEWAY, api_key="sk-corp", model="saved-model-id"
+    )
+    passed = client.post(
+        "/api/llm-test", json={"model_type": "custom", "base_url": CORP_GATEWAY}
+    ).json()
+    assert passed["ok"] is True
+    assert captured[-1]["api_key"] == "sk-corp"
+    # 只有 Key 会按地址复用；已存档案里的 model 不会被"顺"过来。
+    assert captured[-1]["model"] is None
+    assert passed["base_url"] == CORP_GATEWAY
+    assert passed["key_source"].startswith("本机已存")
+
+    typed = client.post(
+        "/api/llm-test",
+        json={"model_type": "custom", "base_url": CORP_GATEWAY, "api_key": "sk-typed"},
+    ).json()
+    assert typed["key_source"] == "本次请求提供"
+    assert captured[-1]["api_key"] == "sk-typed"

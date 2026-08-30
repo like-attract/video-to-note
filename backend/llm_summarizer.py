@@ -30,6 +30,39 @@ PROVIDER_DEFAULTS = {
     "moonshot": ("https://api.moonshot.cn/v1", "kimi-k3"),
 }
 
+
+def default_base_url(model_type: str) -> str:
+    """内置 Provider 的官方接口地址；custom 或未知 Provider 返回空串。"""
+    entry = PROVIDER_DEFAULTS.get((model_type or "").strip().lower())
+    return entry[0] if entry else ""
+
+
+def normalize_endpoint_host(base_url: str, model_type: str = "") -> str:
+    """把接口地址归一成可比对的身份（host[:port] + 去掉尾斜杠的路径）。
+
+    本机保存的 API Key 以此为键，语义是"这把 Key 只可能被发给它当初那个端点"：
+    因此只取 host+path，忽略大小写、尾斜杠、默认端口和 query/fragment
+    （query 里可能带凭据，绝不能成为身份的一部分）。地址完全无法解析时返回空串，
+    调用方据此拒绝复用任何已保存的 Key。
+    """
+    value = (base_url or "").strip() or default_base_url(model_type)
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"https://{value}"
+    try:
+        parts = urlparse(value)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    if port and port not in (80, 443):
+        host = f"{host}:{port}"
+    path = (parts.path or "").rstrip("/").lower()
+    return f"{host}{path}"
+
 SUMMARY_CHUNK_CHARACTERS = 9_000
 MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300

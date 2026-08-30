@@ -40,8 +40,9 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 from pydantic import BaseModel, Field, SecretStr
 
-from .config_store import ConfigStore
-from .llm_summarizer import LLMSummarizer
+from . import secret_box
+from .config_store import LLM_KEYS_FILE, ConfigStore
+from .llm_summarizer import LLMSummarizer, default_base_url, normalize_endpoint_host
 from .bili_login import BiliLoginManager
 from .douyin_login import DouyinLoginManager
 from .transcript import (
@@ -204,10 +205,25 @@ class LLMConfigPayload(BaseModel):
     api_key: SecretStr
     base_url: str | None = None
     model: str | None = None
+    label: str | None = None
+
+
+class LLMKeyPayload(BaseModel):
+    """按接口地址保存一把 API Key：provider + base_url 决定它属于哪个端点。"""
+
+    api_key: SecretStr
+    provider: str = "deepseek"
+    base_url: str | None = None
+    label: str | None = None
+    model: str | None = None
 
 
 class LLMTestPayload(BaseModel):
-    """测试连接的可选覆盖参数；为 None 的字段回退到已保存配置。"""
+    """测试连接的可选覆盖参数。
+
+    字段不再与已保存配置逐项混合（那会把一个端点的 Key 配到另一个端点上），
+    只有 API Key 会在地址完全一致时复用本机已存的那一把。
+    """
 
     model_type: str | None = None
     api_key: SecretStr | None = None
@@ -692,34 +708,128 @@ async def open_whisper_manual_folder(payload: WhisperManualFolderPayload) -> dic
     }
 
 
+def _key_storage_info() -> dict[str, Any]:
+    return {"algorithm": secret_box.storage_backend(), "secure": secret_box.is_secure_storage()}
+
+
+def resolve_llm_credentials(*, model_type: str, base_url: str | None, api_key: str) -> tuple[str, str]:
+    """显式 Key 永远优先；否则只按接口地址复用本机已存 Key。
+
+    地址不一致就直接失败，不会"先拿本机某把 Key 试试"——那正是把 DeepSeek 的
+    Key 发给第三方网关的路径。返回 ``(api_key, 来源说明)``，来源说明进任务日志。
+    """
+    explicit = (api_key or "").strip()
+    if explicit:
+        return explicit, "本次请求提供"
+    resolved = config_store.resolve_stored_key(model_type=model_type, base_url=base_url or "")
+    secret = str(resolved.get("api_key") or "")
+    if secret:
+        entry = resolved.get("entry") or {}
+        where = str(entry.get("label") or resolved.get("host") or "")
+        masked = str(entry.get("api_key_masked") or "")
+        return secret, f"本机已存 {masked}（{where}）"
+    raise RuntimeError(_missing_key_message(model_type, base_url, resolved))
+
+
+def _missing_key_message(model_type: str, base_url: str | None, resolved: dict[str, Any]) -> str:
+    target = (base_url or "").strip() or default_base_url(model_type) or "未指定接口地址"
+    reason = str(resolved.get("reason") or "")
+    detail = {
+        "undecryptable": (
+            f"为 {target} 保存的 Key 无法解密（可能来自其他机器或其他 Windows 账户），"
+            "请重新填写并保存"
+        ),
+        "corrupt_keys_file": (
+            f"本机密钥文件 {LLM_KEYS_FILE} 已损坏，请在模型配置页清除本机配置后重新保存"
+        ),
+        "unknown_endpoint": f"接口地址无法识别（{target}），不会复用任何本机 Key",
+    }.get(reason) or f"本机没有为 {target} 保存 Key"
+    return (
+        f"未提供 API Key，{detail}。"
+        "请在模型配置页填写 API Key 并「保存到本机」，或在请求中直接带上 api_key。"
+    )
+
+
+@app.get("/api/llm-keys")
+async def get_llm_keys(base_url: str = "", provider: str = "") -> dict[str, Any]:
+    """列出本机保存的接口 Key（只有掩码）；带 base_url 时顺带回答"这个地址存了没有"。"""
+    if config_store.keys_are_corrupt():
+        return {"storage": _key_storage_info(), "error": "corrupt_keys_file", "entries": []}
+    payload: dict[str, Any] = {"storage": _key_storage_info(), "entries": config_store.list_keys()}
+    if base_url or provider:
+        resolved = config_store.resolve_stored_key(model_type=provider, base_url=base_url)
+        entry = resolved.get("entry")
+        key_state = "none"
+        if entry:
+            key_state = "saved" if resolved.get("api_key") else "undecryptable"
+        payload["match"] = {
+            "saved": bool(entry),
+            "key_state": key_state,
+            "endpoint": normalize_endpoint_host(base_url, provider),
+            **(entry or {}),
+        }
+    return payload
+
+
+@app.put("/api/llm-keys")
+async def put_llm_key(payload: LLMKeyPayload) -> dict[str, Any]:
+    """显式保存：把某个接口地址的 API Key 加密写入本机。清除只能走 DELETE。"""
+    try:
+        entry = config_store.put_key(
+            provider=payload.provider,
+            base_url=payload.base_url or "",
+            api_key=payload.api_key.get_secret_value(),
+            label=payload.label,
+            model=payload.model,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except secret_box.SecretBoxError as error:
+        raise HTTPException(status_code=500, detail=f"本机加密保存失败：{error}") from error
+    return {"saved": True, **entry}
+
+
+@app.delete("/api/llm-keys")
+async def delete_llm_key(base_url: str = "", provider: str = "") -> dict[str, Any]:
+    return {"removed": config_store.delete_key(base_url=base_url, model_type=provider)}
+
+
 @app.get("/api/llm-config")
 async def get_llm_config() -> dict[str, Any]:
-    """Return saved configuration metadata without exposing the API key."""
-    config = config_store.load_llm_config()
-    if not config:
+    """旧接口：报告本机最近保存的一条配置（含掩码，不含 Key 原文），供 MCP 免传参复用。"""
+    entry = config_store.most_recent_entry()
+    if not entry or not entry["has_key"]:
         return {"saved": False}
-    api_key = str(config.get("api_key") or "")
     return {
         "saved": True,
-        "model_type": config.get("model_type"),
-        "model": config.get("model"),
-        "base_url": config.get("base_url"),
-        "api_key_masked": f"{api_key[:4]}****" if api_key else None,
+        "model_type": entry["provider"],
+        "model": entry["model"],
+        "base_url": entry["base_url"] or None,
+        "api_key_masked": entry["api_key_masked"] or None,
     }
 
 
 @app.post("/api/llm-config")
 async def save_llm_config(payload: LLMConfigPayload) -> dict[str, Any]:
-    config: dict[str, Any] = {
-        "model_type": payload.model_type,
-        "api_key": payload.api_key.get_secret_value(),
+    """旧接口：等价于按接口地址保存 Key（MCP 的 save_llm_config 仍走这里）。"""
+    try:
+        entry = config_store.put_key(
+            provider=payload.model_type,
+            base_url=payload.base_url or "",
+            api_key=payload.api_key.get_secret_value(),
+            label=payload.label,
+            model=payload.model,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except secret_box.SecretBoxError as error:
+        raise HTTPException(status_code=500, detail=f"本机加密保存失败：{error}") from error
+    return {
+        "saved": True,
+        "model_type": entry["provider"],
+        "model": entry["model"],
+        "label": entry["label"],
     }
-    if payload.base_url:
-        config["base_url"] = payload.base_url
-    if payload.model:
-        config["model"] = payload.model
-    config_store.save_llm_config(config)
-    return {"saved": True, "model_type": payload.model_type, "model": config.get("model")}
 
 
 @app.post("/api/llm-test")
@@ -727,44 +837,45 @@ async def test_llm_connection(
     payload: LLMTestPayload | None = None,
 ) -> dict[str, Any]:
     """用（可选覆盖的）LLM 配置做一次轻量连通测试。"""
-    saved = config_store.load_llm_config() or {}
-    model_type = (
-        payload.model_type if payload and payload.model_type else saved.get("model_type", "deepseek")
-    )
-    api_key = (
-        payload.api_key.get_secret_value()
-        if payload and payload.api_key
-        else str(saved.get("api_key") or "")
-    )
-    base_url = (
-        payload.base_url if payload and payload.base_url else saved.get("base_url")
-    )
-    model = payload.model if payload and payload.model else saved.get("model")
-    if not api_key:
-        return {"ok": False, "error": "未配置 API Key，请先填写"}
+    body = payload or LLMTestPayload()
+    model_type = body.model_type or "deepseek"
+    base_url = body.base_url or default_base_url(model_type) or None
+    try:
+        api_key, key_source = resolve_llm_credentials(
+            model_type=model_type,
+            base_url=base_url,
+            api_key=body.api_key.get_secret_value() if body.api_key else "",
+        )
+    except RuntimeError as error:
+        return {"ok": False, "error": str(error)}
     try:
         summarizer = LLMSummarizer(
             model_type=model_type,
             api_key=api_key,
             base_url=base_url,
-            model=model,
+            model=body.model,
         )
         ok, message, latency = await summarizer.test_connection()
         return {
             "ok": ok,
             "message": message,
             "latency_ms": int(round(latency * 1000)),
-            "model": model or summarizer.model,
+            "model": body.model or summarizer.model,
             "base_url": summarizer.base_url,
+            "key_source": key_source,
         }
     except Exception as exc:
         return {"ok": False, "error": f"初始化失败：{exc}"}
 
 
 @app.delete("/api/llm-config")
-async def clear_llm_config() -> dict[str, bool]:
-    config_store.clear_llm_config()
-    return {"saved": False}
+async def clear_llm_config() -> dict[str, Any]:
+    """旧接口：只清除它刚报告的那一条，不会一次清空全部本机 Key。"""
+    entry = config_store.most_recent_entry()
+    removed = bool(entry) and config_store.delete_key(
+        base_url=entry["base_url"], model_type=entry["provider"]
+    )
+    return {"saved": False, "removed": removed}
 
 
 @app.get("/api/bili-credentials")
@@ -804,6 +915,8 @@ async def health_check() -> dict[str, Any]:
         "version": app.version,
         # portable/dev 互不复用对方实例，避免 dev 服务占用端口导致打包版不驻留托盘
         "mode": "portable" if getattr(sys, "frozen", False) else "dev",
+        # 本机保存的 API Key 是加密还是明文回退，答疑时看一眼健康接口即可确认
+        "llm_key_storage": secret_box.storage_backend(),
         "dependencies": {
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
@@ -1330,12 +1443,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         config = request.llm_config
         base_url = config.base_url or config.custom_base_url
         model = config.model or config.custom_model_name
-        api_key = config.api_key.get_secret_value().strip()
-        if not api_key:
-            saved_config = config_store.load_llm_config() or {}
-            api_key = str(saved_config.get("api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("未提供 API Key，且本机没有已保存的 LLM 配置")
+        api_key, key_source = resolve_llm_credentials(
+            model_type=config.model_type,
+            base_url=base_url,
+            api_key=config.api_key.get_secret_value(),
+        )
         summarizer = LLMSummarizer(
             model_type=config.model_type,
             api_key=api_key,
@@ -1343,7 +1455,8 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             model=model,
         )
         task["logs"].append(
-            f"调用模型：Provider={config.model_type}，Model={model}，Base URL={base_url}"
+            f"调用模型：Provider={config.model_type}，Model={model}，"
+            f"Base URL={base_url}，Key={key_source}"
         )
         task["logs"].append(
             f"推理设置：{summarizer.describe_effort(request.reasoning_effort, request.summary_style)}"
