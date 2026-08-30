@@ -33,7 +33,7 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
 
 ## 需要用户提供的信息
 
-- **API Key**：生成笔记必须调用大模型。若用户曾通过 MCP 工具 `save_llm_config` 保存过配置，可不传；否则任务会失败并提示"未提供 API Key"，此时向用户询问供应商（deepseek/openai/qwen/glm/moonshot/custom）和 Key，用 `--provider` / `--api-key`（custom 另加 `--base-url` / `--custom-model`）重新提交。
+- **API Key**：生成笔记必须调用大模型。本机为某个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`）时可不传；只存过一个地址时脚本会自动沿用该通道，存了多个则不会猜。任务失败提示"未提供 API Key"时会点名具体接口地址，此时向用户询问供应商（deepseek/openai/qwen/glm/moonshot/custom）和 Key，用 `--provider` / `--api-key`（custom 另加 `--base-url` / `--custom-model`）重新提交。已保存的 Key 只在目标地址一致时复用，不会被发给别的网关。
 - 本地文件上传上限 2GB；大视频（默认 ≥300MB）未要求截图时服务端会自动只保留音频。
 
 ## 手动走 API（需要自定义流程时）

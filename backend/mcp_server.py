@@ -8,9 +8,10 @@
 任务实际由本地后端进程执行，MCP 只是访问通道，因此从 UI、Cherry Studio 还是 Codex
 提交，看到的都是同一份任务状态；Whisper 模型缓存、任务目录等全部复用本机资源。
 
-LLM 配置与 B 站凭据可由后端统一保管（workspace/llm_config.json 与
+LLM 接口 Key 与 B 站凭据可由后端统一保管（workspace/llm_keys.json 与
 bili_credentials.json）：调用 summarize_video 时省略 api_key / bilibili_* 参数
-即自动使用已保存的配置，无需每次手动提供。
+即自动使用已保存的配置，无需每次手动提供。Key 与保存时的接口地址绑定，
+换网关或换 Provider 时不会借用别的地址的 Key。
 """
 from __future__ import annotations
 
@@ -40,7 +41,8 @@ mcp = FastMCP(
         "（视频处理通常需要 1-10 分钟）。\n"
         "LLM 配置与 B 站凭据支持保存到本机（save_llm_config / save_bilibili_credentials），"
         "保存后调用 summarize_video 时无需再传 api_key 或 bilibili_* 参数；"
-        "可通过 get_saved_config 查看保存状态。若用户已保存过配置，不要重复索要。\n"
+        "Key 按接口地址保管，只会被复用给保存它的那个端点，可用 get_saved_config 或 "
+        "list_llm_keys 查看本机已保存哪些地址（脱敏）。若用户已保存过配置，不要重复索要。\n"
         "提交任务后请调用 wait_for_task 等待终态（每次最多等待 45 秒，可重复调用），"
         "不要频繁轮询 get_task_status（仅在需要中间进度时用它）。"
     ),
@@ -80,6 +82,9 @@ class BackendClient:
 
     async def get_llm_config(self) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "GET", "/api/llm-config")
+
+    async def list_llm_keys(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self._request, "GET", "/api/llm-keys")
 
     async def save_llm_config(self, config: dict[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(
@@ -157,6 +162,11 @@ class InProcessBackend:
 
         return await get_llm_config()
 
+    async def list_llm_keys(self) -> dict[str, Any]:
+        from .main import get_llm_keys
+
+        return await get_llm_keys()
+
     async def save_llm_config(self, config: dict[str, Any]) -> dict[str, Any]:
         from .main import LLMConfigPayload, save_llm_config
 
@@ -202,7 +212,12 @@ async def _resolve_llm_config(
     model: str | None,
     base_url: str | None,
 ) -> dict[str, Any]:
-    """api_key 缺省时使用本机已保存的 LLM 配置；显式参数可覆盖已保存值。"""
+    """组装 llm_config。
+
+    显式 ``api_key`` 时完全按调用方参数走。省略 ``api_key`` 时，**不再把调用方的
+    model_type/base_url 覆盖到已保存的配置上**——那种混合正是"A 端点的 Key 被发给
+    B 端点"的来路。改为只透传调用方点名的字段，由后端按接口地址决定能否复用本机 Key。
+    """
     if api_key:
         config: dict[str, Any] = {"model_type": model_type or "deepseek", "api_key": api_key}
         if base_url:
@@ -210,29 +225,42 @@ async def _resolve_llm_config(
         if model:
             config["model"] = model
         return config
+    if model_type or base_url or model:
+        targeted: dict[str, Any] = {"model_type": model_type or "deepseek", "api_key": ""}
+        if base_url:
+            targeted["base_url"] = base_url
+        if model:
+            targeted["model"] = model
+        return targeted
     saved = await backend.get_llm_config()
     if not saved.get("saved"):
+        keys = await backend.list_llm_keys()
         raise RuntimeError(
-            "未提供 api_key，且本机未保存 LLM 配置。"
-            "请先调用 save_llm_config 保存配置，或在调用中传入 api_key。"
+            "未提供 api_key，且本机没有可复用的 LLM 配置。"
+            f"本机已保存密钥的接口：{_describe_saved_keys(keys)}。"
+            "请先调用 save_llm_config 保存对应接口地址的配置，或在调用中传入 api_key。"
         )
     config = {
         "model_type": saved.get("model_type") or "deepseek",
-        # The HTTP status endpoint never returns the secret. An empty value tells
-        # the local backend to resolve it from ConfigStore at execution time.
+        # 空串 = 让本地后端在执行时按接口地址取本机已存的 Key；
+        # HTTP 状态接口从不返回密钥原文，这里也不返回。
         "api_key": "",
     }
     if saved.get("base_url"):
         config["base_url"] = saved["base_url"]
     if saved.get("model"):
         config["model"] = saved["model"]
-    if model_type:
-        config["model_type"] = model_type
-    if base_url:
-        config["base_url"] = base_url
-    if model:
-        config["model"] = model
     return config
+
+
+def _describe_saved_keys(status: dict[str, Any]) -> str:
+    entries = status.get("entries") or []
+    if not entries:
+        return "（无）"
+    return "、".join(
+        f"{entry.get('label') or entry.get('host')}（{entry.get('host')}）"
+        for entry in entries
+    )
 
 
 async def _resolve_bili_cookie(
@@ -394,23 +422,35 @@ async def save_llm_config(
     model_type: str = "deepseek",
     model: str | None = None,
     base_url: str | None = None,
+    label: str | None = None,
 ) -> dict[str, Any]:
-    """把大模型配置保存到本机（明文写入工作目录，仅本机可读，供 MCP 客户端复用）。
+    """把某个接口地址的大模型配置保存到本机（Windows 下用 DPAPI 加密，其他平台明文并如实上报）。
 
-    保存后调用 summarize_video 时无需再传 api_key / model_type / model。
+    Key 与"接口地址"绑定：只有调用 summarize_video 时的 provider/base_url 指向同一个
+    端点，才会复用这把 Key，不会把它发给别的网关。保存后调用 summarize_video
+    可省略 api_key / model_type / model。
     """
     config: dict[str, Any] = {"model_type": model_type, "api_key": api_key}
     if model:
         config["model"] = model
     if base_url:
         config["base_url"] = base_url
-    await _get_backend().save_llm_config(config)
+    if label:
+        config["label"] = label
+    saved = await _get_backend().save_llm_config(config)
     return {
         "saved": True,
         "model_type": model_type,
         "model": model,
-        "hint": "已保存到本机。之后调用 summarize_video 可省略 api_key。",
+        "label": saved.get("label") or label,
+        "hint": "已保存到本机。之后对该接口调用 summarize_video 可省略 api_key。",
     }
+
+
+@mcp.tool()
+async def list_llm_keys() -> dict[str, Any]:
+    """列出本机已保存密钥的接口地址（只返回掩码，绝不返回 Key 原文）与加密方式。"""
+    return await _get_backend().list_llm_keys()
 
 
 @mcp.tool()
@@ -422,7 +462,8 @@ async def save_bilibili_credentials(
     """把 B 站访问凭据保存到本机（明文写入工作目录，仅本机可读）。
 
     保存后处理 B 站视频会自动携带这些凭据（优先使用 AI 字幕），无需每次传入。
-    凭据保存在后端工作目录，注意不要分享该文件。
+    凭据明文保存在后端工作目录（workspace/bili_credentials.json，服务仅本机回环可访问），
+    注意不要分享该文件或整个工作目录。
     """
     await _get_backend().save_bili_credentials(
         {"sessdata": sessdata, "bili_jct": bili_jct, "buvid3": buvid3}
@@ -434,6 +475,7 @@ async def save_bilibili_credentials(
 async def get_saved_config() -> dict[str, Any]:
     """查看本机已保存的 LLM 配置与 B 站凭据状态（敏感信息脱敏显示）。"""
     llm = await _get_backend().get_llm_config()
+    keys = await _get_backend().list_llm_keys()
     bili = await _get_backend().get_bili_credentials()
     return {
         "llm_config": {
@@ -442,6 +484,18 @@ async def get_saved_config() -> dict[str, Any]:
             "model": llm.get("model"),
             "api_key_masked": llm.get("api_key_masked"),
         },
+        # 本机可免传参复用 Key 的所有接口；llm_config 只是其中最近保存的那一条。
+        "endpoints": [
+            {
+                "label": entry.get("label"),
+                "host": entry.get("host"),
+                "provider": entry.get("provider"),
+                "model": entry.get("model"),
+                "api_key_masked": entry.get("api_key_masked"),
+            }
+            for entry in (keys.get("entries") or [])
+        ],
+        "key_storage": (keys.get("storage") or {}).get("algorithm"),
         "bilibili_credentials": {
             "saved": bool(bili.get("saved")),
             "sessdata_masked": bili.get("sessdata_masked"),

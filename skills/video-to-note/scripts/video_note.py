@@ -10,7 +10,7 @@
 常用选项:
     --style {detailed,faithful,concise}   笔记风格（默认 detailed）
     --provider {deepseek,openai,qwen,glm,moonshot,custom}
-    --api-key KEY                         大模型 API Key（已保存过配置可省略）
+    --api-key KEY                         大模型 API Key（该地址已保存到本机可省略）
     --wait SECONDS                        最长等待秒数（默认 1800）
     --out PATH                            把笔记写入文件（默认打印到 stdout）
 
@@ -78,6 +78,24 @@ def find_service() -> str:
     )
 
 
+def pick_saved_channel(base: str) -> dict | None:
+    """本机只保存过一个接口的 Key 时沿用它的通道；保存了多个则返回 None（不猜）。"""
+    try:
+        status = http_json("GET", f"{base}/api/llm-keys", timeout=10)
+    except RuntimeError:
+        return None
+    entries = [entry for entry in (status.get("entries") or []) if entry.get("has_key")]
+    if len(entries) != 1:
+        return None
+    entry = entries[0]
+    channel = {
+        "model_type": entry.get("provider") or "custom",
+        "base_url": entry.get("base_url"),
+        "model": entry.get("model"),
+    }
+    return {key: value for key, value in channel.items() if value}
+
+
 def upload_file(base: str, path: Path) -> str:
     size = path.stat().st_size
     if size > UPLOAD_LIMIT_BYTES:
@@ -125,7 +143,14 @@ def poll_task(base: str, task_id: str, wait_seconds: int) -> dict:
         if status == "completed":
             return task
         if status == "failed":
-            print(f"[VideoToNo] 任务失败：{task.get('error') or '未知原因'}", file=sys.stderr)
+            error_text = str(task.get("error") or "未知原因")
+            print(f"[VideoToNo] 任务失败：{error_text}", file=sys.stderr)
+            if "API Key" in error_text:
+                print(
+                    "[VideoToNo] 提示：该接口地址本机没有可复用的 Key。用 --api-key 提供，"
+                    "或在网页「总结模型」填入 Key 后点「保存到本机」。",
+                    file=sys.stderr,
+                )
             print(f"[VideoToNo] 可复用中间产物重试，task_id={task_id}", file=sys.stderr)
             sys.exit(2)
         if status == "cancelled":
@@ -151,7 +176,7 @@ def main() -> None:
     parser.add_argument("source", help="视频链接（B站/抖音/YouTube）或本地媒体文件路径")
     parser.add_argument("--style", choices=["detailed", "faithful", "concise"], default="detailed")
     parser.add_argument("--provider", default=None, help=f"大模型供应商：{', '.join(sorted(PROVIDERS))}")
-    parser.add_argument("--api-key", default="", help="大模型 API Key（保存过配置可省略）")
+    parser.add_argument("--api-key", default="", help="大模型 API Key（该接口地址已保存到本机时可省略）")
     parser.add_argument("--base-url", default=None, help="custom 供应商的接口地址")
     parser.add_argument("--custom-model", default=None, help="custom 供应商的模型名")
     parser.add_argument("--whisper-model", default="base", help="本地转写模型（默认 base）")
@@ -169,6 +194,20 @@ def main() -> None:
     base = find_service()
     print(f"[VideoToNo] 服务已连接：{base}")
 
+    # 省略 --api-key 时不下发该字段：后端按接口地址复用本机已存的 Key，
+    # 地址对不上会直接报错，而不是借用别的接口的 Key。
+    if args.api_key.strip() or args.provider:
+        llm_config: dict = {"model_type": args.provider or "deepseek"}
+        if args.api_key.strip():
+            llm_config["api_key"] = args.api_key.strip()
+        if args.base_url:
+            llm_config["base_url"] = args.base_url
+        if args.custom_model:
+            llm_config["model"] = args.custom_model
+    else:
+        # 什么都没指定：本机只存过一个接口时就沿用它的通道，存了多个则不猜。
+        llm_config = pick_saved_channel(base) or {"model_type": "deepseek"}
+
     source_path = Path(args.source)
     payload: dict = {
         "summary_style": args.style,
@@ -177,12 +216,7 @@ def main() -> None:
         "whisper_model": args.whisper_model,
         "include_screenshots": args.include_screenshots,
         "screenshot_interval": max(5, min(300, args.screenshot_interval)),
-        "llm_config": {
-            "model_type": args.provider or "deepseek",
-            "api_key": args.api_key,
-            "base_url": args.base_url,
-            "model": args.custom_model,
-        },
+        "llm_config": llm_config,
     }
 
     if source_path.is_file():

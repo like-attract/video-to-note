@@ -6,11 +6,14 @@ from backend import mcp_server
 
 
 class FakeBackend:
-    def __init__(self, response=None, captured=None, llm_config=None, bili_config=None):
+    def __init__(self, response=None, captured=None, llm_config=None, bili_config=None,
+                 keys=None):
         self.response = response or {"ok": True, "task_id": "task-1", "reused_task_id": None}
         self.captured = captured or {}
         self.llm_config = llm_config or {"saved": False}
         self.bili_config = bili_config or {"saved": False}
+        self.keys = keys or {"storage": {"algorithm": "plain-v1", "secure": False}, "entries": []}
+        self.llm_config_reads = 0
         self.saved_llm = None
         self.saved_bili = None
 
@@ -25,11 +28,15 @@ class FakeBackend:
         return {"models": [{"id": "base", "status": "cached"}]}
 
     async def get_llm_config(self):
+        self.llm_config_reads += 1
         return self.llm_config
+
+    async def list_llm_keys(self):
+        return self.keys
 
     async def save_llm_config(self, config):
         self.saved_llm = config
-        return {"saved": True}
+        return {"saved": True, "label": config.get("label")}
 
     async def get_bili_credentials(self):
         return self.bili_config
@@ -135,30 +142,82 @@ async def test_summarize_video_explicit_args_override_saved_config(monkeypatch) 
         "api_key": "",
         "model": "glm-5.2",
     }
+    # 点名了通道就绝不读已存配置：把已存的 Key 配到别的 provider 上正是漏洞本身。
+    assert fake.llm_config_reads == 0
 
 
 @pytest.mark.asyncio
 async def test_summarize_video_raises_when_no_key_and_nothing_saved(monkeypatch) -> None:
+    fake = FakeBackend(
+        keys={
+            "storage": {"algorithm": "plain-v1", "secure": False},
+            "entries": [
+                {"label": "公司代理", "host": "gateway.corp.example/v1"},
+                {"label": "DeepSeek", "host": "api.deepseek.com"},
+            ],
+        }
+    )
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    with pytest.raises(RuntimeError, match="save_llm_config") as error:
+        await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx")
+
+    # 报错里要能看见本机到底存了哪些地址，否则调用方只能瞎猜。
+    assert "gateway.corp.example/v1" in str(error.value)
+    assert "api.deepseek.com" in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_summarize_video_named_endpoint_never_reads_saved_config(
+    monkeypatch,
+) -> None:
     fake = FakeBackend()
     monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
-    with pytest.raises(RuntimeError, match="save_llm_config"):
-        await mcp_server.summarize_video("https://www.bilibili.com/video/BV1xx")
+    await mcp_server.summarize_video(
+        "https://www.bilibili.com/video/BV1xx", base_url="https://api.example.com/v1"
+    )
+
+    assert fake.captured["payload"]["llm_config"] == {
+        "model_type": "deepseek",
+        "api_key": "",
+        "base_url": "https://api.example.com/v1",
+    }
+    assert fake.llm_config_reads == 0
 
 
 @pytest.mark.asyncio
 async def test_save_tools_store_config_and_get_saved_config_masks_secrets(
     monkeypatch,
 ) -> None:
-    fake = FakeBackend(llm_config=SAVED_LLM, bili_config=SAVED_BILI)
+    fake = FakeBackend(
+        llm_config=SAVED_LLM,
+        bili_config=SAVED_BILI,
+        keys={
+            "storage": {"algorithm": "dpapi-cryptprotect-v1", "secure": True},
+            "entries": [
+                {
+                    "label": "公司代理",
+                    "host": "gateway.corp.example/v1",
+                    "provider": "custom",
+                    "model": "kimi-k2.6",
+                    "api_key_masked": "sk-c****",
+                }
+            ],
+        },
+    )
     monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
 
-    saved = await mcp_server.save_llm_config("sk-new", model_type="qwen", model="qwen3.7-plus")
+    saved = await mcp_server.save_llm_config(
+        "sk-new", model_type="qwen", model="qwen3.7-plus", label="我的 Qwen"
+    )
     assert saved["saved"] is True
+    assert saved["label"] == "我的 Qwen"
     assert fake.saved_llm == {
         "model_type": "qwen",
         "api_key": "sk-new",
         "model": "qwen3.7-plus",
+        "label": "我的 Qwen",
     }
 
     saved_bili = await mcp_server.save_bilibili_credentials("sess-1", "jct-1", "buvid-1")
@@ -168,6 +227,32 @@ async def test_save_tools_store_config_and_get_saved_config_masks_secrets(
     status = await mcp_server.get_saved_config()
     assert status["llm_config"]["api_key_masked"] == "sk-s****"
     assert status["bilibili_credentials"]["sessdata_masked"] == "sess****"
+    assert status["key_storage"] == "dpapi-cryptprotect-v1"
+    assert status["endpoints"] == [
+        {
+            "label": "公司代理",
+            "host": "gateway.corp.example/v1",
+            "provider": "custom",
+            "model": "kimi-k2.6",
+            "api_key_masked": "sk-c****",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_llm_keys_passes_masked_listing_through(monkeypatch) -> None:
+    fake = FakeBackend(
+        keys={
+            "storage": {"algorithm": "plain-v1", "secure": False},
+            "entries": [{"host": "api.deepseek.com", "api_key_masked": "sk-a****"}],
+        }
+    )
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    listing = await mcp_server.list_llm_keys()
+
+    assert listing["storage"] == {"algorithm": "plain-v1", "secure": False}
+    assert listing["entries"][0]["api_key_masked"] == "sk-a****"
 
 
 class WaitingBackend(FakeBackend):

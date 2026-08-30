@@ -99,12 +99,12 @@ LLM-generated timestamped Markdown note
 
 After starting the app:
 
-1. Choose a provider and model, enter an API key, or provide a custom OpenAI-compatible endpoint;
+1. Pick a model profile and enter an API key: DeepSeek / OpenAI / GLM / Qwen / Kimi each remember their own model, and custom OpenAI-compatible endpoints can be saved as several named profiles — switching profiles never overwrites another one's settings;
 2. Choose a note style, reasoning effort, and Whisper model;
 3. Paste a video URL or upload a local file;
 4. Preview, copy, or download the generated note.
 
-API keys and QR-login Bilibili cookies stay in the current page/process by default. They are written as plaintext under the local `workspace/` only when an MCP save tool is explicitly used; do not share those files.
+Profiles, recognition settings and the theme are non-sensitive and are remembered automatically in your local browser. An API key stays in the current page only, and is lost on refresh until you press **Save to this machine**; that writes it to `workspace/llm_keys.json`, encrypted with Windows' built-in DPAPI (a copy of the file on another machine or Windows account cannot be decrypted) — other platforms store it in plaintext and the interface says so. **A saved key is bound to its endpoint address**: it is only reused when the target address matches, never sent to another gateway. QR-login Bilibili cookies still live only in the local process unless you explicitly save them; do not share those workspace files.
 
 <details>
 <summary>🧑‍💻 Source use and building (developers)</summary>
@@ -135,12 +135,13 @@ Available tools:
 
 | Tool | Description |
 |---|---|
-| `summarize_video` | Submit a video summarization task; URL, API key, model, and Bilibili credentials can be omitted when saved local config is available |
+| `summarize_video` | Submit a video summarization task; URL, API key, model, and Bilibili credentials can be omitted when saved local config is available for that endpoint |
 | `wait_for_task` | Wait for a terminal task state for up to 45 seconds per call and return the note when complete; use it instead of aggressive polling |
 | `get_task_status` | Inspect intermediate task progress |
 | `list_whisper_models` | Show local Whisper model cache status |
-| `save_llm_config` | Save provider, model, and API key locally so they do not need to be passed again |
+| `save_llm_config` | Save the provider, model, and API key for one endpoint address locally (encrypted on Windows, plaintext with a visible note elsewhere) so calls to that address need no key |
 | `save_bilibili_credentials` | Save Bilibili credentials such as SESSDATA for automatic use with Bilibili videos |
+| `list_llm_keys` | List the endpoint addresses whose keys are saved locally (masked values and storage algorithm only) |
 | `get_saved_config` | View saved configuration status with secrets masked |
 
 ### Cherry Studio (recommended; no local Python needed)
@@ -177,7 +178,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 The MCP server automatically scans ports 8000–8019 to locate a running VideoToNo service. Set `VIDEOTONOTES_BACKEND_URL` to explicitly choose the backend URL.
 
-> Privacy: `save_llm_config` and `save_bilibili_credentials` store plaintext files under the local workspace: `workspace/llm_config.json` and `workspace/bili_credentials.json`. Do not share them. Nothing is persisted unless you explicitly call a save tool; `workspace/` is excluded by `.gitignore` and is not committed to this repository.
+> Privacy: `save_llm_config` (and the web page's **Save to this machine**) writes API keys to `workspace/llm_keys.json`, encrypted per Windows user with the system DPAPI — copying that file to another machine or another Windows account makes it undecryptable and you must re-enter the key. Non-Windows platforms have no DPAPI, so keys are stored in plaintext and the interface says so. A stored key is bound to the endpoint address it was saved for and is only reused when that address matches. `save_bilibili_credentials` still writes plaintext to `workspace/bili_credentials.json`. Nothing is persisted unless you explicitly call a save tool; `workspace/` is excluded by `.gitignore` and is not committed to this repository — do not share those files.
 
 </details>
 
@@ -205,7 +206,7 @@ Turn this Bilibili video into notes: https://www.bilibili.com/video/BV1xx
 
 The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the full Markdown note. Common options: `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
 
-> First use requires an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`; or save it once with the MCP `save_llm_config` tool and it is no longer needed.
+> First use requires an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`. If this machine has a saved key for exactly one endpoint address (web page **Save to this machine** or the MCP `save_llm_config` tool), omit them and that channel is reused.
 
 </details>
 

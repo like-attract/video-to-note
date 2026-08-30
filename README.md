@@ -100,12 +100,12 @@ faster-whisper 本地转写
 
 启动后按页面提示完成以下操作即可：
 
-1. 选择 Provider、模型并填写 API Key，也可以填写自定义 OpenAI 兼容地址；
+1. 选择模型档案并填写 API Key：DeepSeek / OpenAI / 智谱 / 通义 / Kimi 各自记住自己的模型，自定义 OpenAI 兼容接口可以保存多个命名档案，切换档案不会互相覆盖设置；
 2. 选择笔记风格、推理强度和 Whisper 模型（推理强度保持 `auto` 时，详细类笔记会用更高思考档，任务日志会打印实际生效档位）；
 3. 粘贴视频链接，或切换为本地文件上传；
 4. 生成完成后预览、复制或下载笔记。
 
-API Key 和扫码取得的 B 站 Cookie 默认只保留在当前页面/进程内存中；只有通过 MCP 保存配置时，才会以明文写入本机 `workspace/`，请勿分享这些文件。
+模型档案、识别参数和主题等非敏感设置会自动记在本机浏览器里，改动即生效，不需要手动保存。API Key 默认只留在当前页面内存中，刷新即失效；点「保存到本机」后才会写入 `workspace/llm_keys.json`——Windows 上用系统自带的 DPAPI 加密（换机器或换 Windows 账户就解不开，需要重填），其他平台会明文保存并在界面标注。**已保存的 Key 与接口地址绑定**：只有目标地址与保存时一致才会复用，绝不会发给别的网关。扫码取得的 B 站 Cookie 仍只保留在本机进程内，只有显式保存时才会落盘，请勿分享工作目录里的这些文件。
 
 <details>
 <summary>🧑‍💻 源码运行与构建（开发者）</summary>
@@ -136,12 +136,13 @@ VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio
 
 | 工具 | 说明 |
 |---|---|
-| `summarize_video` | 提交视频总结任务；视频链接、API Key、模型和 B 站凭据都可省略，自动使用本机已保存的配置 |
+| `summarize_video` | 提交视频总结任务；视频链接、API Key、模型和 B 站凭据都可省略，自动复用本机为该接口地址保存的配置 |
 | `wait_for_task` | 等待任务达到终态（最长 45 秒，可重复调用），完成后返回笔记正文；适合代替频繁轮询 |
 | `get_task_status` | 查询任务中间进度 |
 | `list_whisper_models` | 查看 Whisper 模型的本地缓存状态 |
-| `save_llm_config` | 把 Provider、模型和 API Key 保存到本机，之后无需每次传入 |
+| `save_llm_config` | 把某个接口地址的 Provider、模型和 API Key 保存到本机（Windows 加密，其他平台明文并提示），之后对该地址调用 `summarize_video` 无需再传 |
 | `save_bilibili_credentials` | 把 B 站凭据（SESSDATA 等）保存到本机，处理 B 站视频时自动使用 |
+| `list_llm_keys` | 查看本机已保存密钥的接口地址列表（只返回掩码与加密方式） |
 | `get_saved_config` | 查看已保存配置的状态，敏感信息会脱敏显示 |
 
 ### Cherry Studio（推荐，无需本机 Python）
@@ -178,7 +179,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 MCP server 会自动扫描 8000–8019 端口来找到已运行的 VideoToNo 服务；也可以用环境变量 `VIDEOTONOTES_BACKEND_URL` 显式指定服务地址。
 
-> 隐私说明：`save_llm_config` / `save_bilibili_credentials` 会将内容以明文保存在本机工作目录的 `workspace/llm_config.json` 和 `workspace/bili_credentials.json`。请勿分享这些文件；未显式调用保存工具时，凭据不会落盘。`workspace/` 已被 `.gitignore` 排除，不会进入 Git 仓库。
+> 隐私说明：`save_llm_config`（以及网页端的「保存到本机」）把 API Key 写入本机 `workspace/llm_keys.json`——Windows 上用系统 DPAPI 按当前用户加密，把该文件拷到另一台机器或另一个 Windows 账户都解不开；非 Windows 平台没有 DPAPI，会明文保存并在界面标注。Key 与保存时的接口地址绑定，只有目标地址一致才会复用。`save_bilibili_credentials` 仍以明文写入 `workspace/bili_credentials.json`。未显式调用保存工具时，凭据不会落盘；`workspace/` 已被 `.gitignore` 排除，不会进入 Git 仓库，也请勿分享这些文件。
 
 </details>
 
@@ -206,7 +207,7 @@ C:\Users\<用户名>\.agents\skills\video-to-note\        # pi / 通用约定
 
 agent 会调用技能附带的 `scripts/video_note.py`，自动探测服务端口、提交任务、实时打印运行日志，完成后输出（或保存）完整 Markdown 笔记。常用参数：`--style detailed|faithful|concise`、`--wait 秒数`、`--out 文件路径`；本地视频文件路径也可直接作为输入。
 
-> 首次使用同样需要大模型 API Key：agent 会向你要，用 `--provider` / `--api-key` 传入；或先用 MCP 的 `save_llm_config` 保存过配置，则无需再传。
+> 首次使用同样需要大模型 API Key：agent 会向你要，用 `--provider` / `--api-key` 传入；若本机只为一个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`），省略这些参数即可直接复用，不需要再传。
 
 </details>
 
