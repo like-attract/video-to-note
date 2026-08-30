@@ -36,6 +36,8 @@ async def test_task_notify_hook_fires_on_success(
     class FakeSummarizer:
         def __init__(self, **kwargs):
             pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
 
         async def generate_summary(self, *args, **kwargs):
             return "# 笔记"
@@ -83,7 +85,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.2.2"
+    assert health.json()["version"] == "1.2.3"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -512,6 +514,8 @@ async def test_pipeline_uses_platform_subtitles_without_downloading_audio(
     class FakeSummarizer:
         def __init__(self, **kwargs):
             pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
@@ -584,6 +588,8 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
     class FakeSummarizer:
         def __init__(self, **kwargs):
             pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
@@ -658,6 +664,8 @@ async def test_pipeline_merges_all_bilibili_pages_from_ai_subtitles(
     class FakeSummarizer:
         def __init__(self, **kwargs):
             pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
@@ -747,6 +755,8 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
     class FakeSummarizer:
         def __init__(self, **kwargs):
             pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
@@ -806,6 +816,8 @@ async def test_cancel_during_llm_generation_marks_task_cancelled(
     class FakeSummarizer:
         def __init__(self, **kwargs):
             pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
 
         async def generate_summary(self, *args, **kwargs):
             raise asyncio.CancelledError()
@@ -895,3 +907,187 @@ def test_upload_keeps_video_when_screenshots_requested(
     assert response.status_code == 200
     assert called["extract"] is False
     assert response.json()["file_path"].endswith("input.mp4")
+
+@pytest.mark.asyncio
+async def test_rerun_faithful_after_failure_has_no_oversized_tail_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：失败任务重跑（复用转录）后选“详细复原”卡在生成阶段不动。
+
+    根因是尾部核对把“笔记省略了时间戳”当成丢尾，自动补发一次覆盖剩余全部转录的
+    超大请求；“详细+点评”同场景只记一条告警，所以只有“详细复原”会不动。
+    """
+    from types import SimpleNamespace
+
+    from backend.llm_summarizer import LLMSummarizer
+
+    old_task_id, new_task_id = "old-failed", "rerun-faithful"
+    old_dir = tmp_path / old_task_id
+    old_dir.mkdir()
+    (tmp_path / new_task_id).mkdir()
+    segments = [
+        {
+            "start": index * 18.0,
+            "end": index * 18.0 + 18.0,
+            "text": f"第{index}句口播内容，这里展开了例子和论证过程。",
+        }
+        for index in range(300)  # 约 90 分钟
+    ]
+    (old_dir / "transcript.json").write_text(
+        json.dumps(
+            {"language": "zh", "source": "faster_whisper", "segments": segments},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (old_dir / "task.json").write_text(
+        json.dumps({"title": "长视频", "duration": 5_400, "owner": "UP 主"}),
+        encoding="utf-8",
+    )
+
+    # 内容写到了结尾，但时间戳只标到 12:00 —— 提示词允许“不必每段都加”。
+    draft_lines = ["# 视频笔记：《长视频》", ""]
+    for item in segments:
+        stamp = (
+            f"[{int(item['start'] // 60):02d}:{int(item['start'] % 60):02d}"
+            f"-{int(item['end'] // 60):02d}:{int(item['end'] % 60):02d}] "
+            if item["start"] < 12 * 60
+            else ""
+        )
+        draft_lines.append(f"{stamp}第 {item['start']} 段的完整复原内容")
+    draft = "\n".join(draft_lines)
+
+    calls: list[tuple[str, int]] = []
+
+    def _stream(text: str):
+        async def gen():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=text), finish_reason="stop"
+                    )
+                ]
+            )
+
+        return gen()
+
+    async def create(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        head = prompt[:40]
+        stage = "成稿" if "写一份" in head else "补写结尾" if "视频《" in head else "整理"
+        calls.append((stage, len(prompt)))
+        if stage == "成稿":
+            return _stream(draft)
+        return _stream(f"片段笔记（{len(prompt)} 字）")
+
+    def fake_summarizer(**kwargs):
+        instance = object.__new__(LLMSummarizer)
+        instance.model_type = "custom"
+        instance.model = "deepseek-ai/DeepSeek-V4-Flash"
+        instance.base_url = "https://api-inference.modelscope.cn/v1/"
+        instance.warnings = []
+        instance.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        return instance
+
+    class Forbidden:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        async def get_video_info(self, *args, **kwargs):
+            raise AssertionError("复用转录时不应再读视频信息")
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("复用转录时不应再走字幕/下载/转写")
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", Forbidden())
+    monkeypatch.setattr(main, "transcriber", SimpleNamespace(transcribe=forbidden))
+    monkeypatch.setattr(main, "LLMSummarizer", fake_summarizer)
+    main.tasks[new_task_id] = main.new_task()
+    main.tasks[new_task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        summary_style="faithful",
+        llm_config=main.LLMConfig(
+            model_type="custom",
+            api_key="test-key",
+            base_url="https://api-inference.modelscope.cn/v1/",
+            model="deepseek-ai/DeepSeek-V4-Flash",
+        ),
+    )
+
+    await asyncio.wait_for(main.process_video_task(new_task_id, request), timeout=60)
+
+    task = main.tasks[new_task_id]
+    assert task["status"] == "completed"
+    assert not [stage for stage, _size in calls if stage == "补写结尾"]
+    assert all(size < 14_000 for _stage, size in calls)
+    assert any("已跳过自动补写" in log for log in task["logs"])
+    note_text = (tmp_path / new_task_id / "notes.md").read_text(encoding="utf-8")
+    assert "详细复原（仅视频内容）" in note_text
+    assert draft_lines[-1] in note_text
+
+@pytest.mark.asyncio
+async def test_pipeline_logs_bilibili_api_fallback_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #1 回退可见性：视频页被风控改用接口直连时，任务日志要说明。"""
+    processor = VideoProcessor(tmp_path)
+    notes: list[str] = []
+
+    async def fake_info(url, cookie, allow_local=False, notes_out=None):
+        assert notes_out is not None, "get_video_info 需要拿到回退说明的收集列表"
+        notes_out.append("B 站视频页被风控拦截，已改用开放接口直连获取视频信息与媒体流")
+        return {
+            "title": "风控视频",
+            "source": "bilibili",
+            "duration": 30,
+            "owner": "作者",
+        }
+
+    async def fake_subtitles(*args, **kwargs):
+        return SubtitleResult(
+            [TranscriptSegment(0, 10, "接口直连拿到的字幕内容")], "zh-CN", "platform_subtitle"
+        )
+
+    async def fail_download(*args, **kwargs):
+        raise AssertionError("已有字幕时不应下载音频")
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 测试笔记\n\n[00:00-00:10] 内容"
+
+    monkeypatch.setattr(
+        processor, "get_video_info", lambda url, cookie, allow_local=False, notes=None: fake_info(
+            url, cookie, allow_local, notes
+        )
+    )
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(processor, "download_audio", fail_download)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+
+    task_id = "fallback-note-task"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        summary_style="faithful",
+        llm_config=main.LLMConfig(model_type="glm", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    assert any("开放接口直连" in log for log in task["logs"])

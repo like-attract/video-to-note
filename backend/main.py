@@ -98,7 +98,7 @@ DOUYIN_HINT = (
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.2.2")
+app = FastAPI(title="VideoToNo API", version="1.2.3")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -1033,6 +1033,13 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         else config_store.load_bili_credentials()
     )
     douyin_cookie = request.douyin_cookie.model_dump() if request.douyin_cookie else None
+    # B 站视频页被风控时（Issue #1）处理链会回退到开放接口直连，回退说明经这里进任务日志
+    fallback_notes: list[str] = []
+
+    def note_api_fallback() -> None:
+        for note in fallback_notes:
+            if note not in task["logs"]:
+                task["logs"].append(note)
 
     try:
         raise_if_cancel_requested(task)
@@ -1060,8 +1067,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             media_input = uploaded_path or source_url or ""
             set_progress(task, 1, "读取视频信息", 8, "正在读取视频信息")
             info = await video_processor.get_video_info(
-                media_input, cookie, allow_local=is_local
+                media_input, cookie, allow_local=is_local, notes=fallback_notes
             )
+            note_api_fallback()
         raise_if_cancel_requested(task)
         title = info["title"]
         update_task_manifest(task_id, info)
@@ -1168,7 +1176,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         cookie,
                         media_name=f"audio_p{page.page}",
                         should_abort=should_abort,
+                        notes=fallback_notes,
                     )
+                    note_api_fallback()
                     raise_if_cancel_requested(task)
                     set_progress(
                         task,
@@ -1239,9 +1249,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     media_path = Path(uploaded_path)
                 else:
                     media_path = await video_processor.download_audio(
-                        source_url or "", task_id, cookie, should_abort=should_abort
+                        source_url or "", task_id, cookie, should_abort=should_abort,
+                        notes=fallback_notes,
                     )
                 raise_if_cancel_requested(task)
+                note_api_fallback()
                 set_progress(
                     task,
                     4,
@@ -1295,9 +1307,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 Path(uploaded_path)
                 if is_local
                 else await video_processor.download_preview_video(
-                    source_url or "", task_id, cookie, should_abort=should_abort
+                    source_url or "", task_id, cookie, should_abort=should_abort,
+                    notes=fallback_notes,
                 )
             )
+            note_api_fallback()
             screenshots = await video_processor.extract_frames(
                 video_path, task_id, request.screenshot_interval, should_abort
             )
@@ -1322,15 +1336,17 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             api_key = str(saved_config.get("api_key") or "").strip()
         if not api_key:
             raise RuntimeError("未提供 API Key，且本机没有已保存的 LLM 配置")
-        task["logs"].append(
-            f"调用模型：Provider={config.model_type}，Model={model}，Base URL={base_url}"
-        )
-        task["logs"].append(f"推理设置：{request.reasoning_effort}（auto 使用模型默认）")
         summarizer = LLMSummarizer(
             model_type=config.model_type,
             api_key=api_key,
             base_url=base_url,
             model=model,
+        )
+        task["logs"].append(
+            f"调用模型：Provider={config.model_type}，Model={model}，Base URL={base_url}"
+        )
+        task["logs"].append(
+            f"推理设置：{summarizer.describe_effort(request.reasoning_effort, request.summary_style)}"
         )
 
         async def report_llm_progress(progress: int, message: str) -> None:

@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.2.2</h1>
+<h1 align="center">VideoToNo v1.2.3</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -18,15 +18,17 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.2.1 → v1.2.2)
+## 🆕 What's New (v1.2.2 → v1.2.3)
 
-- **Agent Skill integration**: new `skills/video-to-note/` (SKILL.md + a one-command submit/poll/fetch script) — skill-capable agents like Claude Code or pi can now generate video notes from a single sentence; the third access form alongside the desktop app and MCP
-- **Windows task notifications**: in packaged tray mode, task completion/failure pops a system toast — no more watching the page
-- Repositioned the repo and docs: a local-first "video → structured notes" service with three access forms
+- **Bilibili notes survive risk control**: when the video page returns 412, VideoToNo falls back to the `api.bilibili.com` open endpoints for metadata and audio (multi-part videos and preview streams included), and the task log says so. API requests now carry the full risk-control cookie set, `b23.tv` short links resolve to BV ids, and anonymous use gets a device fingerprint automatically (Issue #1)
+- **Fixed "Faithful" style hanging in the generation stage**: on long videos a note that simply omits timestamps was mistaken for a truncated one, triggering an extra regeneration of the whole remaining transcript. Three guardrails now bound the gap, the input size and the wall-clock time; a genuinely missing tail (within 10 minutes) is still patched automatically
+- **Generation progress heartbeat**: while the model streams, progress reports "model produced N characters" or "deep thinking (N characters so far)" every 20 seconds, so a thinking phase no longer looks like a deadlock
+- **Reasoning effort adapts to the note style**: on DeepSeek-compatible channels `auto` now picks a higher thinking level for Detailed/Faithful notes and a medium one for Concise summaries; the task log prints the effective level (more tokens consumed — pin a level explicitly under "Reasoning effort" if you prefer)
 
 <details>
-<summary>Previous releases (v1.2.1 and earlier)</summary>
+<summary>Previous releases (v1.2.2 and earlier)</summary>
 
+- **v1.2.2**: Agent Skill integration (`skills/video-to-note/`, one-sentence note generation), Windows tray notifications for task results, rewritten repo and docs positioning
 - **v1.2.1**: immediate cancellation across all stages (LLM streaming/download hooks/model download per-chunk), upload limit 2 GB + auto audio extraction for large videos, Whisper base model bundle
 - **v1.2.0**: Bilibili multi-part support, per-segment Whisper cancellation, false-positive SESSDATA fix, manual Whisper model import UI
 - **v1.1.8**: run-mode & app-version service isolation, recent-task scrollbar, faithful-note metadata de-duplication, custom Base URL diagnostics
@@ -54,7 +56,7 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.2.2-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.2.3-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
@@ -66,7 +68,7 @@ The portable build starts the local service and stays in the system tray. The fi
 ## ✨ Highlights
 
 - 🎥 **Flexible inputs**: Bilibili, Douyin, YouTube, other URLs supported by the installed `yt-dlp`, and local audio/video files.
-- 🇨🇳 **Bilibili integration**: fetches Bilibili AI captions after sign-in, with QR-code credential import in the UI.
+- 🇨🇳 **Bilibili integration**: fetches Bilibili AI captions after sign-in, with QR-code credential import in the UI; falls back to the open API when the video page is risk-controlled.
 - 🎵 **Douyin single-link integration**: handles public share links directly and can retry after manual verification in an isolated local browser.
 - 🧾 **Real timestamps**: keeps segment start and end times from captions or Whisper instead of asking the model to invent them.
 - 🧠 **Long-transcript handling**: chunks, summarizes, and reduces long material while keeping context pressure under control.

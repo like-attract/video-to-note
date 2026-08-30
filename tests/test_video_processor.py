@@ -460,3 +460,327 @@ def test_extract_audio_track_produces_m4a(tmp_path: Path) -> None:
 
     assert result == target
     assert target.is_file() and target.stat().st_size > 0
+
+# ---------- Issue #1：B 站视频页 412 风控 → 开放接口直连回退 ----------
+
+_VIEW_PAYLOAD = {
+    "code": 0,
+    "data": {
+        "title": "风控测试视频",
+        "pic": "https://i0.hdslb.com/bfs/test.jpg",
+        "desc": "简介",
+        "pubdate": 1_755_724_800,
+        "owner": {"name": "UP小站"},
+        "stat": {"view": 4200, "like": 88},
+        "duration": 60,
+        "pages": [
+            {"page": 1, "part": "上", "cid": 101, "duration": 60},
+            {"page": 2, "part": "下", "cid": 102, "duration": 90},
+        ],
+    },
+}
+
+_PLAYURL_PAYLOAD = {
+    "code": 0,
+    "message": "0",
+    "data": {
+        "dash": {
+            "audio": [
+                {
+                    "id": 139,
+                    "bandwidth": 70_000,
+                    "baseUrl": "https://cdn.test/audio_low.m4a",
+                },
+                {
+                    "id": 30280,
+                    "bandwidth": 190_000,
+                    "baseUrl": "https://cdn.test/audio_high.m4a",
+                    "backupUrl": ["https://backup.test/audio_high.m4a"],
+                },
+            ],
+            "video": [
+                {
+                    "id": 32,
+                    "height": 480,
+                    "bandwidth": 900_000,
+                    "baseUrl": "https://cdn.test/v480.m4s",
+                },
+                {
+                    "id": 16,
+                    "height": 240,
+                    "bandwidth": 400_000,
+                    "baseUrl": "https://cdn.test/v240.m4s",
+                },
+            ],
+        }
+    },
+}
+
+_BILI_URL = "https://www.bilibili.com/video/BV1xM4y1z7Kt"
+
+
+def _ydl_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    processor: VideoProcessor,
+    message: str = "ERROR: [BiliBili] Unable to download webpage: HTTP Error 412: Precondition Failed",
+) -> None:
+    class FakeYdl:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            raise RuntimeError(message)
+
+    monkeypatch.setattr(processor, "_ydl", lambda *a, **k: FakeYdl())
+
+
+def _api_json(monkeypatch: pytest.MonkeyPatch, processor: VideoProcessor, playurl=None):
+    seen: list[tuple[str, dict]] = []
+
+    def fake_json(url, params, headers):
+        seen.append((url, dict(params)))
+        if url.endswith("/view"):
+            return _VIEW_PAYLOAD
+        return _PLAYURL_PAYLOAD if playurl is None else playurl
+
+    monkeypatch.setattr(processor, "_bilibili_get_json", fake_json)
+    return seen
+
+
+def _record_direct_downloads(
+    monkeypatch: pytest.MonkeyPatch, processor: VideoProcessor
+) -> list[tuple[str, str]]:
+    downloaded: list[tuple[str, str]] = []
+
+    def fake_direct(media_url, target, referer, cookie, **kwargs):
+        downloaded.append((media_url, referer))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"media")
+        return target
+
+    monkeypatch.setattr(processor, "_download_direct_media", fake_direct)
+    return downloaded
+
+
+def test_bilibili_blocked_detector() -> None:
+    blocked = VideoProcessor._bilibili_blocked
+    assert blocked(RuntimeError("HTTP Error 412: Precondition Failed"))
+    assert blocked(RuntimeError('{"code":-352,"message":"风险验证"}'))
+    assert blocked(RuntimeError("风控拦截"))
+    assert not blocked(RuntimeError("HTTP Error 404: Not Found"))
+    assert not blocked(RuntimeError("Requested format is not available"))
+
+
+def test_bilibili_ids_from_av_and_short_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert VideoProcessor._bilibili_ids(f"{_BILI_URL}?p=2") == ("BV1xM4y1z7Kt", None)
+    assert VideoProcessor._bilibili_ids("https://www.bilibili.com/video/av114514") == (
+        None,
+        114514,
+    )
+
+    def fake_resolve(url):
+        return _BILI_URL if "b23.tv" in url else url
+
+    monkeypatch.setattr(VideoProcessor, "_resolve_bili_short_url", classmethod(
+        lambda cls, url: fake_resolve(url)
+    ))
+    assert VideoProcessor._bilibili_ids("https://b23.tv/abc123") == ("BV1xM4y1z7Kt", None)
+
+
+def test_extract_info_falls_back_to_view_api_when_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(monkeypatch, processor)
+    seen = _api_json(monkeypatch, processor)
+    notes: list[str] = []
+
+    info = processor._extract_info(_BILI_URL, {"sessdata": "abc"}, notes)
+
+    assert info["title"] == "风控测试视频"
+    assert info["source"] == "bilibili"
+    assert info["duration"] == 150  # 分 P 时长累加
+    assert info["owner"] == "UP小站"
+    assert info["timestamp"] == 1_755_724_800
+    assert info["view_count"] == 4200
+    assert info["like_count"] == 88
+    assert info["subtitles"] == {}
+    assert notes and "风控" in notes[0]
+    url, params = seen[0]
+    assert url.endswith("/x/web-interface/view")
+    assert params == {"bvid": "BV1xM4y1z7Kt"}
+    # 分 P 清单缓存下来供 playurl 使用
+    assert [p["cid"] for p in processor._bili_view_cache["BV1xM4y1z7Kt"]["pages"]] == [101, 102]
+
+
+def test_extract_info_keeps_original_error_when_not_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(
+        monkeypatch, processor, message="ERROR: [BiliBili] Unsupported URL"
+    )
+    seen = _api_json(monkeypatch, processor)
+    notes: list[str] = []
+
+    with pytest.raises(RuntimeError, match="Unsupported URL"):
+        processor._extract_info(_BILI_URL, None, notes)
+
+    assert seen == []
+    assert notes == []
+
+
+def test_extract_info_reports_when_fallback_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(monkeypatch, processor)
+    monkeypatch.setattr(
+        processor, "_bilibili_get_json", lambda url, params, headers: {"code": -412, "data": {}}
+    )
+
+    with pytest.raises(RuntimeError, match="风控拦截"):
+        processor._extract_info(_BILI_URL, None, [])
+
+
+@pytest.mark.asyncio
+async def test_download_audio_falls_back_to_playurl_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(monkeypatch, processor)
+    seen = _api_json(monkeypatch, processor)
+    downloaded = _record_direct_downloads(monkeypatch, processor)
+    notes: list[str] = []
+
+    path = await processor.download_audio(
+        f"{_BILI_URL}?p=2", "t1", {"sessdata": "abc"}, notes=notes
+    )
+
+    assert path.name == "audio.m4a"
+    assert path.read_bytes() == b"media"
+    # 取带宽最高的音频流，Referer 指回视频页
+    assert downloaded[0][0].endswith("audio_high.m4a")
+    assert "bilibili.com/video/BV1xM4y1z7Kt" in downloaded[0][1]
+    playurl = [params for url, params in seen if url.endswith("/playurl")]
+    assert playurl and playurl[0]["cid"] == 102  # ?p=2 → 第二个分 P
+    assert playurl[0]["fnval"] == 16
+    assert any("playurl 接口直连音频流" in note for note in notes)
+
+
+@pytest.mark.asyncio
+async def test_download_preview_video_falls_back_to_usable_video_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(monkeypatch, processor)
+    _api_json(monkeypatch, processor)
+    downloaded = _record_direct_downloads(monkeypatch, processor)
+    notes: list[str] = []
+
+    path = await processor.download_preview_video(
+        _BILI_URL, "t1", {"sessdata": "abc"}, notes=notes
+    )
+
+    assert path.name == "preview.m4s"
+    # 高度 >=360 里取最小的一路（240P 太小、480P 可用）
+    assert downloaded[0][0].endswith("v480.m4s")
+    assert any("预览视频流" in note for note in notes)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_fallback_reports_clear_error_without_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(monkeypatch, processor)
+    _api_json(monkeypatch, processor, playurl={"code": 0, "data": {}})
+
+    with pytest.raises(RuntimeError, match="playurl 接口未返回可下载流"):
+        await processor.download_audio(_BILI_URL, "t1", {"sessdata": "abc"})
+
+
+@pytest.mark.asyncio
+async def test_download_audio_does_not_swallow_other_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(monkeypatch, processor, message="ERROR: unable to decrypt")
+    _api_json(monkeypatch, processor)
+    _record_direct_downloads(monkeypatch, processor)
+
+    with pytest.raises(RuntimeError, match="unable to decrypt"):
+        await processor.download_audio(_BILI_URL, "t1", {"sessdata": "abc"})
+
+
+def test_download_direct_media_aborts_when_cancel_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    processor = VideoProcessor(tmp_path)
+    target = tmp_path / "task" / "audio.m4a"
+
+    class FakeResponse:
+        def __init__(self):
+            self.remaining = 3
+
+        def read(self, _size):
+            if not self.remaining:
+                return b""
+            self.remaining -= 1
+            return b"x" * 16
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "backend.video_processor.urllib.request.urlopen", lambda *a, **k: FakeResponse()
+    )
+
+    state = {"called": 0}
+
+    def should_abort():
+        state["called"] += 1
+        return state["called"] > 1  # 第一块放行，第二块要求取消
+
+    with pytest.raises(asyncio.CancelledError):
+        processor._download_direct_media(
+            "https://cdn.test/audio.m4a",
+            target,
+            "https://www.bilibili.com/",
+            None,
+            user_agent=VideoProcessor.BILI_USER_AGENT,
+            should_abort=should_abort,
+        )
+    assert not target.exists()
+    # 中断不留半文件（否则会被主流程的 audio.* 复用扫描误当成完整音频）
+    assert not list(target.parent.glob("*.part"))
+
+
+def test_cookie_header_includes_risk_control_cookies() -> None:
+    header = VideoProcessor._cookie_header(
+        {
+            "sessdata": "s", "bili_jct": "j", "buvid3": "3",
+            "buvid4": "4", "b_nut": "1", "b_lsid": "ls", "junk": "x",
+        }
+    )
+    assert header == "SESSDATA=s; bili_jct=j; buvid3=3; buvid4=4; b_nut=1; b_lsid=ls"
+
+
+def test_view_api_hint_when_no_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    monkeypatch.setattr(processor, "_bilibili_get_json", lambda url, params, headers: {})
+    with pytest.raises(RuntimeError, match="扫码导入"):
+        processor._extract_bilibili_api_info(_BILI_URL, None)
+    with pytest.raises(RuntimeError, match="view 接口未返回可用数据") as exc:
+        processor._extract_bilibili_api_info(_BILI_URL, {"sessdata": "s"})
+    assert "扫码导入" not in str(exc.value)

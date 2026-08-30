@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Sequence
 
-from .transcript import TranscriptSegment, chunk_segments, segments_to_prompt
+from .transcript import (
+    TranscriptSegment,
+    chunk_segments,
+    format_timestamp,
+    segments_to_prompt,
+)
 
 
 PROVIDER_DEFAULTS = {
@@ -26,6 +33,32 @@ MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300
 LLM_MAX_RETRIES = 0
 DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
+# auto 档在 DeepSeek 兼容通道按笔记风格解析出的默认推理档位。
+# 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量，
+# 因此默认拉高换内容完整性；非 DeepSeek 通道保持模型默认不注入参数。
+STYLE_DEFAULT_EFFORT = {"detailed": "max", "faithful": "max", "concise": "high"}
+# 笔记末尾时间戳落后转写结尾超过该秒数视为丢尾。
+TAIL_GAP_SECONDS = 60.0
+# 补尾时附带给模型参考的已有笔记结尾长度。
+NOTE_TAIL_CHARACTERS = 600
+TAIL_PATCH_MAX_TOKENS = 1_600
+# 补写结尾的三道护栏。成稿提示词明确允许“不必每段都加时间戳”，所以“笔记末尾时间戳
+# 落后于转写结尾”既可能是真的丢尾，也可能只是省略了时间戳。不加护栏时，后者会把
+# 整段剩余转录塞进一次 max 思考档的补写请求（几十分钟无任何进度反馈，表现为“卡住不动”，
+# 而 detailed 只记告警不发请求，所以只有“详细复原”会卡）。
+# 缺口超过该秒数视为“省略时间戳”而不是丢尾，只告警不补写。
+TAIL_PATCH_MAX_GAP_SECONDS = 600.0
+# 补写材料字符上限，超过时只保留最靠近结尾的部分。
+TAIL_PATCH_MAX_INPUT_CHARACTERS = 4_000
+# 补写请求的整体耗时上限：超时则保留原笔记，绝不让任务停在补写阶段不放。
+TAIL_PATCH_TIMEOUT_SECONDS = 240.0
+# 流式读取心跳间隔：把“模型仍在输出”反映到任务进度上，避免长时间同一句话看起来像死锁。
+LLM_HEARTBEAT_SECONDS = 20.0
+# 匹配笔记中的 [MM:SS]、[MM:SS-MM:SS]、[HH:MM:SS] 等时间戳（起点与区间终点都计入）。
+# 分钟位允许 1~3 位：长视频模型常把 1 小时 45 分写成 [105:30]，识别不到会被误判成丢尾。
+_NOTE_TIMESTAMP_RE = re.compile(
+    r"\[(\d{1,3}:\d{2}(?::\d{2})?)(?:\s*[-–—~]\s*(\d{1,3}:\d{2}(?::\d{2})?))?\]"
+)
 ProgressCallback = Callable[[int, str], Awaitable[None] | None]
 
 
@@ -210,17 +243,28 @@ class LLMSummarizer:
             )
 
         max_tokens = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}[style]
+        notes_effort = self._stage_effort(reasoning_effort, style, "notes")
+        coverage_end = format_timestamp(segments[-1].end)
         draft_progress = 78
         draft_stage = "正在生成完整笔记"
         await self._report_progress(progress_callback, draft_progress, draft_stage)
         draft = await self._complete(
-            self._note_prompt(title, source, metadata or {}, style),
+            self._note_prompt(title, source, metadata or {}, style, coverage_end),
             max_tokens=max_tokens,
-            effort=self._stage_effort(reasoning_effort, style, "notes"),
+            effort=notes_effort,
             progress_callback=progress_callback,
             progress=draft_progress,
             stage=draft_stage,
             should_abort=should_abort,
+        )
+        draft = await self._ensure_tail_coverage(
+            title,
+            draft,
+            segments,
+            style,
+            notes_effort,
+            progress_callback,
+            should_abort,
         )
         await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
         if style == "detailed":
@@ -298,6 +342,152 @@ class LLMSummarizer:
             groups.append(current)
         return groups
 
+    async def _ensure_tail_coverage(
+        self,
+        title: str,
+        draft: str,
+        segments: Sequence[TranscriptSegment],
+        style: str,
+        effort: str,
+        progress_callback: ProgressCallback | None,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> str:
+        """核对笔记是否推进到转写结尾，尽力弥补生成时丢失的尾部内容。
+
+        - concise 摘要允许只挑要点，不做核对；
+        - faithful（详细复原）要求完整覆盖：确实丢尾时自动补写一次结尾；
+        - detailed 的笔记允许按需省略时间戳，自动补写容易误伤，只记录告警。
+
+        补写受三道护栏约束（缺口上限 / 材料字符上限 / 整体耗时上限）：成稿提示词允许
+        “不必每段都加时间戳”，长视频里只标前半段时间戳很常见，此时“末尾时间戳落后”
+        并不代表丢尾。没有护栏时会自动发一次覆盖剩余全部转录的 max 思考档请求，几十分钟
+        不返回进度，表现为“详细复原卡在生成阶段不动，而详细+点评正常”（用户反馈）。
+        """
+        if style == "concise" or not segments:
+            return draft
+        coverage_end = segments[-1].end
+        note_end = self._max_note_timestamp(draft)
+        if note_end is None:
+            self.warnings.append(
+                "笔记中没有可识别的时间戳，无法自动核对是否覆盖到 "
+                f"{format_timestamp(coverage_end)}"
+            )
+            return draft
+        gap = coverage_end - note_end
+        if gap <= TAIL_GAP_SECONDS:
+            return draft
+        missing = [segment for segment in segments if segment.start >= note_end - 5]
+        if not missing:
+            return draft
+        message = (
+            "检测到笔记内容停在 "
+            f"{format_timestamp(note_end)}，未覆盖转写结尾 {format_timestamp(coverage_end)}"
+        )
+        if style == "detailed":
+            self.warnings.append(
+                message + "；也可能只是笔记省略了时间戳；建议改用“详细复原”风格或更高推理强度重新生成"
+            )
+            return draft
+        # 护栏一：缺口过大时不是“丢尾”，补写等于把剩余转录重写一遍，只告警。
+        if gap > TAIL_PATCH_MAX_GAP_SECONDS:
+            self.warnings.append(
+                message
+                + f"；缺口约 {gap / 60:.0f} 分钟，更像笔记省略了时间戳而不是真的丢尾，"
+                "已跳过自动补写（强行补写会把剩余转录重写一遍，长时间出不来结果）"
+            )
+            return draft
+        # 护栏二：材料只保留预算内最靠近结尾的一段，保证补写请求规模有上限。
+        material = self._tail_patch_material(missing)
+        missing_start = format_timestamp(material[0].start)
+        scope_note = "" if material is missing else "（缺口较大，只补写最靠近结尾的一段）"
+        self.warnings.append(
+            message + f"，正在自动补写 {missing_start} 之后的内容{scope_note}"
+        )
+        await self._report_progress(progress_callback, 88, "正在补写笔记缺失的结尾内容")
+        try:
+            # 护栏三：补写本身有整体耗时上限，超时保留原笔记，不停在补写阶段不放。
+            patch = await asyncio.wait_for(
+                self._complete(
+                    self._tail_patch_prompt(
+                        title, draft, material, missing_start, format_timestamp(coverage_end)
+                    ),
+                    max_tokens=TAIL_PATCH_MAX_TOKENS,
+                    effort=effort,
+                    progress_callback=progress_callback,
+                    progress=88,
+                    stage="补写结尾",
+                    should_abort=should_abort,
+                ),
+                TAIL_PATCH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            self.warnings.append(
+                f"补写结尾超过 {TAIL_PATCH_TIMEOUT_SECONDS:.0f} 秒仍未完成，已跳过并保留原笔记"
+                "（模型响应过慢，可降低推理强度后重新生成）"
+            )
+            await self._report_progress(progress_callback, 91, "补写结尾超时，已保留原笔记")
+            return draft
+        return f"{draft.rstrip()}\n\n### 补遗（{missing_start} 之后）\n\n{patch.strip()}"
+
+    @staticmethod
+    def _tail_patch_material(
+        segments: Sequence[TranscriptSegment],
+    ) -> Sequence[TranscriptSegment]:
+        """从缺口尾部往前取材料，保证补写请求的输入规模有上限。"""
+        if len(segments) == 1:
+            return segments
+        kept: list[TranscriptSegment] = []
+        used = 0
+        for segment in reversed(segments):
+            # 与 segments_to_prompt 一致：每行另有时间戳前缀与换行开销。
+            line_characters = len(segment.text) + 33
+            if kept and used + line_characters > TAIL_PATCH_MAX_INPUT_CHARACTERS:
+                break
+            kept.append(segment)
+            used += line_characters
+        kept.reverse()
+        return kept if len(kept) < len(segments) else segments
+
+    @staticmethod
+    def _parse_clock(value: str) -> float:
+        """把 [HH:MM:SS] / [MM:SS] 转成秒；两段且分钟超过 99 时按累计分钟处理。"""
+        parts = value.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        return int(parts[0]) * 60 + float(parts[1])
+
+    @staticmethod
+    def _max_note_timestamp(text: str) -> float | None:
+        seconds: list[float] = []
+        for match in _NOTE_TIMESTAMP_RE.finditer(text):
+            seconds.append(LLMSummarizer._parse_clock(match.group(1)))
+            if match.group(2):
+                seconds.append(LLMSummarizer._parse_clock(match.group(2)))
+        return max(seconds) if seconds else None
+
+    @staticmethod
+    def _tail_patch_prompt(
+        title: str,
+        draft: str,
+        missing_segments: Sequence[TranscriptSegment],
+        missing_start: str,
+        coverage_end: str,
+    ) -> str:
+        material = segments_to_prompt(missing_segments)
+        note_tail = draft[-NOTE_TAIL_CHARACTERS:]
+        return f"""视频《{title}》的笔记在 {missing_start} 之前已经写好，但遗漏了视频最后一段内容。
+
+请根据下面的结尾部分转录补写这一部分的笔记：
+- 与已有笔记保持一致的结构、语气和时间戳格式（[MM:SS] 或 [起点-终点]）
+- 忠实转录内容，不补充外部知识，不做评价
+- 只输出补写的 Markdown 正文，不要重复已有笔记，不要输出标题或解释
+
+已有笔记的结尾（仅供衔接参考）：
+{note_tail}
+
+缺失部分的转录（{missing_start} – {coverage_end}）：
+{material}"""
+
     @staticmethod
     async def _report_progress(
         callback: ProgressCallback | None, progress: int, message: str
@@ -308,10 +498,29 @@ class LLMSummarizer:
         if inspect.isawaitable(result):
             await result
 
-    @staticmethod
-    def _stage_effort(selected: str, style: str, stage: str) -> str:
-        # auto means provider/model default and must not inject private parameters.
-        return selected if selected in {"off", "high", "max"} else "auto"
+    def _stage_effort(self, selected: str, style: str, stage: str) -> str:
+        """解析单个生成阶段实际生效的推理强度。
+
+        - 用户显式选择（off/high/max）永远优先；
+        - auto 在 DeepSeek 兼容通道（含 custom 中识别出的 DeepSeek 模型）按
+          笔记风格给默认档：detailed/faithful → max，concise → high；
+        - 其余通道返回 auto，保持模型默认，不注入私有参数。
+        stage 参数保留给将来按阶段（成稿/点评）差异化档位使用。
+        """
+        if selected in {"off", "high", "max"}:
+            return selected
+        if self._uses_deepseek_compatibility():
+            return STYLE_DEFAULT_EFFORT.get(style, "high")
+        return "auto"
+
+    def describe_effort(self, reasoning_effort: str, style: str) -> str:
+        """返回用于任务日志的推理设置说明（auto 解析成实际档位）。"""
+        if reasoning_effort in {"off", "high", "max"}:
+            return reasoning_effort
+        if self._uses_deepseek_compatibility():
+            resolved = STYLE_DEFAULT_EFFORT.get(style, "high")
+            return f"auto（DeepSeek 通道按风格默认：{resolved}）"
+        return "auto（使用模型默认）"
 
     async def _complete(
         self,
@@ -355,6 +564,9 @@ class LLMSummarizer:
         # 流式读取：既能在模型开始返回后逐块更新，也能在取消时立即中止本次请求
         stream = await self.client.chat.completions.create(**request, stream=True)
         parts: list[str] = []
+        content_characters = 0
+        reasoning_characters = 0
+        next_beat = time.monotonic() + LLM_HEARTBEAT_SECONDS
         finish_reason = "unknown"
         try:
             async for chunk in stream:
@@ -367,8 +579,22 @@ class LLMSummarizer:
                 content = getattr(delta, "content", None) if delta is not None else None
                 if content:
                     parts.append(content)
+                    content_characters += len(content)
+                elif delta is not None:
+                    reasoning_characters += self._reasoning_characters(delta)
                 if getattr(choice, "finish_reason", None):
                     finish_reason = choice.finish_reason
+                # 心跳：深度思考阶段正文前只有 reasoning 增量，若不回报进度，
+                # 前端与“真卡死”无法区分（本次故障的表现就是“卡住不动”）。
+                if progress_callback is not None and time.monotonic() >= next_beat:
+                    next_beat = time.monotonic() + LLM_HEARTBEAT_SECONDS
+                    await self._report_progress(
+                        progress_callback,
+                        progress,
+                        self._stream_status_message(
+                            stage, content_characters, reasoning_characters
+                        ),
+                    )
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
@@ -397,6 +623,25 @@ class LLMSummarizer:
                 "可尝试关闭深度思考、缩短转录或更换模型。"
             )
         return content.strip()
+
+    @staticmethod
+    def _reasoning_characters(delta: Any) -> int:
+        """取一个流式块里 reasoning/思考链增量的长度（不同通道字段名不一致）。"""
+        values = [getattr(delta, name, None) for name in ("reasoning_content", "reasoning")]
+        extra = getattr(delta, "model_extra", None)
+        if isinstance(extra, dict):
+            values.extend(extra.get(name) for name in ("reasoning_content", "reasoning"))
+        return max((len(value) for value in values if isinstance(value, str)), default=0)
+
+    @staticmethod
+    def _stream_status_message(
+        stage: str, content_characters: int, reasoning_characters: int
+    ) -> str:
+        if content_characters:
+            return f"{stage}：模型已输出 {content_characters} 字"
+        if reasoning_characters:
+            return f"{stage}：模型正在深度思考（已累计 {reasoning_characters} 字）"
+        return f"{stage}：等待模型返回首个数据块"
 
     def _apply_reasoning(self, request: dict[str, Any], effort: str) -> None:
         if effort == "auto" and not self._uses_deepseek_compatibility():
@@ -438,10 +683,13 @@ class LLMSummarizer:
         total: int,
         segments: Sequence[TranscriptSegment],
     ) -> str:
+        first_ts = format_timestamp(segments[0].start)
+        last_ts = format_timestamp(segments[-1].end)
         return f"""视频标题：{title}
 这是第 {index}/{total} 个连续片段。
 
 请忠实压缩这个片段，供后续撰写完整笔记使用。保留重要事实、例子、论证关系和原有时间点；
+本片段覆盖时间轴 {first_ts} – {last_ts}，区间末尾的话题同样重要，压缩时不要丢掉结尾内容；
 结合上下文理解表达意图，不做评价，不补充外部知识。
 
 转录：
@@ -471,6 +719,7 @@ class LLMSummarizer:
         source: str,
         metadata: dict[str, Any],
         style: str = "detailed",
+        coverage_end: str | None = None,
     ) -> str:
         owner = metadata.get("owner") or "未知"
         published_at = metadata.get("published_at") or "未知"
@@ -484,6 +733,7 @@ class LLMSummarizer:
                 "并列出少量最有用的时间点。"
             )
             timestamp_hint = ""
+            coverage_hint = ""
         else:
             task = (
                 "写一份翔实、自然的 Markdown 视频笔记。完整复原内容脉络、具体例子、"
@@ -491,7 +741,14 @@ class LLMSummarizer:
             )
             timestamp_hint = (
                 "时间点写在段落开头，写成 [MM:SS] 或 [起点-终点]；"
-                "仅在有助于定位时使用，不必每段都加。"
+                "仅在有助于定位时使用，不必每段都加；但结尾一小节必须带一个接近材料末尾的时间点，"
+                "以便核对是否写到视频最后。"
+            )
+            coverage_hint = (
+                f"材料内容一直推进到时间点 {coverage_end}；笔记必须覆盖到该时间点，"
+                "收尾前先自查是否漏掉了材料末尾的话题。"
+                if coverage_end
+                else ""
             )
         metadata_hint = (
             "如果有助于读者快速了解视频，可在标题下自然带出材料中明确的作者、发布时间、"
@@ -508,7 +765,7 @@ class LLMSummarizer:
 点赞：{like_count}
 文字来源：{source_label}
 
-以准确理解语境和作者立场为先。{metadata_hint}时间点只能取自材料。{timestamp_hint}可在上下文支持时直接修正明显的口误、
+以准确理解语境和作者立场为先。{metadata_hint}时间点只能取自材料。{coverage_hint}{timestamp_hint}可在上下文支持时直接修正明显的口误、
 笔误或转写错误；只有歧义会影响结论且无法可靠判断时，才在正文采用最可能的解释，并在文末用
 Markdown 脚注集中说明。不要在正文反复插入“原文如此”或“疑为转写错误”。
 结构按内容自然组织，不必凑固定模板。标题使用：# 视频笔记：《{title}》

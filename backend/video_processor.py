@@ -9,12 +9,13 @@ import re
 import shutil
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
-from urllib.parse import parse_qs, urlencode, urlparse, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlparse, urljoin, urlunsplit
 
 import yt_dlp
 
@@ -67,6 +68,15 @@ class BiliSubtitleOutcome:
     pages: tuple[BiliPage, ...] = ()
     subtitle_by_page: tuple[tuple[int, SubtitleResult], ...] = ()
     pages_to_transcribe: tuple[BiliPage, ...] = ()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """只取 Location，不跟随重定向（b23.tv 短链展开用）。"""
+
+    def redirect_request(  # type: ignore[override]
+        self, req, fp, code, msg, headers, newurl
+    ):  # noqa: ANN001, ANN201
+        return None
 
 
 def bilibili_page_url(url: str, page: int) -> str:
@@ -174,12 +184,27 @@ class VideoProcessor:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
-
+    # Issue #1：部分环境下 www.bilibili.com 视频页永久 412（Cookie 补齐也过不去），
+    # 但 api.bilibili.com 的开放接口可用。yt-dlp 拉不到页面时回退到这些接口。
+    BILI_VIEW_API = "https://api.bilibili.com/x/web-interface/view"
+    BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl"
+    BILI_BLOCKED_MARKERS = (
+        "412",
+        "precondition failed",
+        "-352",
+        "risk control",
+        "security check",
+        "风控",
+        "访问过于频繁",
+        "验证码",
+    )
 
     def __init__(self, work_dir: Path) -> None:
         self.work_dir = work_dir
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._douyin_media_cache: dict[str, dict[str, Any]] = {}
+        # bvid / aid -> {"bvid", "aid", "pages": [{page, cid, part, duration}]}
+        self._bili_view_cache: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def detect_source(value: str, allow_local: bool = False) -> VideoSource:
@@ -203,7 +228,11 @@ class VideoProcessor:
         return VideoSource.OTHER
 
     async def get_video_info(
-        self, url_or_path: str, cookie: dict[str, str] | None = None, allow_local: bool = False
+        self,
+        url_or_path: str,
+        cookie: dict[str, str] | None = None,
+        allow_local: bool = False,
+        notes: list[str] | None = None,
     ) -> dict[str, Any]:
         source = self.detect_source(url_or_path, allow_local=allow_local)
         if source == VideoSource.LOCAL:
@@ -219,7 +248,7 @@ class VideoProcessor:
                 "like_count": 0,
                 "description": "",
             }
-        return await asyncio.to_thread(self._extract_info, url_or_path, cookie)
+        return await asyncio.to_thread(self._extract_info, url_or_path, cookie, notes)
 
     async def fetch_subtitles(
         self,
@@ -261,21 +290,14 @@ class VideoProcessor:
         BiliSubtitleOutcome 而非裸 None：调用方需要区分「凭据缺失」、「视频
         没有字幕」等不同原因，也能知道哪些分 P 需要语音转写补齐。
         """
-        match = re.search(r"BV[0-9A-Za-z]{10}", url)
+        match = _BV_RE.search(url) or _BV_RE.search(self._resolve_bili_short_url(url))
         if not match:
             return BiliSubtitleOutcome(None, "no_track", "未解析到视频 BV 号")
         bvid = match.group(0)
-        headers = {
-            "User-Agent": VideoProcessor.BILI_USER_AGENT,
-            "Referer": "https://www.bilibili.com/",
-            "Origin": "https://www.bilibili.com",
-        }
-        cookie_header = self._cookie_header(cookie)
-        if cookie_header:
-            headers["Cookie"] = cookie_header
+        headers = self._bili_headers(cookie)
         view = await asyncio.to_thread(
             self._bilibili_get_json,
-            "https://api.bilibili.com/x/web-interface/view",
+            self.BILI_VIEW_API,
             {"bvid": bvid},
             headers,
         )
@@ -402,14 +424,7 @@ class VideoProcessor:
         cls, bvid: str, cid: int, cookie: dict[str, str] | None
     ) -> dict[str, Any] | None:
         """拉取某个分 P（cid）的字幕清单，返回首个可用 AI 字幕轨。"""
-        headers = {
-            "User-Agent": VideoProcessor.BILI_USER_AGENT,
-            "Referer": "https://www.bilibili.com/",
-            "Origin": "https://www.bilibili.com",
-        }
-        cookie_header = cls._cookie_header(cookie)
-        if cookie_header:
-            headers["Cookie"] = cookie_header
+        headers = cls._bili_headers(cookie)
         player = cls._bilibili_get_json(
             "https://api.bilibili.com/x/player/wbi/v2",
             {"bvid": bvid, "cid": cid},
@@ -462,6 +477,217 @@ class VideoProcessor:
         signed["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
         return signed
 
+    @classmethod
+    def _bili_headers(cls, cookie: dict[str, str] | None) -> dict[str, str]:
+        """B 站接口统一请求头：真实浏览器 UA + Referer/Origin（缺 Origin 会被 CDN 403）。"""
+        headers = {
+            "User-Agent": cls.BILI_USER_AGENT,
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
+        }
+        cookie_header = cls._cookie_header(cookie)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        return headers
+
+    @classmethod
+    def _resolve_bili_short_url(cls, url: str) -> str:
+        """展开 b23.tv 短链（只取重定向目标，不拉页面，避开视频页风控）。"""
+        if "b23.tv" not in (urlparse(url).hostname or ""):
+            return url
+        opener = urllib.request.build_opener(_NoRedirect())
+        request = urllib.request.Request(url, headers={"User-Agent": cls.BILI_USER_AGENT})
+        try:
+            with opener.open(request, timeout=15) as response:
+                return response.geturl()
+        except urllib.error.HTTPError as exc:
+            location = exc.headers.get("Location") if exc.headers else None
+            if exc.code in {301, 302, 303, 307, 308} and location:
+                return urljoin(url, str(location))
+        except Exception:
+            return url
+        return url
+
+    @classmethod
+    def _bilibili_ids(cls, url: str) -> tuple[str | None, int | None]:
+        """从链接解析 (bvid, aid)；只有短链才会产生一次网络请求。"""
+        target = url
+        for _ in range(2):
+            bvid, aid = _BV_RE.search(target), _AV_RE.search(target)
+            if bvid or aid:
+                return (
+                    bvid.group(0) if bvid else None,
+                    int(aid.group(1)) if aid else None,
+                )
+            resolved = cls._resolve_bili_short_url(target)
+            if resolved == target:
+                break
+            target = resolved
+        return None, None
+
+    @classmethod
+    def _bilibili_blocked(cls, exc: Exception) -> bool:
+        """判断 yt-dlp 失败是否属于风控拦截（可回退接口直连）。"""
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return any(marker in text for marker in cls.BILI_BLOCKED_MARKERS)
+
+    def _extract_bilibili_api_info(
+        self, url: str, cookie: dict[str, str] | None, notes: list[str] | None = None
+    ) -> dict[str, Any]:
+        """风控回退通道：视频页 412 时用 view 接口取元数据（Issue #1）。
+
+        返回与 `_extract_info` 同构的字典，并把分 P 清单缓存在 `_bili_view_cache`，
+        供后续 playurl 取音频/预览流使用。
+        """
+        bvid, aid = self._bilibili_ids(url)
+        if not bvid and not aid:
+            raise RuntimeError("未能从链接解析出 BV/av 号，接口回退无法定位视频")
+        payload = self._bilibili_get_json(
+            self.BILI_VIEW_API,
+            {"bvid": bvid} if bvid else {"aid": aid},
+            self._bili_headers(cookie),
+        )
+        data = payload.get("data") or {}
+        if int(payload.get("code") or 0) != 0 or not data.get("title"):
+            hint = (
+                "；未携带 B 站凭据，开放接口也会返回 412——请先扫码导入或填写 SESSDATA"
+                if not self._cookie_header(cookie)
+                else ""
+            )
+            raise RuntimeError(
+                f"view 接口未返回可用数据（code={payload.get('code')}）{hint}"
+            )
+        pages = [
+            {
+                "page": int(item.get("page") or index),
+                "cid": int(item.get("cid") or 0),
+                "part": str(item.get("part") or f"P{item.get('page')}"),
+                "duration": float(item.get("duration") or 0),
+            }
+            for index, item in enumerate(data.get("pages") or [], start=1)
+            if item.get("cid")
+        ]
+        duration = sum(page["duration"] for page in pages) or float(
+            data.get("duration") or 0
+        )
+        stat = data.get("stat") or {}
+        owner = data.get("owner") or {}
+        key = bvid or f"aid{aid}"
+        self._bili_view_cache[key] = {"bvid": bvid, "aid": aid, "pages": pages}
+        if notes is not None:
+            notes.append("B 站视频页被风控拦截，已改用开放接口直连获取视频信息与媒体流")
+        return {
+            "title": str(data.get("title")),
+            "source": VideoSource.BILIBILI.value,
+            "duration": duration,
+            "owner": str(owner.get("name") or data.get("mid") or ""),
+            "upload_date": "",
+            "timestamp": float(data.get("pubdate") or 0),
+            "description": str(data.get("desc") or "")[:1_000],
+            "thumbnail": str(data.get("pic") or ""),
+            "view_count": int(stat.get("view") or 0),
+            "like_count": int(stat.get("like") or 0),
+            # 接口直连不返回字幕清单；AI 字幕本来就由 fetch_bilibili_subtitles 独立取
+            "subtitles": {},
+            "automatic_captions": {},
+            "_bili_api_fallback": True,
+        }
+
+    def _bilibili_play_pages(
+        self, url: str, cookie: dict[str, str] | None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        bvid, aid = self._bilibili_ids(url)
+        if not bvid and not aid:
+            raise RuntimeError("未能从链接解析出 BV/av 号，接口回退无法定位视频")
+        key = bvid or f"aid{aid}"
+        cached = self._bili_view_cache.get(key)
+        if not cached or not cached["pages"]:
+            self._extract_bilibili_api_info(url, cookie)
+            cached = self._bili_view_cache.get(key) or {"pages": []}
+        return key, list(cached["pages"])
+
+    def _download_bilibili_media_via_api(
+        self,
+        url: str,
+        target: Path,
+        cookie: dict[str, str] | None,
+        kind: str,
+        should_abort: Callable[[], bool] | None = None,
+        notes: list[str] | None = None,
+    ) -> Path:
+        """风控回退下载：playurl 取 dash 流直链（kind=audio / video）。
+
+        音频取带宽最高的 dash.audio；预览取高度 >=360 中最小的一路 video。
+        拿不到 dash 时退到 durl（完整 mp4，体积大但转写/截图都能用）。
+        """
+        key, pages = self._bilibili_play_pages(url, cookie)
+        if not pages:
+            raise RuntimeError("view 接口未返回分 P 信息，无法取播放地址")
+        wanted = _page_requested(url)
+        page = next((item for item in pages if item["page"] == wanted), pages[0])
+        identifiers = self._bili_view_cache.get(key) or {}
+        params: dict[str, Any] = {"cid": page["cid"], "fnval": 16}
+        if identifiers.get("bvid"):
+            params["bvid"] = identifiers["bvid"]
+        else:
+            params["aid"] = identifiers.get("aid")
+        payload = self._bilibili_get_json(
+            self.BILI_PLAYURL_API, params, self._bili_headers(cookie)
+        )
+        data = payload.get("data") or {}
+        dash = data.get("dash") or {}
+        streams = (dash.get("audio") if kind == "audio" else dash.get("video")) or []
+        if kind == "audio":
+            ordered = sorted(
+                streams, key=lambda item: int(item.get("bandwidth") or 0), reverse=True
+            )
+        else:
+            by_quality = sorted(
+                streams,
+                key=lambda item: (
+                    int(item.get("height") or 0),
+                    int(item.get("bandwidth") or 0),
+                ),
+            )
+            acceptable = [
+                item for item in by_quality if int(item.get("height") or 0) >= 360
+            ]
+            ordered = acceptable or by_quality[::-1]
+        candidates: list[str] = []
+        for stream in ordered:
+            candidates.append(str(stream.get("baseUrl") or ""))
+            candidates.extend(str(item) for item in stream.get("backupUrl") or [])
+        candidates.extend(str(item.get("url") or "") for item in data.get("durl") or [])
+        urls = [value for value in candidates if value.startswith("http")]
+        if not urls:
+            raise RuntimeError(
+                f"playurl 接口未返回可下载流（code={payload.get('code')}，"
+                f"msg={payload.get('message') or '无'}）"
+            )
+        if notes is not None:
+            notes.append(
+                "yt-dlp 下载被 B 站风控拦截，已改用 playurl 接口直连"
+                + ("音频流" if kind == "audio" else "预览视频流")
+                + f"（分 P {page['page']}）"
+            )
+        last_error: Exception | None = None
+        for media_url in urls[:4]:
+            try:
+                return self._download_direct_media(
+                    media_url,
+                    target,
+                    f"https://www.bilibili.com/video/{key}/",
+                    cookie,
+                    user_agent=self.BILI_USER_AGENT,
+                    should_abort=should_abort,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                target.unlink(missing_ok=True)
+        raise RuntimeError(f"B 站接口直连下载失败：{last_error}")
+
     async def download_audio(
         self,
         url: str,
@@ -469,6 +695,7 @@ class VideoProcessor:
         cookie: dict[str, str] | None = None,
         media_name: str = "audio",
         should_abort: Callable[[], bool] | None = None,
+        notes: list[str] | None = None,
     ) -> Path:
         task_dir = self._task_dir(task_id)
 
@@ -499,7 +726,17 @@ class VideoProcessor:
                 if matches:
                     return max(matches, key=lambda item: item.stat().st_size)
             except Exception as exc:
-                if self.detect_source(url) != VideoSource.DOUYIN:
+                kind = self.detect_source(url)
+                if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
+                    return self._download_bilibili_media_via_api(
+                        url,
+                        task_dir / f"{media_name}.m4a",
+                        cookie,
+                        "audio",
+                        should_abort,
+                        notes,
+                    )
+                if kind != VideoSource.DOUYIN:
                     raise
                 ydl_error = exc
             if self.detect_source(url) != VideoSource.DOUYIN:
@@ -518,6 +755,7 @@ class VideoProcessor:
         task_id: str,
         cookie: dict[str, str] | None = None,
         should_abort: Callable[[], bool] | None = None,
+        notes: list[str] | None = None,
     ) -> Path:
         task_dir = self._task_dir(task_id)
 
@@ -546,8 +784,18 @@ class VideoProcessor:
                 ]
                 if matches:
                     return max(matches, key=lambda item: item.stat().st_size)
-            except Exception:
-                if self.detect_source(url) != VideoSource.DOUYIN:
+            except Exception as exc:
+                kind = self.detect_source(url)
+                if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
+                    return self._download_bilibili_media_via_api(
+                        url,
+                        task_dir / "preview.m4s",
+                        cookie,
+                        "video",
+                        should_abort,
+                        notes,
+                    )
+                if kind != VideoSource.DOUYIN:
                     raise
             if self.detect_source(url) != VideoSource.DOUYIN:
                 raise RuntimeError("yt-dlp completed without producing a preview video")
@@ -657,7 +905,10 @@ class VideoProcessor:
             await asyncio.to_thread(shutil.rmtree, task_dir)
 
     def _extract_info(
-        self, url: str, cookie: dict[str, str] | None
+        self,
+        url: str,
+        cookie: dict[str, str] | None,
+        notes: list[str] | None = None,
     ) -> dict[str, Any]:
         try:
             with self._ydl(
@@ -668,10 +919,18 @@ class VideoProcessor:
             ) as ydl:
                 raw_info = ydl.extract_info(url, download=False)
                 info = ydl.sanitize_info(raw_info)
-        except Exception:
-            if self.detect_source(url) != VideoSource.DOUYIN:
-                raise
-            return self._extract_douyin_share_info(url, cookie)
+        except Exception as exc:
+            kind = self.detect_source(url)
+            if kind == VideoSource.DOUYIN:
+                return self._extract_douyin_share_info(url, cookie)
+            if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
+                try:
+                    return self._extract_bilibili_api_info(url, cookie, notes)
+                except Exception as api_exc:
+                    raise RuntimeError(
+                        f"B 站视频页被风控拦截（{exc}），改用开放接口直连也未成功：{api_exc}"
+                    ) from exc
+            raise
         return {
             "title": info.get("title") or "Untitled video",
             "source": info.get("extractor_key", "other").lower(),
@@ -795,19 +1054,36 @@ class VideoProcessor:
         target: Path,
         referer: str,
         cookie: dict[str, str] | None,
+        user_agent: str | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> Path:
-        headers = {"User-Agent": self.DOUYIN_USER_AGENT, "Referer": referer}
-        cookie_header = self._cookie_header(cookie, douyin=True)
+        headers = {"User-Agent": user_agent or self.DOUYIN_USER_AGENT, "Referer": referer}
+        # B 站 CDN 要带 B 站凭据；抖音走自己的会话字段
+        cookie_header = (
+            self._cookie_header(cookie)
+            if user_agent is not None
+            else self._cookie_header(cookie, douyin=True)
+        )
         if cookie_header:
             headers["Cookie"] = cookie_header
         request = urllib.request.Request(media_url, headers=headers)
         target.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(request, timeout=60) as response, target.open("wb") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
-        if target.stat().st_size == 0:
-            raise RuntimeError("抖音媒体下载结果为空")
-        return target
+        # 先写 .part 再改名：Windows 不能删除还打开的文件，且中断的半文件不能被
+        # 主流程的 audio.* 复用扫描当成可用产物（.part 已在调用方的排除列表里）。
+        partial = target.with_name(target.name + ".part")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    if should_abort is not None and should_abort():
+                        raise asyncio.CancelledError("任务已取消")
+                    output.write(chunk)
+            if partial.stat().st_size == 0:
+                raise RuntimeError("媒体直连下载结果为空")
+            partial.replace(target)
+            return target
+        finally:
+            partial.unlink(missing_ok=True)
+
 
     @staticmethod
     def _select_subtitle(
@@ -982,7 +1258,16 @@ class VideoProcessor:
                 "__ac_signature", "tt_scid", "csrf_session_id",
             )
             return "; ".join(f"{name}={cookie[name]}" for name in names if cookie.get(name))
-        names = {"sessdata": "SESSDATA", "bili_jct": "bili_jct", "buvid3": "buvid3"}
+        names = {
+            "sessdata": "SESSDATA",
+            "bili_jct": "bili_jct",
+            "buvid3": "buvid3",
+            # 风控 Cookie：扫码登录会拿到这些字段，一起带上才能让 api.bilibili.com
+            # 在视频页 412 的环境里照常返回（Issue #1 报告的可用组合）。
+            "buvid4": "buvid4",
+            "b_nut": "b_nut",
+            "b_lsid": "b_lsid",
+        }
         return "; ".join(
             f"{header_name}={cookie[key]}"
             for key, header_name in names.items()
