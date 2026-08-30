@@ -3,7 +3,15 @@ const POLL_DELAY_MS = 2000;
 const POLL_TIMEOUT_MS = 12000;
 const MAX_POLL_ERRORS = 5;
 const CUSTOM_MODEL_ID = '__custom__';
-const PREFERENCE_KEYS = [
+// 档案下拉里自定义档案的取值前缀（内置 Provider 直接用 provider 名）。
+const CUSTOM_PROFILE_PREFIX = 'custom:';
+// 所有偏好集中在一个命名空间对象里写入，"浏览器存储中没有任何密钥"因此是
+// 单个函数（persistPrefs）的性质，而不是 13 个散装键的逐处审查结果。
+const PREFS_KEY = 'vtn_prefs';
+const PREFS_SCHEMA = 2;
+const PREFS_DEBOUNCE_MS = 250;
+// 旧版本每个设置一个散装键，仅用于一次性迁移，读取后立即删除。
+const LEGACY_PREFERENCE_KEYS = [
     'llm_provider',
     'llm_model_id',
     'llm_model',
@@ -18,6 +26,9 @@ const PREFERENCE_KEYS = [
     'reasoning_effort',
     'theme'
 ];
+const LEGACY_WHISPER_CONFIRM_PREFIX = 'whisper_confirm_';
+// 字段名命中即拒绝写入浏览器存储（API Key 只允许待在当前页面内存中）。
+const SECRET_FIELD_PATTERN = /key|token|secret|sessdata|jct|buvid|authorization|cookie/i;
 const LEGACY_SENSITIVE_KEYS = [
     'custom_api_key',
     'bili_sessdata',
@@ -112,13 +123,16 @@ let isCancelling = false;
 let elapsedTimer = null;
 let elapsedBaseSeconds = 0;
 let elapsedSyncedAt = 0;
+let prefs = defaultPrefs();
+let persistTimer = null;
+let persistJob = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     window.__videoToNoReady = false;
     // 每一步单独容错：即使浏览器里残留旧版缓存的 HTML（元素缺失），
     // 也只影响对应功能，不会让整页按钮全部失效。
     safeStep(removeLegacySecrets, '清理旧数据');
-    safeStep(loadPreferences, '读取偏好设置');
+    safeStep(initPreferences, '读取偏好设置');
     safeStep(bindEvents, '绑定页面事件');
     safeStep(toggleSourceType, '初始化来源切换');
     loadAppVersion();
@@ -145,7 +159,6 @@ async function loadAppVersion() {
 }
 
 function bindEvents() {
-    bindListener('saveConfigBtn', 'click', savePreferences);
     bindListener('resetConfigBtn', 'click', resetPreferences);
     bindListener('submitBtn', 'click', () => startSummary());
     bindListener('retryBtn', 'click', () => startSummary({ resumeCurrent: true }));
@@ -168,11 +181,16 @@ function bindEvents() {
             if (button) openRecentTask(button.dataset.taskId);
         });
     }
-    bindListener('llmProvider', 'change', handleProviderChange);
-    bindListener('llmModel', 'change', toggleCustomConfig);
+    bindListener('llmProfile', 'change', handleProfileChange);
+    bindListener('llmModel', 'change', handleModelChange);
     bindListener('llmTestBtn', 'click', testLlmConnection);
+    bindListener('saveKeyBtn', 'click', saveApiKey);
+    bindListener('clearKeyBtn', 'click', clearSavedKey);
+    bindListener('customProfileAddBtn', 'click', addCustomProfile);
+    bindListener('customProfileDeleteBtn', 'click', deleteCustomProfile);
     bindListener('manualModelBtn', 'click', manualImportWhisperModel);
     bindListener('sourceType', 'change', toggleSourceType);
+    bindPreferenceAutoSave();
     const videoUrl = byId('videoUrl');
     if (videoUrl) {
         videoUrl.addEventListener('input', () => {
@@ -377,37 +395,328 @@ function removeLegacySecrets() {
     LEGACY_SENSITIVE_KEYS.forEach((key) => localStorage.removeItem(key));
 }
 
-function loadPreferences() {
-    const legacyChoice = localStorage.getItem('llm_model');
-    const savedProvider = localStorage.getItem('llm_provider') || LEGACY_PROVIDER_MAP[legacyChoice] || 'deepseek';
-    byId('llmProvider').value = PROVIDER_CONFIG[savedProvider] ? savedProvider : 'deepseek';
-    byId('customBaseUrl').value = localStorage.getItem('custom_base_url') || '';
-    byId('customModelName').value = localStorage.getItem('custom_model_name') || '';
-    populateModelOptions(localStorage.getItem('llm_model_id'));
-    byId('whisperModel').value = localStorage.getItem('whisper_model') || 'base';
+const GLOBAL_PREF_KEYS = [
+    'whisper_model',
+    'screenshot_interval',
+    'include_screenshots',
+    'use_gpu',
+    'summary_style',
+    'reasoning_effort',
+    'processing_mode'
+];
+
+function defaultProvider() {
+    return Object.keys(PROVIDER_CONFIG)[0];
+}
+
+function defaultPrefs() {
+    return {
+        schema: PREFS_SCHEMA,
+        provider: defaultProvider(),
+        custom_id: '',
+        customs: [],
+        by_provider: {},
+        confirmations: { whisper_download: {} },
+        global: {
+            whisper_model: 'base',
+            screenshot_interval: '10',
+            include_screenshots: false,
+            use_gpu: false,
+            summary_style: 'detailed',
+            reasoning_effort: 'auto',
+            processing_mode: 'restart'
+        },
+        ui: { theme: 'system' }
+    };
+}
+
+function readStoredPrefs() {
+    try {
+        const raw = localStorage.getItem(PREFS_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_error) {
+        return null;
+    }
+}
+
+// 递归丢弃敏感字段名的值，并把不可序列化的东西剔掉。
+function sanitizeForStorage(value) {
+    if (Array.isArray(value)) return value.map(sanitizeForStorage);
+    if (value && typeof value === 'object') {
+        const clean = {};
+        Object.entries(value).forEach(([key, item]) => {
+            if (SECRET_FIELD_PATTERN.test(key)) {
+                console.warn(`[VideoToNo] 拒绝把敏感字段 ${key} 写入浏览器存储`);
+                return;
+            }
+            const sanitized = sanitizeForStorage(item);
+            if (sanitized !== undefined) clean[key] = sanitized;
+        });
+        return clean;
+    }
+    if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') {
+        return value;
+    }
+    return undefined;
+}
+
+// 全文件唯一的存储写入入口。
+function persistPrefs() {
+    try {
+        localStorage.setItem(PREFS_KEY, JSON.stringify(sanitizeForStorage(prefs)));
+    } catch (error) {
+        console.warn('[VideoToNo] 偏好保存失败（浏览器可能禁用了本地存储）：', error);
+    }
+}
+
+function schedulePersist(job) {
+    window.clearTimeout(persistTimer);
+    persistJob = job;
+    persistTimer = window.setTimeout(() => {
+        persistTimer = null;
+        const pending = persistJob;
+        persistJob = null;
+        if (pending) pending();
+    }, PREFS_DEBOUNCE_MS);
+}
+
+function flushPendingPrefs() {
+    if (!persistTimer) return;
+    window.clearTimeout(persistTimer);
+    persistTimer = null;
+    const pending = persistJob;
+    persistJob = null;
+    if (pending) pending();
+}
+
+function isPresetModel(provider, modelId) {
+    const config = PROVIDER_CONFIG[provider];
+    return Boolean(config && config.models.some(([id]) => id === modelId));
+}
+
+function legacyWhisperConfirms() {
+    const confirmed = {};
+    try {
+        Object.keys(localStorage)
+            .filter((key) => key.startsWith(LEGACY_WHISPER_CONFIRM_PREFIX))
+            .forEach((key) => {
+                if (localStorage.getItem(key) === '1') {
+                    confirmed[key.slice(LEGACY_WHISPER_CONFIRM_PREFIX.length)] = true;
+                }
+                localStorage.removeItem(key);
+            });
+    } catch (error) {
+        console.warn('[VideoToNo] 迁移下载确认记录失败：', error);
+    }
+    return confirmed;
+}
+
+function migrateLegacyPrefs() {
+    if (readStoredPrefs()) return null;
+    const next = defaultPrefs();
+    const legacyProvider = localStorage.getItem('llm_provider')
+        || LEGACY_PROVIDER_MAP[localStorage.getItem('llm_model')]
+        || '';
+    next.provider = PROVIDER_CONFIG[legacyProvider] ? legacyProvider : defaultProvider();
+    const legacyModelId = localStorage.getItem('llm_model_id') || '';
+    const legacyManual = (localStorage.getItem('custom_model_name') || '').trim();
+    const legacyBaseUrl = (localStorage.getItem('custom_base_url') || '').trim();
+    // custom 的两个键本来就只属于自定义接口，直接搬进那条档案不会串到别的档案；
+    // 真正会串味的是被所有 Provider 共用的 llm_model_id，下面按档案逐个甄别。
+    const customEntry = {
+        id: 'c-1',
+        label: '自定义接口',
+        base_url: legacyBaseUrl,
+        model_id: CUSTOM_MODEL_ID,
+        manual_model: legacyManual
+    };
+    next.customs.push(customEntry);
+    if (next.provider === 'custom') {
+        next.custom_id = customEntry.id;
+    } else if (isPresetModel(next.provider, legacyModelId)) {
+        next.by_provider[next.provider] = { model_id: legacyModelId, manual_model: '' };
+    } else if (legacyModelId === CUSTOM_MODEL_ID && legacyManual) {
+        // 内置 Provider + 手填模型 ID：这两个键本来就成对使用，不属于串味的数据。
+        next.by_provider[next.provider] = { model_id: CUSTOM_MODEL_ID, manual_model: legacyManual };
+    }
+    // 其余情况（llm_model_id 属于别的 Provider，即旧版共用单键造成的串写）直接丢弃：
+    // 宁可让用户重选一次，也不会把 A 档案的模型 ID 变成 B 档案输入框里的内容。
+    GLOBAL_PREF_KEYS.forEach((key) => {
+        const value = localStorage.getItem(key);
+        if (value !== null) next.global[key] = value;
+    });
+    next.global.include_screenshots = next.global.include_screenshots === 'true';
+    next.global.use_gpu = next.global.use_gpu === 'true';
+    if (!['auto', 'off', 'high', 'max'].includes(next.global.reasoning_effort)) {
+        next.global.reasoning_effort = 'auto';
+    }
+    const theme = localStorage.getItem('theme');
+    if (theme) next.ui.theme = theme;
+    next.confirmations.whisper_download = legacyWhisperConfirms();
+    LEGACY_PREFERENCE_KEYS.forEach((key) => localStorage.removeItem(key));
+    return next;
+}
+
+function mergePrefs(stored) {
+    if (!stored) return null;
+    const next = defaultPrefs();
+    if (typeof stored.provider === 'string') next.provider = stored.provider;
+    if (typeof stored.custom_id === 'string') next.custom_id = stored.custom_id;
+    if (Array.isArray(stored.customs)) {
+        next.customs = stored.customs
+            .filter((entry) => entry && typeof entry === 'object' && typeof entry.id === 'string')
+            .map((entry) => ({
+                id: entry.id,
+                label: String(entry.label || ''),
+                base_url: String(entry.base_url || ''),
+                model_id: String(entry.model_id || ''),
+                manual_model: String(entry.manual_model || '')
+            }));
+    }
+    if (stored.by_provider && typeof stored.by_provider === 'object') {
+        Object.entries(stored.by_provider).forEach(([provider, record]) => {
+            if (!PROVIDER_CONFIG[provider] || !record || typeof record !== 'object') return;
+            next.by_provider[provider] = {
+                model_id: String(record.model_id || ''),
+                manual_model: String(record.manual_model || '')
+            };
+        });
+    }
+    if (stored.global && typeof stored.global === 'object') {
+        GLOBAL_PREF_KEYS.forEach((key) => {
+            const value = stored.global[key];
+            if (value !== undefined && value !== null) next.global[key] = value;
+        });
+    }
+    if (stored.confirmations && typeof stored.confirmations === 'object') {
+        const confirmed = stored.confirmations.whisper_download;
+        if (confirmed && typeof confirmed === 'object') {
+            Object.entries(confirmed).forEach(([model, value]) => {
+                if (value === true) next.confirmations.whisper_download[model] = true;
+            });
+        }
+    }
+    if (stored.ui && typeof stored.ui.theme === 'string') next.ui.theme = stored.ui.theme;
+    return next;
+}
+
+function initPreferences() {
+    let stored = null;
+    try {
+        stored = migrateLegacyPrefs() || mergePrefs(readStoredPrefs());
+    } catch (error) {
+        // 隐私模式等禁用本地存储时，只丢"记住上次的选择"，页面必须照常可用。
+        console.warn('[VideoToNo] 读取历史偏好失败，改用默认设置：', error);
+    }
+    prefs = stored || defaultPrefs();
+    if (!PROVIDER_CONFIG[prefs.provider]) prefs.provider = defaultProvider();
+    applyPreferencesToForm();
+    persistPrefs();
+}
+
+function providerRecord(provider) {
+    if (!prefs.by_provider[provider]) {
+        prefs.by_provider[provider] = { model_id: '', manual_model: '' };
+    }
+    return prefs.by_provider[provider];
+}
+
+function newCustomEntry(label) {
+    return {
+        id: `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        label: label || '自定义接口',
+        base_url: '',
+        model_id: '',
+        manual_model: ''
+    };
+}
+
+function ensureCustoms() {
+    if (!prefs.customs.length) prefs.customs.push(newCustomEntry());
+    return prefs.customs;
+}
+
+function activeCustom() {
+    if (prefs.provider !== 'custom') return null;
+    const entries = ensureCustoms();
+    const entry = entries.find((item) => item.id === prefs.custom_id) || entries[0];
+    prefs.custom_id = entry.id;
+    return entry;
+}
+
+// 当前档案自己的记录：模型选择和手填地址都只属于它，不与其他档案共用字段。
+function activeRecord() {
+    return prefs.provider === 'custom' ? activeCustom() : providerRecord(prefs.provider);
+}
+
+function profileSelectValue() {
+    return prefs.provider === 'custom'
+        ? `${CUSTOM_PROFILE_PREFIX}${prefs.custom_id}`
+        : prefs.provider;
+}
+
+function selectProfileByValue(value) {
+    if (value.startsWith(CUSTOM_PROFILE_PREFIX)) {
+        prefs.provider = 'custom';
+        const id = value.slice(CUSTOM_PROFILE_PREFIX.length);
+        if (prefs.customs.some((item) => item.id === id)) prefs.custom_id = id;
+    } else if (PROVIDER_CONFIG[value]) {
+        prefs.provider = value;
+    }
+}
+
+function renderProfileOptions() {
+    const select = byId('llmProfile');
+    if (!select) return null;
+    ensureCustoms();
+    select.replaceChildren();
+    Object.entries(PROVIDER_CONFIG).forEach(([provider, config]) => {
+        if (provider === 'custom') return;
+        select.add(new Option(config.name, provider));
+    });
+    prefs.customs.forEach((entry) => {
+        const option = new Option(entry.label || '自定义接口', `${CUSTOM_PROFILE_PREFIX}${entry.id}`);
+        option.title = entry.base_url || '尚未填写接口地址';
+        select.add(option);
+    });
+    const wanted = profileSelectValue();
+    const available = Array.from(select.options).map((option) => option.value);
+    // 档案被删除或旧版 HTML 缺少选项时退回可用项，但用户选过的档案仍留在偏好里。
+    select.value = available.includes(wanted) ? wanted : available[0];
+    if (select.value !== wanted) selectProfileByValue(select.value);
+    return select;
+}
+
+function applyPreferencesToForm() {
+    renderProfileOptions();
+    renderProfileForm();
+    byId('whisperModel').value = prefs.global.whisper_model;
     snapshotWhisperLabels();
     refreshWhisperModelHints();
-    byId('screenshotInterval').value = localStorage.getItem('screenshot_interval') || '10';
-    byId('includeScreenshots').checked = localStorage.getItem('include_screenshots') === 'true';
-    byId('useGpu').checked = localStorage.getItem('use_gpu') === 'true';
-    byId('summaryStyle').value = localStorage.getItem('summary_style') || 'detailed';
-    const savedReasoning = localStorage.getItem('reasoning_effort') || 'auto';
-    byId('reasoningEffort').value = ['auto', 'off', 'high', 'max'].includes(savedReasoning)
-        ? savedReasoning : 'auto';
-    const processingMode = localStorage.getItem('processing_mode') || 'restart';
-    const processingModeInput = document.querySelector(`input[name="processingMode"][value="${processingMode}"]`);
+    byId('screenshotInterval').value = prefs.global.screenshot_interval;
+    byId('includeScreenshots').checked = prefs.global.include_screenshots === true;
+    byId('useGpu').checked = prefs.global.use_gpu === true;
+    byId('summaryStyle').value = prefs.global.summary_style;
+    byId('reasoningEffort').value = ['auto', 'off', 'high', 'max'].includes(prefs.global.reasoning_effort)
+        ? prefs.global.reasoning_effort : 'auto';
+    const processingModeInput = document.querySelector(
+        `input[name="processingMode"][value="${prefs.global.processing_mode}"]`
+    );
     if (processingModeInput) processingModeInput.checked = true;
     toggleScreenshotSettings();
-    applyTheme(localStorage.getItem('theme') || 'system');
+    applyTheme(prefs.ui.theme);
+    refreshKeyStatus();
 }
 
 function initThemeControl() {
     byId('themeControl').addEventListener('click', (event) => {
         const button = event.target.closest('[data-theme-option]');
         if (!button) return;
-        const theme = button.dataset.themeOption;
-        localStorage.setItem('theme', theme);
-        applyTheme(theme);
+        prefs.ui.theme = button.dataset.themeOption;
+        persistPrefs();
+        applyTheme(prefs.ui.theme);
     });
 }
 
@@ -420,39 +729,105 @@ function applyTheme(theme) {
     });
 }
 
-function savePreferences() {
-    const interval = normalizeScreenshotInterval();
-    localStorage.setItem('llm_provider', byId('llmProvider').value);
-    localStorage.setItem('llm_model_id', byId('llmModel').value);
-    localStorage.removeItem('llm_model');
-    localStorage.setItem('custom_base_url', byId('customBaseUrl').value.trim());
-    localStorage.setItem('custom_model_name', byId('customModelName').value.trim());
-    localStorage.setItem('whisper_model', byId('whisperModel').value);
-    localStorage.setItem('screenshot_interval', String(interval));
-    localStorage.setItem('include_screenshots', String(byId('includeScreenshots').checked));
-    localStorage.setItem('use_gpu', String(byId('useGpu').checked));
-    localStorage.setItem('summary_style', byId('summaryStyle').value);
-    localStorage.setItem('reasoning_effort', byId('reasoningEffort').value);
-    localStorage.setItem(
-        'processing_mode',
-        document.querySelector('input[name="processingMode"]:checked')?.value || 'reuse'
-    );
-    showToast('非敏感偏好已保存', 'success');
+function persistGlobals() {
+    normalizeScreenshotInterval();
+    const values = prefs.global;
+    values.whisper_model = byId('whisperModel').value || values.whisper_model;
+    values.screenshot_interval = byId('screenshotInterval').value;
+    values.include_screenshots = byId('includeScreenshots').checked;
+    values.use_gpu = byId('useGpu').checked;
+    values.summary_style = byId('summaryStyle').value;
+    values.reasoning_effort = byId('reasoningEffort').value;
+    values.processing_mode = document.querySelector('input[name="processingMode"]:checked')?.value
+        || values.processing_mode;
+    persistPrefs();
+}
+
+function persistProfileForm() {
+    const record = activeRecord();
+    if (!record) return;
+    record.model_id = byId('llmModel').value || '';
+    record.manual_model = byId('customModelName').value.trim();
+    if (prefs.provider === 'custom') record.base_url = byId('customBaseUrl').value.trim();
+    persistPrefs();
+}
+
+function handleModelChange() {
+    toggleCustomConfig();
+    persistProfileForm();
+}
+
+// 改动即记住：曾经只有点「保存偏好」才落盘，正常提交不保存，
+// 于是重开页面必然弹回默认档案。
+function bindPreferenceAutoSave() {
+    ['whisperModel', 'summaryStyle', 'reasoningEffort', 'includeScreenshots', 'useGpu']
+        .forEach((id) => bindListener(id, 'change', persistGlobals));
+    document.querySelectorAll('input[name="processingMode"]').forEach((input) => {
+        input.addEventListener('change', persistGlobals);
+    });
+    bindListener('screenshotInterval', 'change', persistGlobals);
+    bindListener('screenshotInterval', 'input', () => schedulePersist(persistGlobals));
+    ['customBaseUrl', 'customModelName'].forEach((id) => {
+        const element = byId(id);
+        if (!element) return;
+        element.addEventListener('input', () => {
+            toggleCustomConfig();
+            schedulePersist(persistProfileFormAndKeyStatus);
+        });
+    });
+    bindListener('customProfileLabel', 'input', handleCustomProfileLabelInput);
+    bindListener('apiKey', 'input', updateKeyControls);
+    window.addEventListener('pagehide', flushPendingPrefs);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushPendingPrefs();
+    });
+}
+
+function persistProfileFormAndKeyStatus() {
+    persistProfileForm();
+    refreshKeyStatus();
 }
 
 function resetPreferences() {
-    PREFERENCE_KEYS.forEach((key) => localStorage.removeItem(key));
-    loadPreferences();
+    const message = '将把模型档案选择、识别参数和主题恢复为默认值。\n\n'
+        + '只影响当前浏览器的界面偏好，不会清除本机已保存的 API Key。确定继续吗？';
+    if (!window.confirm(message)) return;
+    try {
+        localStorage.removeItem(PREFS_KEY);
+    } catch (error) {
+        console.warn('[VideoToNo] 清除偏好失败：', error);
+    }
+    prefs = defaultPrefs();
+    applyPreferencesToForm();
+    persistPrefs();
     showToast('已恢复默认偏好', 'info');
 }
 
-function handleProviderChange() {
-    populateModelOptions();
+function handleProfileChange() {
+    const select = byId('llmProfile');
+    if (!select) return;
+    selectProfileByValue(select.value);
+    // 换档案时清掉输入框里未保存的 Key：贴错档案比多贴一次危险得多。
+    clearTypedApiKey();
+    keyMatch = null;
+    renderProfileForm();
+    persistPrefs();
+    refreshKeyStatus();
 }
 
-function populateModelOptions(preferredModel = null) {
-    const provider = byId('llmProvider').value;
-    const providerConfig = PROVIDER_CONFIG[provider];
+function renderProfileForm() {
+    const record = activeRecord();
+    byId('customBaseUrl').value = (record && record.base_url) || '';
+    byId('customProfileLabel').value = (record && record.label) || '';
+    populateModelOptions(record);
+    updateKeyControls();
+}
+
+// 只读取当前档案自己的记录：preferred 不再可能来自另一个档案，
+// 识别不了的模型 ID 只会落回本档案的「手动输入」选项，绝不写入任何输入框。
+function populateModelOptions(record) {
+    const provider = prefs.provider;
+    const providerConfig = PROVIDER_CONFIG[provider] || PROVIDER_CONFIG[defaultProvider()];
     const modelSelect = byId('llmModel');
     modelSelect.replaceChildren();
 
@@ -463,21 +838,210 @@ function populateModelOptions(preferredModel = null) {
     });
     modelSelect.add(new Option('手动输入模型 ID…', CUSTOM_MODEL_ID));
 
-    const requestedModel = preferredModel || providerConfig.defaultModel;
-    const hasPreset = Array.from(modelSelect.options).some((option) => option.value === requestedModel);
-    modelSelect.value = hasPreset ? requestedModel : CUSTOM_MODEL_ID;
-    if (!hasPreset && requestedModel && requestedModel !== CUSTOM_MODEL_ID && !byId('customModelName').value) {
-        byId('customModelName').value = requestedModel;
-    }
+    const preferred = (record && record.model_id) || providerConfig.defaultModel;
+    const hasPreset = Boolean(preferred)
+        && Array.from(modelSelect.options).some((option) => option.value === preferred);
+    modelSelect.value = hasPreset ? preferred : CUSTOM_MODEL_ID;
+    byId('customModelName').value = (record && record.manual_model) || '';
     toggleCustomConfig();
 }
 
 function toggleCustomConfig() {
-    const customProvider = byId('llmProvider').value === 'custom';
+    const customProvider = prefs.provider === 'custom';
     const customModel = byId('llmModel').value === CUSTOM_MODEL_ID;
     byId('customBaseUrlField').hidden = !customProvider;
     byId('customModelNameField').hidden = !customModel;
     byId('customApiConfig').hidden = !customProvider;
+}
+
+// ---- 自定义接口档案（可命名多份） ----
+
+function handleCustomProfileLabelInput() {
+    const record = activeCustom();
+    if (!record) return;
+    record.label = byId('customProfileLabel').value.trim();
+    schedulePersist(() => {
+        persistPrefs();
+        renderProfileOptions();
+        updateKeyControls();
+    });
+}
+
+function addCustomProfile() {
+    persistProfileForm();
+    const current = activeCustom();
+    const entry = newCustomEntry('新的自定义接口');
+    if (current) entry.base_url = current.base_url;
+    prefs.provider = 'custom';
+    prefs.customs.push(entry);
+    prefs.custom_id = entry.id;
+    renderProfileOptions();
+    renderProfileForm();
+    persistPrefs();
+    refreshKeyStatus();
+    showToast('已新建自定义接口档案，填好名称和地址即可使用', 'info');
+}
+
+function deleteCustomProfile() {
+    const entry = activeCustom();
+    if (!entry) return;
+    if (prefs.customs.length <= 1) {
+        showToast('至少保留一个自定义接口档案', 'info');
+        return;
+    }
+    const message = `删除档案「${entry.label}」？\n\n`
+        + '只删除本浏览器里的名称、地址和模型选择；本机已保存的 API Key 按接口地址保管，'
+        + '不会被清除（别的档案指向同一地址时仍可复用）。';
+    if (!window.confirm(message)) return;
+    prefs.customs = prefs.customs.filter((item) => item.id !== entry.id);
+    prefs.custom_id = prefs.customs[0].id;
+    renderProfileOptions();
+    renderProfileForm();
+    persistPrefs();
+    refreshKeyStatus();
+    showToast(`已删除档案「${entry.label}」`, 'success');
+}
+
+// ---- 本机已保存的 API Key（按接口地址保管，浏览器从不持有） ----
+
+let keyStatus = { storage: null, error: null };
+let keyMatch = null;
+let keyStatusToken = 0;
+
+function hasReusableKey() {
+    return Boolean(keyMatch && keyMatch.key_state === 'saved');
+}
+
+// Key 输入框的唯一读取入口：页面元素缺失时退回空串，而不是在启动路径上抛错。
+function typedApiKey() {
+    const element = byId('apiKey');
+    return element ? element.value.trim() : '';
+}
+
+function clearTypedApiKey() {
+    const element = byId('apiKey');
+    if (element) element.value = '';
+}
+
+// 让后端按它自己的地址规范化规则回答"这个端点存了 Key 没有"，
+// 前端不复制一套规范化逻辑，就不会出现两边判断不一致。
+async function refreshKeyStatus() {
+    const token = ++keyStatusToken;
+    const config = getSelectedModelConfig();
+    if (!config || !config.baseUrl) {
+        keyMatch = null;
+        keyStatus = { storage: null, error: null };
+        updateKeyControls();
+        return;
+    }
+    const params = new URLSearchParams({ base_url: config.baseUrl, provider: config.provider });
+    try {
+        const response = await fetchWithTimeout(
+            `${API_BASE}/llm-keys?${params.toString()}`, { cache: 'no-store' }, 8000
+        );
+        const data = await readResponse(response, '读取本机 Key 状态失败');
+        if (token !== keyStatusToken) return;
+        keyStatus = { storage: data.storage || null, error: data.error || null };
+        keyMatch = data.match || null;
+    } catch (error) {
+        if (token !== keyStatusToken) return;
+        keyStatus = { storage: null, error: null };
+        keyMatch = null;
+    }
+    updateKeyControls();
+}
+
+function updateKeyControls() {
+    const chip = byId('keyState');
+    if (!chip) return;
+    const typed = typedApiKey();
+    const config = getSelectedModelConfig();
+    const insecure = Boolean(keyStatus.storage) && keyStatus.storage.secure === false;
+    const suffix = insecure ? '（本机不支持加密，明文存储）' : '';
+    let text;
+    let state = 'muted';
+    if (keyStatus.error === 'corrupt_keys_file') {
+        text = '本机密钥档案已损坏，可删除 workspace/llm_keys.json 后重新保存';
+        state = 'error';
+    } else if (!config || !config.baseUrl) {
+        text = '填好接口地址后才能确认本机是否已保存 Key';
+    } else if (typed) {
+        text = hasReusableKey()
+            ? `已填入新 Key（本机现存的仍是 ${keyMatch.api_key_masked || ''}）`
+            : '已填入 Key，未保存则只在本次页面会话内有效';
+        state = 'warn';
+    } else if (keyMatch && keyMatch.key_state === 'undecryptable') {
+        text = '本机已存的 Key 无法解密（可能来自其他机器或其他 Windows 账户），请重填后保存';
+        state = 'error';
+    } else if (hasReusableKey()) {
+        text = `本机已保存 ${keyMatch.api_key_masked || ''} · ${keyMatch.label || keyMatch.endpoint || ''}${suffix}`;
+        state = 'ok';
+    } else if (keyStatus.storage) {
+        text = `该接口未保存 Key${suffix}`;
+        state = 'muted';
+    } else {
+        text = '未连接本机服务，暂不确定是否已保存 Key';
+        state = 'muted';
+    }
+    chip.textContent = text;
+    chip.className = `key-chip ${state}`;
+    const saveButton = byId('saveKeyBtn');
+    if (saveButton) saveButton.disabled = !typed;
+    const clearButton = byId('clearKeyBtn');
+    if (clearButton) clearButton.hidden = !(keyMatch && keyMatch.saved);
+}
+
+async function saveApiKey() {
+    const config = getSelectedModelConfig();
+    const typed = typedApiKey();
+    const button = byId('saveKeyBtn');
+    if (!config || !typed) return;
+    if (!config.baseUrl) {
+        showToast('请先填写 API Base URL', 'error');
+        return;
+    }
+    if (button) button.disabled = true;
+    try {
+        const response = await fetchWithTimeout(
+            `${API_BASE}/llm-keys`,
+            {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: config.provider,
+                    base_url: config.baseUrl,
+                    label: config.profileLabel,
+                    model: config.model || null,
+                    api_key: typed
+                })
+            },
+            15000
+        );
+        await readResponse(response, '保存失败');
+        clearTypedApiKey();
+        showToast(`Key 已加密保存到本机：${config.profileLabel}`, 'success');
+    } catch (error) {
+        showToast(`保存失败：${error.message}`, 'error');
+    }
+    await refreshKeyStatus();
+}
+
+async function clearSavedKey() {
+    const config = getSelectedModelConfig();
+    if (!config || !config.baseUrl) return;
+    const message = `将从本机删除接口地址 ${config.baseUrl} 的 API Key，删除后需重新填写。确定吗？`;
+    if (!window.confirm(message)) return;
+    const params = new URLSearchParams({ base_url: config.baseUrl, provider: config.provider });
+    try {
+        const response = await fetchWithTimeout(
+            `${API_BASE}/llm-keys?${params.toString()}`, { method: 'DELETE' }, 10000
+        );
+        await readResponse(response, '清除失败');
+        showToast('已从本机清除该接口的 Key', 'success');
+    } catch (error) {
+        showToast(`清除失败：${error.message}`, 'error');
+    }
+    await refreshKeyStatus();
 }
 
 async function testLlmConnection() {
@@ -485,12 +1049,18 @@ async function testLlmConnection() {
     const status = byId('llmTestStatus');
     const modelConfig = getSelectedModelConfig();
     if (!modelConfig) return;
-    const apiKey = byId('apiKey').value.trim();
-    if (!apiKey) {
-        status.textContent = '请先填写 API Key';
+    if (!modelConfig.baseUrl) {
+        status.textContent = '请先填写 API Base URL';
         status.className = 'llm-test-status error';
         return;
     }
+    const apiKey = typedApiKey();
+    const body = {
+        model_type: modelConfig.provider,
+        base_url: modelConfig.baseUrl,
+        model: modelConfig.model
+    };
+    if (apiKey) body.api_key = apiKey;
     button.disabled = true;
     status.textContent = '测试中…';
     status.className = 'llm-test-status testing';
@@ -500,28 +1070,26 @@ async function testLlmConnection() {
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model_type: modelConfig.provider,
-                    api_key: apiKey,
-                    base_url: modelConfig.baseUrl || undefined,
-                    model: modelConfig.model
-                })
+                body: JSON.stringify(body)
             },
             30_000
         );
         const data = await readResponse(response, '测试请求失败');
-        status.textContent = data.ok ? data.message : (data.message || data.error || '连接失败');
+        const detail = data.ok ? data.message : (data.message || data.error || '连接失败');
+        const source = data.key_source ? ` · Key：${data.key_source}` : '';
+        status.textContent = `${detail}${source}`;
         status.className = data.ok ? 'llm-test-status ok' : 'llm-test-status error';
     } catch (error) {
         status.textContent = `测试失败：${error.message}`;
         status.className = 'llm-test-status error';
     } finally {
         button.disabled = false;
+        refreshKeyStatus();
     }
 }
 
 function getSelectedModelConfig() {
-    const provider = byId('llmProvider').value;
+    const provider = prefs.provider;
     const providerConfig = PROVIDER_CONFIG[provider];
     if (!providerConfig) return null;
 
@@ -532,6 +1100,9 @@ function getSelectedModelConfig() {
     const baseUrl = provider === 'custom'
         ? byId('customBaseUrl').value.trim()
         : providerConfig.baseUrl;
+    const profileLabel = provider === 'custom'
+        ? ((activeCustom() || {}).label || '自定义接口')
+        : providerConfig.name;
     const modelLabel = selectedModel === CUSTOM_MODEL_ID
         ? model
         : byId('llmModel').selectedOptions[0]?.textContent;
@@ -539,6 +1110,7 @@ function getSelectedModelConfig() {
         provider,
         baseUrl,
         model,
+        profileLabel,
         name: modelLabel ? `${providerConfig.name} · ${modelLabel}` : providerConfig.name
     };
 }
@@ -583,19 +1155,12 @@ function taskWillLikelyUseSubtitles(request) {
 }
 
 function whisperDownloadConfirmed(modelId) {
-    try {
-        return localStorage.getItem(`whisper_confirm_${modelId}`) === '1';
-    } catch (_error) {
-        return false;
-    }
+    return prefs.confirmations.whisper_download[modelId] === true;
 }
 
 function rememberWhisperDownloadConfirm(modelId) {
-    try {
-        localStorage.setItem(`whisper_confirm_${modelId}`, '1');
-    } catch (_error) {
-        // 隐私模式等无法写入存储时，只影响本次会话的重复提醒
-    }
+    prefs.confirmations.whisper_download[modelId] = true;
+    persistPrefs();
 }
 
 function updateBiliHint(forceShow = false) {
@@ -918,6 +1483,7 @@ async function startSummary(options = {}) {
         showToast('已有任务正在处理中', 'info');
         return;
     }
+    flushPendingPrefs();   // 本次提交用的设置必须同步落盘，不能留在防抖里
 
     const resumeTaskId = options.resumeCurrent ? currentTaskId : null;
     const selectedMode = document.querySelector('input[name="processingMode"]:checked')?.value || 'restart';
@@ -1014,12 +1580,14 @@ async function startSummary(options = {}) {
 function validateAndBuildRequestBase(resumeTaskId = null) {
     const sourceType = byId('sourceType').value;
     const modelConfig = getSelectedModelConfig();
-    const apiKey = byId('apiKey').value.trim();
+    const apiKey = typedApiKey();
 
-    if (!modelConfig) return validationError('请选择有效的总结模型');
-    if (!apiKey) return validationError(`请输入 ${modelConfig.name} 的 API Key`);
+    if (!modelConfig) return validationError('请选择有效的模型档案');
     if (!modelConfig.model) return validationError('请输入模型 ID');
     if (!modelConfig.baseUrl) return validationError('请输入 API Base URL');
+    if (!apiKey && !hasReusableKey()) {
+        return validationError(`请输入「${modelConfig.profileLabel}」的 API Key，或点「保存到本机」后复用`);
+    }
 
     if (sourceType === 'local') {
         const file = byId('localFile').files[0];
@@ -1063,12 +1631,13 @@ function validationError(message) {
 
 function buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId = null, forceRestart = false) {
     const modelConfig = getSelectedModelConfig();
+    const typedKey = typedApiKey();
     const llmConfig = {
         model_type: modelConfig.provider,
-        api_key: byId('apiKey').value.trim(),
         base_url: modelConfig.baseUrl,
         model: modelConfig.model
     };
+    if (typedKey) llmConfig.api_key = typedKey;
 
     const config = {
         video_url: videoUrl,

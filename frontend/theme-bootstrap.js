@@ -1,8 +1,10 @@
 (function () {
     let theme = 'system';
     try {
-        const saved = localStorage.getItem('theme');
-        if (saved === 'light' || saved === 'dark' || saved === 'system') theme = saved;
+        // 主题现在存在 vtn_prefs.ui.theme 里；散装 'theme' 键只在迁移前还可能读到。
+        const stored = JSON.parse(localStorage.getItem('vtn_prefs') || 'null');
+        const candidate = (stored && stored.ui && stored.ui.theme) || localStorage.getItem('theme');
+        if (candidate === 'light' || candidate === 'dark' || candidate === 'system') theme = candidate;
     } catch (_error) {
         // Private browsing can disable localStorage.
     }

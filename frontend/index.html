@@ -26,15 +26,9 @@
         <section class="config-section" aria-labelledby="modelTitle">
             <h2 id="modelTitle">总结模型</h2>
             <label class="field">
-                <span>Provider</span>
-                <select id="llmProvider">
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="glm">智谱 GLM</option>
-                    <option value="qwen">通义千问</option>
-                    <option value="moonshot">月之暗面 Kimi</option>
-                    <option value="custom">自定义 OpenAI 兼容接口</option>
-                </select>
+                <span>模型档案</span>
+                <select id="llmProfile"></select>
+                <small>每个档案各自记住模型与地址；自定义接口可保存多个。</small>
             </label>
             <label class="field">
                 <span>模型</span>
@@ -64,19 +58,29 @@
             </label>
             <label class="field">
                 <span>API Key</span>
-                <input type="password" id="apiKey" autocomplete="off" placeholder="仅在本次页面会话中使用">
-                <small>只保留在当前页面内存中，刷新或关闭页面后需重新填写。</small>
+                <input type="password" id="apiKey" autocomplete="off" placeholder="粘贴后即可使用；留空则复用本机已保存的 Key">
+                <span id="keyState" class="key-chip" role="status" aria-live="polite"></span>
+                <small>「保存到本机」只写入本机 workspace 的加密档案（绝不进浏览器存储），且只在目标接口地址一致时才会被复用。</small>
             </label>
             <div class="llm-test-row">
                 <button id="llmTestBtn" class="button secondary" type="button">测试连接</button>
-                <span id="llmTestStatus" class="llm-test-status" role="status" aria-live="polite"></span>
+                <button id="saveKeyBtn" class="button ghost compact-button" type="button" disabled>保存到本机</button>
+                <button id="clearKeyBtn" class="button ghost compact-button" type="button" hidden>清除已存 Key</button>
             </div>
+            <span id="llmTestStatus" class="llm-test-status" role="status" aria-live="polite"></span>
 
             <div id="customApiConfig" class="custom-config" hidden>
                 <label id="customBaseUrlField" class="field" hidden>
                     <span>API Base URL</span>
                     <input type="url" id="customBaseUrl" placeholder="https://api.example.com/v1">
                 </label>
+                <div class="profile-row">
+                    <input type="text" id="customProfileLabel" placeholder="档案名称，如 公司代理" autocomplete="off">
+                    <button id="customProfileAddBtn" class="button ghost compact-button" type="button">另存为新档案</button>
+                </div>
+                <div class="profile-actions">
+                    <button id="customProfileDeleteBtn" class="button ghost compact-button" type="button">删除当前档案</button>
+                </div>
             </div>
         </section>
 
@@ -141,9 +145,8 @@
         </details>
 
         <div class="sidebar-actions">
-            <button id="saveConfigBtn" class="button secondary" type="button">保存偏好</button>
             <button id="resetConfigBtn" class="button ghost" type="button">恢复默认</button>
-            <p>只保存模型选择、识别参数和主题等非敏感偏好，不保存 API Key。</p>
+            <p>模型选择、识别参数和主题改动即自动记住（仅本机浏览器）；API Key 不写入浏览器，只保留在当前页面内存中。</p>
         </div>
     </aside>
 
@@ -328,6 +331,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260825-4"></script>
+<script src="script.js?v=20260830-1"></script>
 </body>
 </html>
