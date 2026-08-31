@@ -335,7 +335,8 @@ def test_download_returns_markdown_file(
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_requests_cooperative_stop_and_keeps_task_record() -> None:
+async def test_cancel_task_flags_task_and_cancels_running_job() -> None:
+    """取消 = 置标志位（让后台线程早点收工）+ 直接掐掉 asyncio 任务（任意 await 点立即停）。"""
     task_id = "cancel-task"
     main.tasks[task_id] = main.new_task("processing")
     job = asyncio.create_task(asyncio.sleep(30))
@@ -346,11 +347,14 @@ async def test_cancel_task_requests_cooperative_stop_and_keeps_task_record() -> 
     assert result["status"] == "cancelling"
     assert main.tasks[task_id]["_cancel_requested"] is True
     assert main.tasks[task_id]["_cancel_event"].is_set()
-    assert not job.done()
     assert any("已收到取消请求" in log for log in main.tasks[task_id]["logs"])
-    job.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await job
+
+    done, _pending = await asyncio.wait({job}, timeout=2)
+    assert done, "取消端点没有停止运行中的任务"
+    assert job.cancelled()
+
+    # 第二次取消只更新状态，不再补一刀（否则终态处理过程中会再挨一次 CancelledError）
+    assert (await main.cancel_task(task_id))["status"] == "cancelling"
     main.running_jobs.pop(task_id, None)
     main.tasks.pop(task_id, None)
 

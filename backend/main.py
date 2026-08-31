@@ -1081,6 +1081,7 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     if task["status"] in {"completed", "failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="任务已经结束")
 
+    first_request = not task.get("_cancel_requested")
     task["_cancel_requested"] = True
     cancel_event = task.get("_cancel_event")
     if cancel_event is not None:
@@ -1088,6 +1089,14 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     task.update(status="cancelling", step_name="取消中", error=None)
     task["logs"].append("已收到取消请求；正在尽快停止当前步骤")
     persist_task_runtime(task_id)
+    if first_request:
+        # 取消的唯一收口：直接掐掉 asyncio 任务，让 CancelledError 落在当前 await 点。
+        # should_abort / cancel_event 只是让后台线程早点收工的优化，新增阶段忘了接线
+        # 也不会再让取消"失效"（v1.2.3 的 412 回退把没接线的读取信息/查找字幕阶段
+        # 拉长，表现为取消不动）。这一句之后不能再有 await，否则会覆盖处理器写的终态。
+        job = running_jobs.get(task_id)
+        if job is not None and not job.done():
+            job.cancel()
     return {
         "cancelled": False,
         "status": task["status"],
@@ -1545,6 +1554,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 async def write_transcript_files(
     task_id: str, segments: list[TranscriptSegment], metadata: dict[str, Any]
 ) -> None:
+    """转录文件先写 .tmp 再改名。
+
+    取消能落在任意 await 点（见 cancel_task），而「复用转录」以 transcript.json
+    是否存在为准——半截文件会比没有文件更糟。
+    """
     task_dir = WORKSPACE_DIR / task_id
     json_payload = {
         "language": metadata["language"],
@@ -1552,12 +1566,22 @@ async def write_transcript_files(
         "quality": metadata.get("quality"),
         "segments": [segment.to_dict() for segment in segments],
     }
-    async with aiofiles.open(task_dir / "transcript.json", "w", encoding="utf-8") as file:
-        await file.write(json.dumps(json_payload, ensure_ascii=False, indent=2))
-    async with aiofiles.open(task_dir / "transcript.md", "w", encoding="utf-8") as file:
-        await file.write("# 带时间戳转录\n\n")
-        await file.write(segments_to_prompt(segments))
-        await file.write("\n")
+    await _write_atomically(
+        task_dir / "transcript.json",
+        (json.dumps(json_payload, ensure_ascii=False, indent=2),),
+    )
+    await _write_atomically(
+        task_dir / "transcript.md",
+        ("# 带时间戳转录\n\n", segments_to_prompt(segments), "\n"),
+    )
+
+
+async def _write_atomically(path: Path, chunks: tuple[str, ...]) -> None:
+    temporary = path.with_name(f"{path.name}.tmp")
+    async with aiofiles.open(temporary, "w", encoding="utf-8") as file:
+        for chunk in chunks:
+            await file.write(chunk)
+    os.replace(temporary, path)
 
 
 def friendly_task_error(message: str) -> str:

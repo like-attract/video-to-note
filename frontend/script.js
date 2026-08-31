@@ -1859,7 +1859,7 @@ async function cancelCurrentTask() {
         } else {
             setTaskState('processing', '取消中');
             byId('networkState').textContent = '等待当前步骤停止';
-            addLog('取消请求已发送；正在停止当前下载 / 转写 / 生成（转写最多等当前音频段结束）', 'warning');
+            addLog('取消请求已发送；任务已停止，后台的下载 / 转写线程会在当前这一段结束后退出', 'warning');
             showToast('取消请求已发送', 'info');
         }
     } catch (error) {
