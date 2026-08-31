@@ -12,6 +12,10 @@ LLM 接口 Key 与 B 站凭据可由后端统一保管（workspace/llm_keys.json
 bili_credentials.json）：调用 summarize_video 时省略 api_key / bilibili_* 参数
 即自动使用已保存的配置，无需每次手动提供。Key 与保存时的接口地址绑定，
 换网关或换 Provider 时不会借用别的地址的 Key。
+
+自带模型的客户不必配这把 Key：transcribe_video / get_transcript 走
+`/api/transcribe` 与 `/api/task/{id}/transcript`，只做字幕抓取或本地转写，
+全程不碰大模型，拿到的是带时间轴的原始转录，笔记结构与风格由客户端自己定。
 """
 from __future__ import annotations
 
@@ -36,15 +40,18 @@ HTTP_TIMEOUT = httpx.Timeout(20.0)
 mcp = FastMCP(
     "VideoToNo",
     instructions=(
-        "VideoToNo 本地视频笔记服务：输入 B 站 / YouTube 等视频链接，返回带时间轴的 "
-        "Markdown 视频笔记。提交后用 get_task_status 轮询，直到 status 为 completed "
-        "（视频处理通常需要 1-10 分钟）。\n"
+        "VideoToNo 本地视频处理服务：输入 B 站 / YouTube 等视频链接，可拿到带时间轴的转录或成品笔记。\n"
+        "**先选路线**：如果你（宿主 agent）本身就有可用的模型，优先用 transcribe_video 提交 + "
+        "get_transcript 取正文——这条路不需要 API Key，转录内容由你自己组织结构与风格，"
+        "不受内置笔记模板限制；只有用户明确要一份成品笔记、或视频很长希望后台跑完时，"
+        "才用 summarize_video（它按本机保存的 Key 调大模型，产出固定风格的 Markdown 笔记）。\n"
+        "两条路的任务状态是同一份：提交后用 wait_for_task 等终态（每次最多等待 45 秒，可重复调用），"
+        "不要频繁轮询 get_task_status（仅在需要中间进度时用它）。"
+        "已经走完转写的任务（包括后来生成笔记失败的）都能用 get_transcript 直接取转录，不必重跑。\n"
         "LLM 配置与 B 站凭据支持保存到本机（save_llm_config / save_bilibili_credentials），"
         "保存后调用 summarize_video 时无需再传 api_key 或 bilibili_* 参数；"
         "Key 按接口地址保管，只会被复用给保存它的那个端点，可用 get_saved_config 或 "
-        "list_llm_keys 查看本机已保存哪些地址（脱敏）。若用户已保存过配置，不要重复索要。\n"
-        "提交任务后请调用 wait_for_task 等待终态（每次最多等待 45 秒，可重复调用），"
-        "不要频繁轮询 get_task_status（仅在需要中间进度时用它）。"
+        "list_llm_keys 查看本机已保存哪些地址（脱敏）。若用户已保存过配置，不要重复索要。"
     ),
 )
 
@@ -74,8 +81,21 @@ class BackendClient:
             self._request, "POST", "/api/summarize", json=payload
         )
 
+    async def start_transcribe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._request, "POST", "/api/transcribe", json=payload
+        )
+
     async def get_task(self, task_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "GET", f"/api/task/{task_id}")
+
+    async def get_transcript(self, task_id: str, output_format: str) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._request,
+            "GET",
+            f"/api/task/{task_id}/transcript",
+            params={"output_format": output_format},
+        )
 
     async def whisper_models(self) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "GET", "/api/whisper-models")
@@ -147,10 +167,25 @@ class InProcessBackend:
         request = SummarizeRequest(**payload)
         return await start_summarize(request)
 
+    async def start_transcribe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .main import TranscribeRequest, start_transcribe
+
+        return await start_transcribe(TranscribeRequest(**payload))
+
     async def get_task(self, task_id: str) -> dict[str, Any]:
         from .main import get_task_status
 
         return await get_task_status(task_id)
+
+    async def get_transcript(self, task_id: str, output_format: str) -> dict[str, Any]:
+        from fastapi import HTTPException
+
+        from .main import get_task_transcript
+
+        try:
+            return await get_task_transcript(task_id, output_format)
+        except HTTPException as exc:
+            raise RuntimeError(f"VideoToNo 后端返回错误（HTTP {exc.status_code}）：{exc.detail}") from exc
 
     async def whisper_models(self) -> dict[str, Any]:
         from .main import whisper_models_status
@@ -353,6 +388,61 @@ async def summarize_video(
 
 
 @mcp.tool()
+async def transcribe_video(
+    video_url: str,
+    whisper_model: str = "base",
+    use_gpu: bool = False,
+    prefer_subtitles: bool = True,
+    processing_mode: str = "reuse",
+    bilibili_sessdata: str | None = None,
+    bilibili_bili_jct: str | None = None,
+    bilibili_buvid3: str | None = None,
+) -> dict[str, Any]:
+    """只做「视频 → 带时间轴转录」，不调用任何大模型，因此不需要 API Key。
+
+    宿主 agent 自带模型时这是首选路径：本工具负责取字幕或离线转写，
+    你拿到原料后自己决定笔记结构、语言与风格，不必先给本机配一把 Key，
+    也不会被套进固定笔记模板。要一键成品笔记（或超长视频后台跑批）才用
+    summarize_video。提交后同样用 wait_for_task 等终态，再用 get_transcript 取正文。
+
+    Args:
+        video_url: B 站 / YouTube 等视频链接，必填。
+        whisper_model: 无字幕时的本地转写模型（tiny/base/small/medium/large-v3/turbo）。
+        use_gpu: 是否启用 NVIDIA GPU 转写。
+        prefer_subtitles: 优先使用平台字幕（默认开启，命中时不跑转写、几乎秒回）。
+        processing_mode: reuse=复用同链接已有转录 / restart=从头处理。
+        bilibili_sessdata/bilibili_bili_jct/bilibili_buvid3: B 站凭据（可省略，
+            省略时使用本机已保存凭据；未保存也能处理，只是可能读不到 AI 字幕）。
+    """
+    backend = _get_backend()
+    payload: dict[str, Any] = {
+        "video_url": video_url,
+        "processing_mode": processing_mode,
+        "prefer_subtitles": prefer_subtitles,
+        "whisper_model": whisper_model,
+        "use_gpu": use_gpu,
+    }
+    bili_cookie = await _resolve_bili_cookie(
+        backend, bilibili_sessdata, bilibili_bili_jct, bilibili_buvid3
+    )
+    if bili_cookie:
+        payload["bilibili_cookie"] = bili_cookie
+
+    data = await backend.start_transcribe(payload)
+    task_id = data.get("task_id")
+    if not task_id:
+        raise RuntimeError(f"后端未返回任务 ID：{data}")
+    hint = f"转录任务已提交：{task_id}"
+    if data.get("reused_task_id"):
+        hint += f"（复用任务 {data['reused_task_id']} 的转录）"
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "hint": hint + "，请用 wait_for_task 等待完成，再用 get_transcript 取带时间轴的转录。",
+    }
+
+
+@mcp.tool()
 async def wait_for_task(
     task_id: str,
     timeout_seconds: int = 45,
@@ -390,6 +480,16 @@ async def wait_for_task(
             **data,
             "result": {key: value for key, value in data["result"].items() if key != "markdown"},
         }
+    return _annotate_task_payload(data)
+
+
+def _annotate_task_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """纯转录任务的 result 里没有 markdown，明示下一步该取转录而不是以为失败。"""
+    result = data.get("result")
+    if isinstance(result, dict) and result.get("output") == "transcript":
+        hint = data.get("hint") or ""
+        next_step = "该任务只做到转录为止（没有笔记正文），请用 get_transcript 取正文。"
+        data["hint"] = f"{hint} {next_step}".strip()
     return data
 
 
@@ -407,7 +507,23 @@ async def get_task_status(task_id: str, include_markdown: bool = True) -> dict[s
             **data,
             "result": {key: value for key, value in data["result"].items() if key != "markdown"},
         }
-    return data
+    return _annotate_task_payload(data)
+
+
+@mcp.tool()
+async def get_transcript(task_id: str, output_format: str = "markdown") -> dict[str, Any]:
+    """取某个任务的带时间轴转录正文（不调用大模型，纯粹的字幕/转写结果）。
+
+    任何已经走完转写阶段的任务都能取，包括后来生成笔记失败的任务——转录在盘上，
+    不需要重跑。超长视频可以用 `output_format="json"` 拿分段，或直接读
+    `get_task_status` 里 `result.output_directory` 下的 transcript.json 自行切片。
+
+    Args:
+        task_id: 任务 ID（transcribe_video 提交的，或历史笔记任务的）。
+        output_format: markdown=整篇人读版（每行 `[MM:SS-MM:SS] 正文`）/
+            json=分段数组（时间为秒）。
+    """
+    return await _get_backend().get_transcript(task_id, output_format)
 
 
 @mcp.tool()

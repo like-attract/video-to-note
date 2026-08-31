@@ -1,4 +1,6 @@
 """MCP server 测试：工具参数构建、保存配置回退、错误处理与端口发现。"""
+import asyncio
+
 import httpx
 import pytest
 
@@ -20,6 +22,18 @@ class FakeBackend:
     async def start_summarize(self, payload):
         self.captured["payload"] = payload
         return self.response
+
+    async def start_transcribe(self, payload):
+        self.captured["payload"] = payload
+        return self.response
+
+    async def get_transcript(self, task_id, output_format):
+        self.captured["transcript_request"] = (task_id, output_format)
+        return {
+            "task_id": task_id,
+            "format": output_format,
+            "text": "[00:00-00:12] 转录内容",
+        }
 
     async def get_task(self, task_id):
         return {"status": "completed", "result": {"title": "T", "markdown": "# 笔记"}}
@@ -370,3 +384,119 @@ def test_mcp_endpoint_mounted_on_fastapi_app() -> None:
 
     mounts = [route for route in main.app.routes if isinstance(route, Mount)]
     assert any(getattr(route, "path", "") == "/mcp" for route in mounts)
+
+
+# ------------------------------------------------------------------ 转录出口（无 Key 路线）
+
+
+@pytest.mark.asyncio
+async def test_transcribe_video_sends_no_llm_config_and_never_reads_saved_keys(
+    monkeypatch,
+) -> None:
+    """这条路线不要求本机存有 Key：payload 里没有 llm_config，连读都不读。"""
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    result = await mcp_server.transcribe_video(
+        video_url="https://www.bilibili.com/video/BV1xx", whisper_model="small"
+    )
+
+    payload = fake.captured["payload"]
+    assert result["ok"] is True and result["task_id"] == "task-1"
+    assert "llm_config" not in payload
+    assert fake.llm_config_reads == 0
+    assert payload["whisper_model"] == "small"
+    assert payload["processing_mode"] == "reuse"
+    assert "bilibili_cookie" not in payload
+
+
+@pytest.mark.asyncio
+async def test_transcribe_video_passes_explicit_bilibili_credentials(monkeypatch) -> None:
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    await mcp_server.transcribe_video(
+        video_url="https://www.bilibili.com/video/BV1xx", bilibili_sessdata="sess-1"
+    )
+
+    assert fake.captured["payload"]["bilibili_cookie"]["sessdata"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_get_transcript_forwards_task_and_format(monkeypatch) -> None:
+    fake = FakeBackend()
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: fake)
+
+    result = await mcp_server.get_transcript("task-9", output_format="json")
+
+    assert fake.captured["transcript_request"] == ("task-9", "json")
+    assert result["format"] == "json"
+
+
+class TranscriptTaskBackend(FakeBackend):
+    async def get_task(self, task_id):
+        return {
+            "status": "completed",
+            "result": {"title": "T", "output": "transcript", "segment_count": 3},
+        }
+
+
+@pytest.mark.asyncio
+async def test_transcript_task_status_points_at_get_transcript(monkeypatch) -> None:
+    """`result` 里没有 markdown 不是失败，要明示下一步取转录。"""
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: TranscriptTaskBackend())
+
+    status = await mcp_server.get_task_status("task-1")
+    waited = await mcp_server.wait_for_task("task-1", timeout_seconds=5)
+
+    for payload in (status, waited):
+        assert "markdown" not in payload["result"]
+        assert "get_transcript" in payload["hint"]
+
+
+def test_in_process_backend_transcript_paths_match_http_backend(monkeypatch) -> None:
+    from fastapi import HTTPException
+
+    from backend import main
+
+    captured: dict = {}
+
+    async def fake_start_transcribe(request):
+        captured["request"] = request
+        return {"task_id": "task-7", "reused_task_id": None}
+
+    async def failing_transcript(task_id, output_format):
+        raise HTTPException(status_code=409, detail="该任务还没有转录产物")
+
+    monkeypatch.setattr(main, "start_transcribe", fake_start_transcribe)
+    monkeypatch.setattr(main, "get_task_transcript", failing_transcript)
+    backend = mcp_server.InProcessBackend()
+
+    asyncio.run(backend.start_transcribe({"video_url": "https://b.cn/x"}))
+    assert isinstance(captured["request"], main.TranscribeRequest)
+    assert captured["request"].video_url == "https://b.cn/x"
+
+    with pytest.raises(RuntimeError, match="HTTP 409"):
+        asyncio.run(backend.get_transcript("task-7", "markdown"))
+
+
+def test_backend_client_calls_transcribe_and_transcript_routes() -> None:
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, str(request.url)))
+        return httpx.Response(200, json={"task_id": "task-1"})
+
+    client = mcp_server.BackendClient(
+        base_url="http://127.0.0.1:8000", transport=httpx.MockTransport(handler)
+    )
+    asyncio.run(client.start_transcribe({"video_url": "https://b.cn/x"}))
+    asyncio.run(client.get_transcript("task-1", "markdown"))
+
+    assert seen == [
+        ("POST", "http://127.0.0.1:8000/api/transcribe"),
+        (
+            "GET",
+            "http://127.0.0.1:8000/api/task/task-1/transcript?output_format=markdown",
+        ),
+    ]
