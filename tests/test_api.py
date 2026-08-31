@@ -1271,3 +1271,206 @@ def test_llm_test_resolves_key_by_endpoint_without_mixing_fields(
     ).json()
     assert typed["key_source"] == "本次请求提供"
     assert captured[-1]["api_key"] == "sk-typed"
+
+
+# --------------------------------------------------------------------------- 转录出口
+
+
+def test_transcribe_endpoint_needs_no_llm_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    queued: list = []
+
+    async def fake_run(task_id, request):
+        queued.append(request)
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+
+    response = TestClient(main.app).post(
+        "/api/transcribe", json={"video_url": "https://www.bilibili.com/video/BV1xx"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_id"]
+    assert queued[0].output == "transcript"
+    assert queued[0].llm_config.api_key.get_secret_value() == ""
+    manifest = json.loads((tmp_path / response.json()["task_id"] / "task.json").read_text("utf-8"))
+    assert manifest["output"] == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_transcript_only_task_finishes_before_any_llm_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宿主 agent 自带模型时的路线：本机没有 Key 也必须跑得通。"""
+    processor = VideoProcessor(tmp_path)
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "转录出口", "source": "bilibili", "duration": 30, "owner": "作者"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return SubtitleResult(
+            [TranscriptSegment(0, 10, "第一段字幕"), TranscriptSegment(10, 20, "第二段字幕")],
+            "zh-CN",
+            "platform_subtitle",
+        )
+
+    def forbid_credentials(**kwargs):
+        raise AssertionError("转录路线不得解析 API Key")
+
+    def forbid_summarizer(**kwargs):
+        raise AssertionError("转录路线不得调用大模型")
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "resolve_llm_credentials", forbid_credentials)
+    monkeypatch.setattr(main, "LLMSummarizer", forbid_summarizer)
+
+    task_id = "transcript-task"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["output"] = "transcript"
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        output="transcript",
+        llm_config=main.LLMConfig(model_type="deepseek"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    assert task["step_name"] == "转录完成"
+    assert task["result"]["output"] == "transcript"
+    assert "markdown" not in task["result"]
+    assert task["result"]["segment_count"] == 2
+    assert not (tmp_path / task_id / "notes.md").exists()
+    assert "第一段字幕" in (tmp_path / task_id / "transcript.md").read_text("utf-8")
+    main.tasks.pop(task_id, None)
+
+
+def test_transcript_only_tasks_stay_out_of_the_web_history(monkeypatch) -> None:
+    note_task = main.new_task(status="completed", task_id="note-task")
+    note_task.update(
+        created_at="2026-08-09T12:00:00+00:00",
+        result={"title": "笔记任务", "markdown": "# private body"},
+    )
+    transcript_task = main.new_task(status="completed", task_id="transcript-task")
+    transcript_task.update(
+        created_at="2026-08-09T13:00:00+00:00",
+        output="transcript",
+        result={"title": "转录任务", "output": "transcript"},
+    )
+    monkeypatch.setattr(main, "tasks", {"note-task": note_task, "transcript-task": transcript_task})
+
+    items = TestClient(main.app).get("/api/tasks").json()["tasks"]
+
+    assert [item["task_id"] for item in items] == ["note-task"]
+
+
+def write_transcript_artifacts(workspace: Path, task_id: str, text: str = "转录内容") -> None:
+    task_dir = workspace / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "language": "zh",
+                "source": "faster_whisper",
+                "quality": {"characters": len(text), "insufficient": False},
+                "segments": [{"start": 0.0, "end": 12.5, "text": text}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (task_dir / "transcript.md").write_text(f"# 带时间戳转录\n\n[00:00-00:12] {text}\n", "utf-8")
+
+
+def test_transcript_endpoint_returns_segments_and_text(tmp_path, monkeypatch) -> None:
+    write_transcript_artifacts(tmp_path, "t1")
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    client = TestClient(main.app)
+
+    as_json = client.get("/api/task/t1/transcript")
+    as_markdown = client.get("/api/task/t1/transcript?output_format=markdown")
+
+    assert as_json.status_code == 200
+    body = as_json.json()
+    assert body["segment_count"] == 1
+    assert body["segments"][0] == {"start": 0.0, "end": 12.5, "text": "转录内容"}
+    assert body["transcript_source"] == "faster_whisper"
+    assert as_markdown.json()["text"].startswith("# 带时间戳转录")
+    assert as_markdown.json()["title"] == ""
+    assert client.get("/api/task/t1/transcript?output_format=bogus").status_code == 422
+
+
+def test_transcript_endpoint_serves_tasks_that_failed_after_transcribing(
+    tmp_path, monkeypatch
+) -> None:
+    """转录在第 4 步就落盘了：第 6 步失败的任务不必重跑也能把原料取走。"""
+    write_transcript_artifacts(tmp_path, "failed-note", "已经转写好的内容")
+    (tmp_path / "failed-note" / "task.json").write_text(
+        json.dumps({"task_id": "failed-note", "title": "老视频"}), encoding="utf-8"
+    )
+    failed = main.new_task(status="failed", task_id="failed-note")
+    failed["error"] = "未提供 API Key"
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {"failed-note": failed})
+
+    body = TestClient(main.app).get("/api/task/failed-note/transcript").json()
+
+    assert body["segments"][0]["text"] == "已经转写好的内容"
+    assert body["title"] == "老视频"
+
+
+def test_transcript_endpoint_errors_are_explicit(tmp_path, monkeypatch) -> None:
+    (tmp_path / "no-transcript").mkdir()
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+    client = TestClient(main.app)
+
+    missing = client.get("/api/task/no-transcript/transcript")
+    traversal = client.get("/api/task/..%2Fsecret/transcript")
+
+    assert missing.status_code == 409
+    assert "transcribe" in missing.json()["detail"]
+    assert traversal.status_code in {400, 404}
+
+
+def test_restore_keeps_transcript_task_completed_and_hidden(monkeypatch, tmp_path) -> None:
+    task_id = "restored-transcript"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    write_transcript_artifacts(tmp_path, task_id)
+    (task_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "title": "转录恢复",
+                "output": "transcript",
+                "runtime": {
+                    "status": "completed",
+                    "step": 7,
+                    "step_name": "转录完成",
+                    "result": {"title": "转录恢复", "segment_count": 1},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+
+    main.restore_tasks_from_workspace()
+
+    restored = main.tasks[task_id]
+    assert restored["status"] == "completed"
+    assert restored["output"] == "transcript"
+    assert restored["result"]["segment_count"] == 1
+    assert TestClient(main.app).get("/api/tasks").json()["tasks"] == []

@@ -251,6 +251,8 @@ class SummarizeRequest(BaseModel):
     upload_task_id: str | None = None
     resume_task_id: str | None = None
     processing_mode: Literal["reuse", "restart"] = "reuse"
+    # transcript：只做「视频 → 带时间轴转录」，不调用大模型，产物到 transcript.json 为止
+    output: Literal["note", "transcript"] = "note"
     summary_style: Literal["detailed", "faithful", "concise"] = "detailed"
     reasoning_effort: Literal["auto", "off", "high", "max"] = "auto"
     prefer_subtitles: bool = True
@@ -261,6 +263,20 @@ class SummarizeRequest(BaseModel):
     bilibili_cookie: BilibiliCookie | None = None
     douyin_cookie: DouyinCookie | None = None
     llm_config: LLMConfig
+
+
+class TranscribeRequest(BaseModel):
+    """`POST /api/transcribe` 的请求体：刻意没有任何大模型字段。"""
+
+    video_url: str = ""
+    upload_task_id: str | None = None
+    resume_task_id: str | None = None
+    processing_mode: Literal["reuse", "restart"] = "reuse"
+    prefer_subtitles: bool = True
+    whisper_model: str = "base"
+    use_gpu: bool = False
+    bilibili_cookie: BilibiliCookie | None = None
+    douyin_cookie: DouyinCookie | None = None
 
 
 def new_task(status: str = "pending", task_id: str | None = None) -> dict[str, Any]:
@@ -536,6 +552,7 @@ def write_task_manifest(task_id: str, request: SummarizeRequest, reused_task_id:
         ),
         "uploaded_filename": uploaded_filename,
         "processing_mode": request.processing_mode,
+        "output": request.output,
         "summary_style": request.summary_style,
         "reasoning_effort": request.reasoning_effort,
         "reused_task_id": reused_task_id,
@@ -601,6 +618,7 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
         task_directory(task_id).mkdir(parents=True, exist_ok=False)
 
     tasks[task_id]["resume_task_id"] = reused_task_id
+    tasks[task_id]["output"] = request.output
     if reused_task_id:
         old_task = tasks.get(reused_task_id, {})
         if old_task.get("uploaded_file_path"):
@@ -614,6 +632,21 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
     running_jobs[task_id] = job
     job.add_done_callback(lambda _job, current_id=task_id: running_jobs.pop(current_id, None))
     return {"task_id": task_id, "reused_task_id": reused_task_id}
+
+
+@app.post("/api/transcribe")
+async def start_transcribe(request: TranscribeRequest) -> dict[str, str | None]:
+    """只做「视频 → 带时间轴转录」，全程不调用大模型，本机没有 API Key 也能用。
+
+    给自带模型的 agent 用：拿原料自己组织笔记，不必先给本机配一把 Key。
+    复用同一套任务机制（进度、取消、并发闸门、产物复用），产物停在
+    `transcript.json` / `transcript.md`；正文用 `GET /api/task/{id}/transcript` 取。
+    """
+    return await start_summarize(
+        SummarizeRequest(
+            **request.model_dump(), output="transcript", llm_config=LLMConfig()
+        )
+    )
 
 
 def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -630,8 +663,14 @@ def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/tasks")
 async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
+    # 纯转录任务不进网页端历史：它没有 result.markdown，而且 agent 批量取原料
+    # 不应该把用户的笔记历史挤出这 20 条（过滤在截断之前）
     ordered = sorted(
-        tasks.items(),
+        (
+            item
+            for item in tasks.items()
+            if item[1].get("output") != "transcript"
+        ),
         key=lambda item: str(item[1].get("created_at") or ""),
         reverse=True,
     )[:20]
@@ -660,6 +699,60 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在或已被清理")
     return task_status_payload(task_id, task)
+
+
+@app.get("/api/task/{task_id}/transcript")
+async def get_task_transcript(
+    task_id: str, output_format: Literal["json", "markdown"] = "json"
+) -> dict[str, Any]:
+    """取该任务的带时间轴转录（`segments` 的时间单位是秒）。
+
+    只看转录产物在不在，不看任务状态：即便笔记在第 6 步失败，已完成的转录
+    照样能取走，不必重跑。`markdown` 返回人读版整篇文本，`json` 返回分段。
+    """
+    try:
+        directory = task_directory(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="非法任务 ID") from exc
+    json_path = directory / "transcript.json"
+    if not json_path.is_file():
+        raise HTTPException(
+            status_code=409, detail="该任务还没有转录产物，可先调用 POST /api/transcribe"
+        )
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=500, detail="转录文件无法读取") from None
+
+    task = tasks.get(task_id) or {}
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    manifest = read_task_manifest(task_id)
+    title = str(
+        result.get("title") or manifest.get("title") or manifest.get("uploaded_filename") or ""
+    )
+
+    if output_format == "markdown":
+        markdown_path = directory / "transcript.md"
+        if not markdown_path.is_file():
+            raise HTTPException(status_code=409, detail="转录 Markdown 不存在")
+        return {
+            "task_id": task_id,
+            "title": title,
+            "format": "markdown",
+            "text": markdown_path.read_text(encoding="utf-8"),
+        }
+
+    segments = payload.get("segments") or []
+    return {
+        "task_id": task_id,
+        "title": title,
+        "format": "json",
+        "language": payload.get("language"),
+        "transcript_source": payload.get("source"),
+        "transcript_quality": payload.get("quality"),
+        "segment_count": len(segments),
+        "segments": segments,
+    }
 
 
 @app.get("/api/whisper-models")
@@ -1420,10 +1513,38 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         )
         await write_transcript_files(task_id, segments, transcript_result)
         if transcript_result["source"] == "faster_whisper" and quality["insufficient"]:
+            stage = "调用大模型" if request.output == "note" else "返回转录"
             raise RuntimeError(
-                "可识别语音覆盖过低，已在调用大模型前停止。源视频可能被静音、替换、"
+                f"可识别语音覆盖过低，已在{stage}前停止。源视频可能被静音、替换、"
                 "受版权或审核限制，或主要内容并非语音；请先检查原视频。"
             )
+
+        if request.output == "transcript":
+            # 正文只留在 transcript.json / transcript.md：result 会被 wait_for_task
+            # 每 2 秒轮询一次并由 persist_task_runtime 反复落盘，不能放大文本
+            elapsed = finish_task_timing(task)
+            task["result"] = {
+                "title": title,
+                "output": "transcript",
+                "source": VideoSource.LOCAL.value if is_local else info.get("source", "other"),
+                "duration": info.get("duration", 0),
+                "segment_count": len(segments),
+                "characters": quality["characters"],
+                "transcript_source": transcript_result["source"],
+                "transcript_language": transcript_result["language"],
+                "transcript_quality": quality,
+                "output_directory": str(WORKSPACE_DIR / task_id),
+                "processing_seconds": elapsed,
+            }
+            task.update(
+                status="completed", step=7, step_name="转录完成", progress=100, error=None
+            )
+            task["logs"].append(
+                f"转录完成：{len(segments)} 段，可用 GET /api/task/{task_id}/transcript 取正文"
+            )
+            notify_task("转录完成", f"已生成带时间轴转录：{title}")
+            persist_task_runtime(task_id)
+            return
 
         screenshots: list[Path] = []
         if request.include_screenshots:
@@ -1779,13 +1900,17 @@ def restore_tasks_from_workspace() -> None:
             continue
         task_id = task_dir.name
         runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+        # 纯转录任务按设计不产出 notes.md，完成与否只能看 transcript.json
+        transcript_only = manifest.get("output") == "transcript"
         notes_path = task_dir / "notes.md"
         uploaded_media = next(
             (path for path in task_dir.glob("input.*") if path.is_file()), None
         )
         status = str(runtime.get("status") or "")
         interrupted = status in {"pending", "queued", "processing", "cancelling"}
-        if notes_path.is_file():
+        if notes_path.is_file() or (
+            transcript_only and (task_dir / "transcript.json").is_file()
+        ):
             status = "completed"
         elif interrupted:
             status = "failed"
@@ -1803,6 +1928,7 @@ def restore_tasks_from_workspace() -> None:
             created_at=runtime.get("created_at") or manifest.get("created_at"),
             finished_at=runtime.get("finished_at"),
             elapsed_seconds=float(runtime.get("elapsed_seconds") or 0),
+            output=str(manifest.get("output") or "note"),
         )
         if interrupted:
             task.update(
@@ -1814,7 +1940,18 @@ def restore_tasks_from_workspace() -> None:
         if status == "uploaded" and uploaded_media:
             task["uploaded_file_path"] = str(uploaded_media)
             task["uploaded_filename"] = manifest.get("uploaded_filename") or uploaded_media.name
-        if status == "completed":
+        if status == "completed" and transcript_only:
+            # 纯转录任务没有 notes.md，正文留在 transcript.json 里
+            result = dict(runtime.get("result") or {})
+            result.update(
+                title=result.get("title") or manifest.get("title") or "",
+                output="transcript",
+                output_directory=str(task_dir),
+                processing_seconds=task["elapsed_seconds"],
+            )
+            task["result"] = result
+            task["finished_at"] = task["finished_at"] or datetime.now(timezone.utc).isoformat()
+        elif status == "completed":
             try:
                 markdown = notes_path.read_text(encoding="utf-8")
             except OSError:
