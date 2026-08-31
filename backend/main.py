@@ -880,24 +880,24 @@ async def clear_llm_config() -> dict[str, Any]:
 
 @app.get("/api/bili-credentials")
 async def get_bili_credentials() -> dict[str, Any]:
-    """Return saved Bilibili credential status without exposing cookie values."""
-    credentials = config_store.load_bili_credentials()
-    if not credentials:
-        return {"saved": False}
-    sessdata = str(credentials.get("sessdata") or "")
-    return {
-        "saved": True,
-        "sessdata_masked": f"{sessdata[:4]}****" if sessdata else None,
-        "has_bili_jct": bool(credentials.get("bili_jct")),
-        "has_buvid3": bool(credentials.get("buvid3")),
-    }
+    """Return saved Bilibili credential status without exposing cookie values.
+
+    走 ``bili_credentials_status()``：只用保存时写死的掩码，全程不解密，
+    所以换机器解不开时这个端点仍然有得报。
+    """
+    return config_store.bili_credentials_status()
 
 
 @app.post("/api/bili-credentials")
 async def save_bili_credentials(payload: BiliCredentialsPayload) -> dict[str, Any]:
-    config_store.save_bili_credentials(
-        {"sessdata": payload.sessdata, "bili_jct": payload.bili_jct, "buvid3": payload.buvid3}
-    )
+    try:
+        config_store.save_bili_credentials(
+            {"sessdata": payload.sessdata, "bili_jct": payload.bili_jct, "buvid3": payload.buvid3}
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except secret_box.SecretBoxError as error:
+        raise HTTPException(status_code=500, detail=f"本机加密保存失败：{error}") from error
     return {"saved": True}
 
 
@@ -1149,12 +1149,10 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     def should_abort() -> bool:
         return bool(task.get("_cancel_requested"))
 
-    bili_cookie = (
-        request.bilibili_cookie.model_dump()
-        if request.bilibili_cookie
-        else config_store.load_bili_credentials()
-    )
     douyin_cookie = request.douyin_cookie.model_dump() if request.douyin_cookie else None
+    # 终态通知会用 title 组文案：早期失败（读凭据、取元数据）时 title 还没赋值，
+    # 少了这个初值 except 分支自己会 NameError，任务就只改了内存、task.json 留在 processing
+    title = request.video_url or "上传的视频"
     # B 站视频页被风控时（Issue #1）处理链会回退到开放接口直连，回退说明经这里进任务日志
     fallback_notes: list[str] = []
 
@@ -1165,6 +1163,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
     try:
         raise_if_cancel_requested(task)
+        bili_cookie = (
+            request.bilibili_cookie.model_dump()
+            if request.bilibili_cookie
+            else config_store.load_bili_credentials()
+        )
         resume_task_id = task.get("resume_task_id")
         resume_dir = task_directory(resume_task_id) if resume_task_id else None
         source_url = request.video_url or (source_url_from_task(resume_dir) if resume_dir else None)

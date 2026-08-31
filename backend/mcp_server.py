@@ -459,11 +459,13 @@ async def save_bilibili_credentials(
     bili_jct: str = "",
     buvid3: str = "",
 ) -> dict[str, Any]:
-    """把 B 站访问凭据保存到本机（明文写入工作目录，仅本机可读）。
+    """把 B 站访问凭据保存到本机（与 API Key 同一套本机加密）。
 
     保存后处理 B 站视频会自动携带这些凭据（优先使用 AI 字幕），无需每次传入。
-    凭据明文保存在后端工作目录（workspace/bili_credentials.json，服务仅本机回环可访问），
-    注意不要分享该文件或整个工作目录。
+    SESSDATA / bili_jct 用信封加密写入 workspace/bili_credentials.json，
+    Windows 上绑定当前登录账户（换机器或换账户就解不开，需重新保存）；
+    非 Windows 回退明文。实际存储方式看 /api/health 的 llm_key_storage。
+    服务仅本机回环可访问，但仍不要把该文件或整个工作目录分享给别人。
     """
     await _get_backend().save_bili_credentials(
         {"sessdata": sessdata, "bili_jct": bili_jct, "buvid3": buvid3}

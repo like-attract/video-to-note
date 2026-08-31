@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import launcher
 from backend import main
-from backend.config_store import ConfigStore
+from backend.config_store import BILI_CREDENTIALS_FILE, ConfigStore
 from backend.transcript import TranscriptSegment
 from backend.video_processor import (
     BiliPage,
@@ -80,6 +80,39 @@ async def test_task_notify_hook_fires_on_success(
         time.sleep(0.05)
     main._task_notify_hook = None
     assert notified == [("任务完成", "视频笔记已生成：通知测试")]
+
+
+@pytest.mark.asyncio
+async def test_early_credential_failure_still_reaches_terminal_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """读凭据在流水线最前面就失败：终态必须落盘，日志要点名凭据而不是漂到风控上。"""
+    bili_file = tmp_path / BILI_CREDENTIALS_FILE
+    store = ConfigStore(tmp_path)
+    store.save_bili_credentials({"sessdata": "s1", "bili_jct": "j1", "buvid3": "b1"})
+    record = json.loads(bili_file.read_text(encoding="utf-8"))
+    record["sessdata"]["alg"] = "aes-256-gcm-v2"  # 假装这份文件来自别的机器
+    bili_file.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(main, "config_store", store)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+
+    task_id = "bili-cred-failed"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
+    )
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "failed"
+    assert "凭据无法解密" in task["error"]
+    assert any(line.startswith("处理失败：") for line in task["logs"])
+    # 终态通知要用 title：早期失败时它若没有值，except 分支自己就抛错，task.json 停在 processing
+    persisted = json.loads((tmp_path / task_id / "task.json").read_text(encoding="utf-8"))
+    assert persisted["runtime"]["status"] == "failed"
+    assert "凭据无法解密" in persisted["runtime"]["error"]
 
 
 def test_health_and_frontend_are_served() -> None:

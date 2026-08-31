@@ -141,7 +141,7 @@ VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio
 | `get_task_status` | 查询任务中间进度 |
 | `list_whisper_models` | 查看 Whisper 模型的本地缓存状态 |
 | `save_llm_config` | 把某个接口地址的 Provider、模型和 API Key 保存到本机（Windows 加密，其他平台明文并提示），之后对该地址调用 `summarize_video` 无需再传 |
-| `save_bilibili_credentials` | 把 B 站凭据（SESSDATA 等）保存到本机，处理 B 站视频时自动使用 |
+| `save_bilibili_credentials` | 把 B 站凭据（SESSDATA 等）保存到本机，与 API Key 同一套本机加密（Windows 加密，其他平台明文并提示），处理 B 站视频时自动使用 |
 | `list_llm_keys` | 查看本机已保存密钥的接口地址列表（只返回掩码与加密方式） |
 | `get_saved_config` | 查看已保存配置的状态，敏感信息会脱敏显示 |
 
@@ -179,7 +179,7 @@ codex mcp add local videotono -- python -m backend.mcp_server
 
 MCP server 会自动扫描 8000–8019 端口来找到已运行的 VideoToNo 服务；也可以用环境变量 `VIDEOTONOTES_BACKEND_URL` 显式指定服务地址。
 
-> 隐私说明：`save_llm_config`（以及网页端的「保存到本机」）把 API Key 写入本机 `workspace/llm_keys.json`——Windows 上用系统 DPAPI 按当前用户加密，把该文件拷到另一台机器或另一个 Windows 账户都解不开；非 Windows 平台没有 DPAPI，会明文保存并在界面标注。Key 与保存时的接口地址绑定，只有目标地址一致才会复用。`save_bilibili_credentials` 仍以明文写入 `workspace/bili_credentials.json`。未显式调用保存工具时，凭据不会落盘；`workspace/` 已被 `.gitignore` 排除，不会进入 Git 仓库，也请勿分享这些文件。
+> 隐私说明：`save_llm_config`（以及网页端的「保存到本机」）把 API Key 写入本机 `workspace/llm_keys.json`——Windows 上用系统 DPAPI 按当前用户加密，把该文件拷到另一台机器或另一个 Windows 账户都解不开；非 Windows 平台没有 DPAPI，会明文保存并在界面标注。Key 与保存时的接口地址绑定，只有目标地址一致才会复用。`save_bilibili_credentials` 保存的 SESSDATA / bili_jct 走同一套信封加密写入 `workspace/bili_credentials.json`（同样绑定当前 Windows 账户，换机器需重新保存；`buvid3` 是设备标识，客户端本就明文携带，故保持明文）。未显式调用保存工具时，凭据不会落盘；`workspace/` 已被 `.gitignore` 排除，不会进入 Git 仓库，也请勿分享这些文件。
 
 </details>
 

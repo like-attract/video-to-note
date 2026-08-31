@@ -14,6 +14,7 @@ from backend.config_store import (
     BILI_CREDENTIALS_FILE,
     LLM_CONFIG_FILE,
     LLM_KEYS_FILE,
+    BiliCredentialsUnavailable,
     ConfigStore,
 )
 
@@ -252,6 +253,82 @@ def test_bili_credentials_roundtrip_and_clear(tmp_path) -> None:
     assert store.load_bili_credentials() is None
 
 
+def test_bili_credentials_are_sealed_in_the_same_envelope(tmp_path) -> None:
+    """凭据与 API Key 共用信封；buvid3 是设备标识（请求里本就明文）刻意不加密。"""
+    store = ConfigStore(tmp_path)
+    store.save_bili_credentials({"sessdata": "s3cr3t-sess", "bili_jct": "j3ct", "buvid3": "b1"})
+
+    record = json.loads((tmp_path / BILI_CREDENTIALS_FILE).read_text(encoding="utf-8"))
+    assert record["sessdata"]["alg"] == secret_box.storage_backend()
+    assert record["sessdata"]["masked"] == "s3cr****"
+    assert record["buvid3"] == "b1"
+    sealed = base64.b64decode(record["sessdata"]["ciphertext"])
+    jct_sealed = base64.b64decode(record["bili_jct"]["ciphertext"])
+    if record["sessdata"]["alg"] == secret_box.ALG_PLAIN:
+        assert (sealed, jct_sealed) == (b"s3cr3t-sess", b"j3ct")
+    else:
+        assert b"s3cr3t-sess" not in sealed
+        assert b"j3ct" not in jct_sealed
+
+
+def test_legacy_plaintext_bili_credentials_migrate_on_first_read(tmp_path) -> None:
+    legacy = json.dumps({"sessdata": "legacy-sess", "bili_jct": "legacy-jct", "buvid3": "legacy-b3"})
+    (tmp_path / BILI_CREDENTIALS_FILE).write_text(legacy, encoding="utf-8")
+    store = ConfigStore(tmp_path)
+    expected = {"sessdata": "legacy-sess", "bili_jct": "legacy-jct", "buvid3": "legacy-b3"}
+
+    assert store.load_bili_credentials() == expected
+    record = json.loads((tmp_path / BILI_CREDENTIALS_FILE).read_text(encoding="utf-8"))
+    assert isinstance(record["sessdata"], dict) and isinstance(record["bili_jct"], dict)
+    # 第二次读取走信封路径，值必须一致
+    assert store.load_bili_credentials() == expected
+
+
+def test_bili_migration_keeps_the_plaintext_file_when_encryption_fails(tmp_path, monkeypatch) -> None:
+    """加密不可用（杀软干扰 DPAPI）时照旧用明文并保留原文件：宁可留明文也不能丢登录态。"""
+    legacy = json.dumps({"sessdata": "legacy-sess", "bili_jct": "", "buvid3": ""})
+    (tmp_path / BILI_CREDENTIALS_FILE).write_text(legacy, encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise secret_box.SecretBoxError("dpapi_failed", "Windows 加密调用失败")
+
+    monkeypatch.setattr(secret_box, "protect", boom)
+    store = ConfigStore(tmp_path)
+
+    assert store.load_bili_credentials() == {"sessdata": "legacy-sess", "bili_jct": "", "buvid3": ""}
+    assert (tmp_path / BILI_CREDENTIALS_FILE).read_text(encoding="utf-8") == legacy
+
+
+def test_undecryptable_bili_credentials_are_not_reported_as_absent(tmp_path) -> None:
+    """解不开必须报错：静默当成"未保存"会让任务改用匿名请求，故障漂到 412 风控上。"""
+    store = ConfigStore(tmp_path)
+    store.save_bili_credentials({"sessdata": "s1", "bili_jct": "j1", "buvid3": "b1"})
+    record = json.loads((tmp_path / BILI_CREDENTIALS_FILE).read_text(encoding="utf-8"))
+    # 用未知算法模拟"这文件来自别的机器/别的版本"：任何平台的 unprotect 都会拒绝
+    record["sessdata"]["alg"] = "aes-256-gcm-v2"
+    (tmp_path / BILI_CREDENTIALS_FILE).write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(BiliCredentialsUnavailable) as raised:
+        store.load_bili_credentials()
+    assert "重新扫码" in str(raised.value)
+    status = store.bili_credentials_status()
+    assert status["saved"] is True and status["sessdata_masked"] == "s1****"
+
+
+def test_bili_status_view_never_decrypts(tmp_path, monkeypatch) -> None:
+    """换机器后状态页仍要能打开：列状态只读保存时写死的掩码。"""
+    store = ConfigStore(tmp_path)
+    store.save_bili_credentials({"sessdata": "s9", "bili_jct": "j9", "buvid3": "b9"})
+
+    def never_decrypt(*args, **kwargs):
+        raise AssertionError("状态视图不该解密")
+
+    monkeypatch.setattr(secret_box, "unprotect", never_decrypt)
+
+    assert store.bili_credentials_status()["sessdata_masked"] == "s9****"
+    assert store.bili_credentials_status()["has_bili_jct"] is True
+
+
 def test_llm_key_endpoints_roundtrip(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
     client = TestClient(main.app)
@@ -332,4 +409,9 @@ def test_bili_credentials_endpoints(monkeypatch, tmp_path) -> None:
         "has_buvid3": True,
     }
     assert client.delete("/api/bili-credentials").json() == {"saved": False}
+    assert client.get("/api/bili-credentials").json() == {"saved": False}
+
+    blank = client.post("/api/bili-credentials", json={"sessdata": "   "})
+    assert blank.status_code == 400
+    assert "SESSDATA" in blank.json()["detail"]
     assert client.get("/api/bili-credentials").json() == {"saved": False}

@@ -7,7 +7,8 @@
 - workspace/llm_keys.json          按接口地址（host + path）保管的 API Key，
                                    Windows 下用 DPAPI 加密，其他平台明文并如实上报存储方式
 - workspace/llm_config.json        旧版单份明文配置：仅作一次性迁移的来源，迁移后只留设置与说明
-- workspace/bili_credentials.json  B 站凭据（SESSDATA / bili_jct / buvid3）
+- workspace/bili_credentials.json  B 站凭据：SESSDATA / bili_jct 用同一套信封加密，
+                                   buvid3 是设备标识（请求里本就明文）保持明文
 
 三个文件都在工作目录（workspace/）下，已被 .gitignore 整目录排除，不会进入 Git 仓库；
 请在开发中保持该约定，不要把它们放到仓库目录内。
@@ -15,6 +16,10 @@
 安全约定：Key 以"接口地址"为身份保管，只有请求的目标地址与保存时一致才会复用，
 因此切换 Provider / 换网关时不可能把 A 站点的 Key 发给 B 站点。地址无法识别
 （空、非 http/https）时一律拒绝复用。所有对外读取只返回掩码，绝不返回密钥原文。
+
+B 站凭据同一条路：状态视图只用保存时写死的掩码、从不解密，因此换机器解不开时
+仍然知道"存过什么"；取回原文失败一律抛 ``BiliCredentialsUnavailable``，
+绝不静默返回 ``None``——那等于把用户悄悄降级成未登录，报错会漂到下游风控上。
 """
 from __future__ import annotations
 
@@ -35,10 +40,19 @@ LLM_KEYS_FILE = "llm_keys.json"
 LLM_CONFIG_FILE = "llm_config.json"
 BILI_CREDENTIALS_FILE = "bili_credentials.json"
 KEYS_SCHEMA_VERSION = 1
+BILI_SCHEMA_VERSION = 1
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class BiliCredentialsUnavailable(RuntimeError):
+    """本机存过 B 站凭据但解不开（换机器 / 换 Windows 账户 / 盐值丢失）。
+
+    与"从未保存过"必须区分：静默当成未登录会让任务改用匿名请求，
+    失败原因漂到 412 风控上，用户完全看不出是凭据的问题。
+    """
 
 
 class ConfigStore:
@@ -284,25 +298,120 @@ class ConfigStore:
 
     # ---- B 站凭据 ----
 
-    def load_bili_credentials(self) -> dict[str, str] | None:
+    def bili_credentials_status(self) -> dict[str, Any]:
+        """对外视图：只用保存时写死的掩码，从不解密。
+
+        因此换机器导致解不开时，这里照样能报"存过哪份凭据"，不会整页空白。
+        """
         payload = self._read(BILI_CREDENTIALS_FILE)
         if not payload or not payload.get("sessdata"):
-            return None
+            return {"saved": False}
         return {
-            "sessdata": str(payload["sessdata"]),
-            "bili_jct": str(payload.get("bili_jct") or ""),
-            "buvid3": str(payload.get("buvid3") or ""),
+            "saved": True,
+            "sessdata_masked": _bili_mask(payload["sessdata"]),
+            "has_bili_jct": bool(payload.get("bili_jct")),
+            "has_buvid3": bool(payload.get("buvid3")),
         }
 
+    def load_bili_credentials(self) -> dict[str, str] | None:
+        payload = self._read(BILI_CREDENTIALS_FILE)
+        if not payload or not str(payload.get("sessdata") or "").strip():
+            return None
+        if isinstance(payload.get("sessdata"), str):
+            # 旧版明文文件：能加密才改写，否则这次照旧用明文（宁可留明文也不丢登录态）
+            migrated = self._migrate_bili_plaintext(payload)
+            if migrated is None:
+                return _plain_bili(payload)
+            payload = migrated
+        try:
+            return _unseal_bili(payload, entropy_file=self._entropy_path())
+        except secret_box.SecretBoxError as error:
+            LOGGER.warning("本机 B 站凭据解密失败（%s）：%s", error.code, error)
+            raise BiliCredentialsUnavailable(
+                f"本机 B 站凭据无法解密（{error.code}），可能来自其他机器或另一个 Windows 账户。"
+                "请重新扫码登录导入，或用 save_bilibili_credentials 再保存一次"
+            ) from error
+
     def save_bili_credentials(self, credentials: dict[str, str]) -> None:
-        self._write(BILI_CREDENTIALS_FILE, credentials)
+        payload = self._seal_bili(
+            str(credentials.get("sessdata") or ""),
+            str(credentials.get("bili_jct") or ""),
+            str(credentials.get("buvid3") or ""),
+        )
+        with self._lock:
+            self._write(BILI_CREDENTIALS_FILE, payload)
 
     def clear_bili_credentials(self) -> None:
         self._clear(BILI_CREDENTIALS_FILE)
 
+    def _seal_bili(
+        self, sessdata: str, bili_jct: str, buvid3: str
+    ) -> dict[str, Any]:
+        """sessdata / bili_jct 进信封；buvid3 是设备标识（每个请求本就明文带），保持明文。"""
+        if not sessdata.strip():
+            raise ValueError("SESSDATA 为空，未保存到本机")
+        sealed: dict[str, Any] = {
+            "version": BILI_SCHEMA_VERSION,
+            "sessdata": self._seal(sessdata.strip()),
+            "updated_at": _now(),
+        }
+        if bili_jct.strip():
+            sealed["bili_jct"] = self._seal(bili_jct.strip())
+        if buvid3.strip():
+            sealed["buvid3"] = buvid3.strip()
+        return sealed
+
+    def _seal(self, secret: str) -> dict[str, Any]:
+        envelope = secret_box.protect(secret, entropy_file=self._entropy_path())
+        # 掩码在保存时就写死：列状态不需要解密，也就不需要冒"解密失败显示空白"的风险。
+        envelope["masked"] = secret_box.mask_secret(secret)
+        return envelope
+
+    def _migrate_bili_plaintext(self, legacy: dict[str, Any]) -> dict[str, Any] | None:
+        plain = _plain_bili(legacy)
+        try:
+            sealed = self._seal_bili(**plain)
+        except (ValueError, secret_box.SecretBoxError) as error:
+            LOGGER.warning("旧版 B 站凭据加密失败，暂不迁移：%s", error)
+            return None
+        with self._lock:
+            self._write(BILI_CREDENTIALS_FILE, sealed)
+        LOGGER.info("旧版明文 B 站凭据已加密改写")
+        return sealed
+
 
 def _is_usable_entry(entry: Any) -> bool:
     return isinstance(entry, dict) and bool(str(entry.get("host") or "")) and bool(str(entry.get("id") or ""))
+
+
+def _plain_bili(payload: dict[str, Any]) -> dict[str, str]:
+    """旧版明文书写格式 → 值字典（也用于迁移时取原文）。"""
+    return {
+        "sessdata": str(payload.get("sessdata") or ""),
+        "bili_jct": str(payload.get("bili_jct") or ""),
+        "buvid3": str(payload.get("buvid3") or ""),
+    }
+
+
+def _bili_mask(value: Any) -> str | None:
+    text = str(value.get("masked") or "") if isinstance(value, dict) else secret_box.mask_secret(str(value))
+    return text or None
+
+
+def _unseal_bili(payload: dict[str, Any], *, entropy_file: Path) -> dict[str, str]:
+    sessdata = payload.get("sessdata")
+    if not isinstance(sessdata, dict):
+        return {"sessdata": "", "bili_jct": "", "buvid3": ""}
+    bili_jct = payload.get("bili_jct")
+    return {
+        "sessdata": secret_box.unprotect(sessdata, entropy_file=entropy_file),
+        "bili_jct": (
+            secret_box.unprotect(bili_jct, entropy_file=entropy_file)
+            if isinstance(bili_jct, dict)
+            else ""
+        ),
+        "buvid3": str(payload.get("buvid3") or ""),
+    }
 
 
 def _dedupe(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
