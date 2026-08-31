@@ -29,6 +29,7 @@ Thumbs.db
 
 # 开发文档（本地保留，不入库）
 /DEVELOPMENT.md
+/dev-notes/
 # 旧图标备份（本地保留，不入库）
 /sources/icon_old.*
 # 构建产物（由 build_exe.ps1 从模板生成）
