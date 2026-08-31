@@ -117,7 +117,8 @@ def test_html_entry_is_no_store_and_assets_no_cache() -> None:
     page = client.get("/")
     assert page.headers["cache-control"] == "no-store"
     assert page.headers["content-security-policy"].startswith("default-src 'self'")
-    for asset in ("/style.css", "/script.js?v=20260825-1", "/theme-bootstrap.js"):
+    # 版本号是否需要 bump 由 test_frontend_hygiene 守；这里只查缓存头，故忽略查询串。
+    for asset in ("/style.css", "/script.js", "/theme-bootstrap.js"):
         response = client.get(asset)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-cache"
