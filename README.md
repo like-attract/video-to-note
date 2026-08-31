@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.2.3</h1>
+<h1 align="center">VideoToNo v1.3.0</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -17,17 +17,19 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 
 > 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（如 `C:/Users/用户名/.agents/skills/`），即可让 Claude Code、pi 等直接一句话生成视频笔记。详见该目录下的 `SKILL.md`。
 
-## 🆕 What's New（v1.2.2 → v1.2.3）
+## 🆕 What's New（v1.2.3 → v1.3.0）
 
-- **B 站风控也能出笔记**：视频页被 412 拦截时，自动改用 `api.bilibili.com` 开放接口取元数据与音频（支持多分 P、预览视频流），任务日志会标明已回退；接口请求补齐风控 Cookie，b23.tv 短链也能解析出 BV 号（Issue #1）
-- **修复「详细复原」卡在生成阶段不动**：长视频笔记省略时间戳会被误判为丢尾，进而自动补写整段剩余转录；现已加上缺口、材料规模、耗时三道护栏，真丢尾（≤10 分钟）仍会自动补写结尾
-- **生成进度心跳**：模型输出期间每 20 秒上报「已输出 N 字」或「正在深度思考（已累计 N 字）」，深度思考阶段不再与死锁同形
-- **推理强度按风格自适应**：`auto` 档在 DeepSeek 兼容通道对「详细笔记 + 点评」/「详细复原」默认取更高思考量，「精简摘要」取中档；任务日志会打印实际生效档位（Token 消耗相应增加，可在「推理强度」里显式选定）
-- **思考参数不再写死给兼容网关**：默认只发标准 `reasoning_effort`（私有 `thinking` 仅用于官方 DeepSeek 关思考），通道拒绝某个参数时自动按下一级写法重试（`reasoning_effort` → `reasoning.effort` → 不注入；`max_tokens` 过大时也会退回笔记长度），并把结论记住，不再因为一个参数把任务打死
+- **API Key 可以「保存到本机」**：按**接口地址**保管，Windows 上用系统 DPAPI 加密落盘（其他平台明文保存并在界面如实标注）。复用前会校验目标地址与保存时一致，**不会把 A 网关的 Key 发给 B**；不点保存时 Key 只留在当前页面内存里。输入框旁新增密钥状态芯片：「本机已存 sk-x****（档案名）」/「未保存」/「无法解密」
+- **模型档案**：内置 Provider 各自记住所选模型；自定义接口可保存多个命名档案（名称 + 地址 + 模型）。非敏感设置改动即自动保存，「保存偏好」按钮取消（保留「恢复默认」，且不清除本机已存 Key）
+- **B 站凭据也不再明文落盘**：`save_bilibili_credentials` 保存的 SESSDATA / bili_jct 走同一套本机加密；换机器或换 Windows 账户后解不开时，任务会明确报「本机 B 站凭据无法解密」并提示重新扫码，而不是悄悄改用匿名请求
+- **取消任务在任意阶段秒级生效**：以前在「读取视频信息」「查找平台字幕」阶段点取消要等十几秒，最后还会误报成「处理失败：timed out」；现在任意阶段都会立即进入「已取消」，排队等待中的任务同样能取消（实测 18.6s → 0.02s）
+- **修复切换 Provider / 自定义档案时模型 ID 串写**（A 档案的模型出现在 B 档案输入框里）；「测试连接」不再把已保存的 Key 用到调用方另给的地址上；早期失败（读凭据、取视频信息）现在也会正常写入终态，不会让任务卡在 `processing`
+- **MCP 与 Agent Skill**：新增只读工具 `list_llm_keys`；`save_llm_config` 支持 `label`；`get_saved_config` 增加 `endpoints` / `key_storage`（原有字段形状不变）；Skill 脚本在本机恰好只有一个地址存了 Key 时可省略 `--api-key`，失败提示会点名接口地址
 
 <details>
-<summary>历史版本摘要（v1.2.2 及更早）</summary>
+<summary>历史版本摘要（v1.2.3 及更早）</summary>
 
+- **v1.2.3**：B 站 412 风控自动回退到 `api.bilibili.com` 开放接口（含多分 P 与预览流，Issue #1）、「详细复原」卡在生成阶段的三道护栏、生成进度心跳、推理强度按风格自适应、思考参数被网关拒绝时自动降级并记住结论
 - **v1.2.2**：Agent Skill 接入（skills/video-to-note/，一句话生成笔记）、任务完成/失败的 Windows 托盘通知、仓库与文档定位重写
 - **v1.2.1**：取消真正立即生效（LLM 流式/下载钩子/模型下载逐块取消）、上传上限 2GB + 超大视频自动提音频、Whisper base 模型导入包
 - **v1.2.0**：B 站多分 P 视频（全部/指定分P合并笔记）、语音转写段粒度取消、B 站无字幕误报修正、Whisper 手动导入模型界面
@@ -58,7 +60,7 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.2.3-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.3.0-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；

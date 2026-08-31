@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.2.3</h1>
+<h1 align="center">VideoToNo v1.3.0</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -18,17 +18,19 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.2.2 → v1.2.3)
+## 🆕 What's New (v1.2.3 → v1.3.0)
 
-- **Bilibili notes survive risk control**: when the video page returns 412, VideoToNo falls back to the `api.bilibili.com` open endpoints for metadata and audio (multi-part videos and preview streams included), and the task log says so. API requests now carry the full risk-control cookie set, `b23.tv` short links resolve to BV ids, and anonymous use gets a device fingerprint automatically (Issue #1)
-- **Fixed "Faithful" style hanging in the generation stage**: on long videos a note that simply omits timestamps was mistaken for a truncated one, triggering an extra regeneration of the whole remaining transcript. Three guardrails now bound the gap, the input size and the wall-clock time; a genuinely missing tail (within 10 minutes) is still patched automatically
-- **Generation progress heartbeat**: while the model streams, progress reports "model produced N characters" or "deep thinking (N characters so far)" every 20 seconds, so a thinking phase no longer looks like a deadlock
-- **Reasoning effort adapts to the note style**: on DeepSeek-compatible channels `auto` now picks a higher thinking level for Detailed/Faithful notes and a medium one for Concise summaries; the task log prints the effective level (more tokens consumed — pin a level explicitly under "Reasoning effort" if you prefer)
-- **No more hard-coded vendor parameters**: thinking is controlled with the standard `reasoning_effort` (the private `thinking` field is only used to disable thinking on the official DeepSeek API), and when a channel rejects a parameter VideoToNo degrades automatically (`reasoning_effort` → `reasoning.effort` → send nothing; an over-large `max_tokens` also falls back), remembering the outcome instead of failing the task
+- **API keys can now be saved on this machine**: stored per **endpoint address**, encrypted with the system DPAPI on Windows (other platforms keep them in plaintext and say so in the UI). A saved key is only reused when the request targets the same address, **so a key for gateway A can never reach gateway B**; until you press save it lives in the page's memory only. A key-state chip next to the input shows "saved locally sk-x**** (profile)" / "not saved" / "cannot decrypt"
+- **Model profiles**: every built-in provider remembers its own selected model, and custom endpoints can be saved as multiple named profiles (name + address + model). Non-sensitive settings now autosave on change; the "Save preferences" button is gone (only "Restore defaults" remains, and it never clears locally saved keys)
+- **Bilibili credentials are no longer plaintext either**: SESSDATA / bili_jct saved via `save_bilibili_credentials` go through the same local encryption. When they cannot be decrypted after moving machines or Windows accounts, the task now fails with "cannot decrypt the locally saved Bilibili credentials" instead of silently downgrading to anonymous requests
+- **Cancellation is immediate in every stage**: cancelling during "reading video info" or "looking for captions" used to take ten-plus seconds and then mis-report the task as "failed: timed out"; now any stage reaches *Cancelled* at once, including tasks still waiting in the queue (measured 18.6s → 0.02s)
+- **Fixed model IDs bleeding across profiles** (a model from profile A appearing in profile B's input); "Test connection" no longer applies a saved key to another address given by the caller; early failures (reading credentials, fetching video info) now reach a terminal state instead of leaving the task stuck in `processing`
+- **MCP and Agent Skill**: new read-only `list_llm_keys` tool; `save_llm_config` accepts `label`; `get_saved_config` gains `endpoints` / `key_storage` (existing fields unchanged); the Skill script may omit `--api-key` when exactly one address has a key saved locally, and failures name the endpoint
 
 <details>
-<summary>Previous releases (v1.2.2 and earlier)</summary>
+<summary>Previous releases (v1.2.3 and earlier)</summary>
 
+- **v1.2.3**: Bilibili notes survive risk control (automatic fallback to `api.bilibili.com` open endpoints for metadata, audio and preview streams across multi-part videos, Issue #1), three guardrails against the "Faithful" style hanging in generation, generation progress heartbeat, reasoning effort adapting to the note style, and automatic degradation when a channel rejects a thinking parameter
 - **v1.2.2**: Agent Skill integration (`skills/video-to-note/`, one-sentence note generation), Windows tray notifications for task results, rewritten repo and docs positioning
 - **v1.2.1**: immediate cancellation across all stages (LLM streaming/download hooks/model download per-chunk), upload limit 2 GB + auto audio extraction for large videos, Whisper base model bundle
 - **v1.2.0**: Bilibili multi-part support, per-segment Whisper cancellation, false-positive SESSDATA fix, manual Whisper model import UI
@@ -57,7 +59,7 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.2.3-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.3.0-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
