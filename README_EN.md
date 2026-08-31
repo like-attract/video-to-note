@@ -76,6 +76,7 @@ The portable build starts the local service and stays in the system tray. The fi
 - 🧾 **Real timestamps**: keeps segment start and end times from captions or Whisper instead of asking the model to invent them.
 - 🧠 **Long-transcript handling**: chunks, summarizes, and reduces long material while keeping context pressure under control.
 - 🖼️ **Multiple exports**: Markdown, HTML, JSON, plain text, and PNG, with optional video screenshots as note attachments.
+- 🤖 **Raw material for agents**: a connected agent can stop at the timestamped transcript — no LLM call and no API key for this machine, and it writes the notes in its own structure and style.
 - 🛡️ **Local-first**: media downloads, transcription, and file generation happen locally; the service listens on `127.0.0.1` by default.
 
 ## 🔁 Processing pipeline
@@ -86,6 +87,8 @@ Video URL / local file
 Platform captions (Bilibili AI captions first)
         ↓ when unavailable
 Local faster-whisper transcription
+        ↓
+Timestamped transcript ──────→ handed to an agent to write its own notes (no LLM, no API key)
         ↓
 LLM-generated timestamped Markdown note
 ```
@@ -133,11 +136,15 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 
 VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
 
+Pick a route: if your client already has a capable model, use `transcribe_video` + `get_transcript` to take the timestamped transcript only — **no API key for this machine**, and the client decides the note structure and style. Reach for `summarize_video` when a finished note is wanted in one shot (or for a long video best processed in the background).
+
 Available tools:
 
 | Tool | Description |
 |---|---|
 | `summarize_video` | Submit a video summarization task; URL, API key, model, and Bilibili credentials can be omitted when saved local config is available for that endpoint |
+| `transcribe_video` | Stop at the timestamped transcript: no LLM call anywhere in this route, so no API key is needed |
+| `get_transcript` | Fetch a task's transcript (full markdown or JSON segments); works for historical tasks whose note generation later failed |
 | `wait_for_task` | Wait for a terminal task state for up to 45 seconds per call and return the note when complete; use it instead of aggressive polling |
 | `get_task_status` | Inspect intermediate task progress |
 | `list_whisper_models` | Show local Whisper model cache status |
@@ -206,9 +213,9 @@ After installing, just ask in one sentence:
 Turn this Bilibili video into notes: https://www.bilibili.com/video/BV1xx
 ```
 
-The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the full Markdown note. Common options: `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
+The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the result. Common options: `--transcript-only` (timestamped transcript only, no LLM call), `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
 
-> First use requires an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`. If this machine has a saved key for exactly one endpoint address (web page **Save to this machine** or the MCP `save_llm_config` tool), omit them and that channel is reused.
+> **When the agent has its own model, prefer `--transcript-only`**: that route never calls an LLM, so it needs no API key and the agent keeps full control over note structure and style. Only the finished-note route needs an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`. If this machine has a saved key for exactly one endpoint address (web page **Save to this machine** or the MCP `save_llm_config` tool), omit them and that channel is reused.
 
 </details>
 

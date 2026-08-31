@@ -77,6 +77,7 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 - 🧾 **真实时间轴**：保留字幕或 Whisper 分段的起止时间，不让模型凭空猜时间点。
 - 🧠 **长内容整理**：短转录直接生成，长转录自动分块、归并并控制上下文压力；生成后会核对是否写到材料结尾，小缺口自动补写。
 - 🖼️ **多格式输出**：Markdown 笔记、HTML、JSON、纯文本和 PNG 图片；可选提取视频截图作为附件。
+- 🤖 **给 agent 留了原料出口**：接入的 agent 只要「带时间轴转录」，可以不走大模型、不需要给本机配 API Key，笔记风格由 agent 自己定。
 - 🛡️ **本地优先**：媒体下载、转录和文件生成在本机完成；服务默认只监听 `127.0.0.1`。
 
 ## 🔁 处理流程
@@ -87,6 +88,8 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 平台字幕（B 站 AI 字幕优先）
         ↓ 无可用字幕
 faster-whisper 本地转写
+        ↓
+带时间轴转录 ──────→ 交给 agent 自己写笔记（不调用大模型，无需 API Key）
         ↓
 大模型生成带时间轴的 Markdown 笔记
 ```
@@ -134,11 +137,15 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 
 VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio、Codex 等 AI 客户端里直接输入视频链接生成笔记。**使用前请先启动 VideoToNo**：MCP 工具通过本地后端执行任务，会复用本机的 Whisper 模型缓存和任务目录，不会重复下载。
 
+两条路线按需选：客户端**自己就有模型**时，用 `transcribe_video` + `get_transcript` 只取带时间轴的转录，**不需要给本机配 API Key**，笔记的结构与风格由客户端自己定；要一份现成成品笔记（或超长视频后台跑完）才用 `summarize_video`。
+
 可用工具：
 
 | 工具 | 说明 |
 |---|---|
 | `summarize_video` | 提交视频总结任务；视频链接、API Key、模型和 B 站凭据都可省略，自动复用本机为该接口地址保存的配置 |
+| `transcribe_video` | 只做到带时间轴转录为止，全程不调用大模型，**因此不需要 API Key**；适合客户端自己写笔记 |
+| `get_transcript` | 取某个任务的转录正文（整篇 markdown 或 json 分段）；历史任务即便后来生成笔记失败，转录照样能取 |
 | `wait_for_task` | 等待任务达到终态（最长 45 秒，可重复调用），完成后返回笔记正文；适合代替频繁轮询 |
 | `get_task_status` | 查询任务中间进度 |
 | `list_whisper_models` | 查看 Whisper 模型的本地缓存状态 |
@@ -207,9 +214,9 @@ C:\Users\<用户名>\.agents\skills\video-to-note\        # pi / 通用约定
 帮我把这个 B 站视频做成笔记：https://www.bilibili.com/video/BV1xx
 ```
 
-agent 会调用技能附带的 `scripts/video_note.py`，自动探测服务端口、提交任务、实时打印运行日志，完成后输出（或保存）完整 Markdown 笔记。常用参数：`--style detailed|faithful|concise`、`--wait 秒数`、`--out 文件路径`；本地视频文件路径也可直接作为输入。
+agent 会调用技能附带的 `scripts/video_note.py`，自动探测服务端口、提交任务、实时打印运行日志，完成后输出（或保存）结果。常用参数：`--transcript-only`（只要带时间轴转录，不调用大模型）、`--style detailed|faithful|concise`、`--wait 秒数`、`--out 文件路径`；本地视频文件路径也可直接作为输入。
 
-> 首次使用同样需要大模型 API Key：agent 会向你要，用 `--provider` / `--api-key` 传入；若本机只为一个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`），省略这些参数即可直接复用，不需要再传。
+> **agent 自带模型时优先用 `--transcript-only`**：这条路线完全不调用大模型，因此不需要 API Key，转录到的内容由 agent 自己组织成笔记，不受内置笔记模板约束。只有需要一份现成成品笔记时才走 `--style`，而那需要大模型 API Key：agent 会向你要，用 `--provider` / `--api-key` 传入；若本机只为一个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`），省略这些参数即可直接复用，不需要再传。
 
 </details>
 

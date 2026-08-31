@@ -9,6 +9,8 @@
 
 常用选项:
     --style {detailed,faithful,concise}   笔记风格（默认 detailed）
+    --transcript-only                     只做到带时间轴转录，不调用大模型（无需 API Key）
+    --no-reuse                            禁止复用同链接已有转录，强制重新转写
     --provider {deepseek,openai,qwen,glm,moonshot,custom}
     --api-key KEY                         大模型 API Key（该地址已保存到本机可省略）
     --wait SECONDS                        最长等待秒数（默认 1800）
@@ -175,6 +177,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="VideoToNo：视频 → 带时间轴的 Markdown 笔记")
     parser.add_argument("source", help="视频链接（B站/抖音/YouTube）或本地媒体文件路径")
     parser.add_argument("--style", choices=["detailed", "faithful", "concise"], default="detailed")
+    parser.add_argument(
+        "--transcript-only",
+        action="store_true",
+        help="只做到带时间轴转录为止，不调用大模型（无需 API Key，笔记风格由你决定）",
+    )
+    parser.add_argument(
+        "--no-reuse",
+        action="store_true",
+        help="禁止复用同链接已有转录，强制重新转写（默认只在笔记模式从头处理）",
+    )
     parser.add_argument("--provider", default=None, help=f"大模型供应商：{', '.join(sorted(PROVIDERS))}")
     parser.add_argument("--api-key", default="", help="大模型 API Key（该接口地址已保存到本机时可省略）")
     parser.add_argument("--base-url", default=None, help="custom 供应商的接口地址")
@@ -190,34 +202,52 @@ def main() -> None:
         die(f"不支持的供应商：{args.provider}（可选：{', '.join(sorted(PROVIDERS))}）")
     if args.provider == "custom" and not (args.base_url and args.custom_model):
         die("custom 供应商需要 --base-url 和 --custom-model")
+    transcript_only = args.transcript_only
+    if transcript_only and (
+        args.api_key.strip() or args.provider or args.include_screenshots
+    ):
+        die(
+            "--transcript-only 全程不调用大模型，也不做截图："
+            "--api-key/--provider/--include-screenshots 都不需要。"
+            "去掉这些参数，或去掉 --transcript-only 改走笔记模式。"
+        )
 
     base = find_service()
     print(f"[VideoToNo] 服务已连接：{base}")
 
-    # 省略 --api-key 时不下发该字段：后端按接口地址复用本机已存的 Key，
-    # 地址对不上会直接报错，而不是借用别的接口的 Key。
-    if args.api_key.strip() or args.provider:
-        llm_config: dict = {"model_type": args.provider or "deepseek"}
-        if args.api_key.strip():
-            llm_config["api_key"] = args.api_key.strip()
-        if args.base_url:
-            llm_config["base_url"] = args.base_url
-        if args.custom_model:
-            llm_config["model"] = args.custom_model
-    else:
-        # 什么都没指定：本机只存过一个接口时就沿用它的通道，存了多个则不猜。
-        llm_config = pick_saved_channel(base) or {"model_type": "deepseek"}
-
     source_path = Path(args.source)
-    payload: dict = {
-        "summary_style": args.style,
-        "prefer_subtitles": True,
-        "processing_mode": "restart",
-        "whisper_model": args.whisper_model,
-        "include_screenshots": args.include_screenshots,
-        "screenshot_interval": max(5, min(300, args.screenshot_interval)),
-        "llm_config": llm_config,
-    }
+    if transcript_only:
+        endpoint = "/api/transcribe"
+        # 转录模式不下发 llm_config：这条路上根本没有大模型调用
+        payload: dict = {
+            "prefer_subtitles": True,
+            "processing_mode": "restart" if args.no_reuse else "reuse",
+            "whisper_model": args.whisper_model,
+        }
+    else:
+        endpoint = "/api/summarize"
+        # 省略 --api-key 时不下发该字段：后端按接口地址复用本机已存的 Key，
+        # 地址对不上会直接报错，而不是借用别的接口的 Key。
+        if args.api_key.strip() or args.provider:
+            llm_config: dict = {"model_type": args.provider or "deepseek"}
+            if args.api_key.strip():
+                llm_config["api_key"] = args.api_key.strip()
+            if args.base_url:
+                llm_config["base_url"] = args.base_url
+            if args.custom_model:
+                llm_config["model"] = args.custom_model
+        else:
+            # 什么都没指定：本机只存过一个接口时就沿用它的通道，存了多个则不猜。
+            llm_config = pick_saved_channel(base) or {"model_type": "deepseek"}
+        payload = {
+            "summary_style": args.style,
+            "prefer_subtitles": True,
+            "processing_mode": "restart",
+            "whisper_model": args.whisper_model,
+            "include_screenshots": args.include_screenshots,
+            "screenshot_interval": max(5, min(300, args.screenshot_interval)),
+            "llm_config": llm_config,
+        }
 
     if source_path.is_file():
         payload["upload_task_id"] = upload_file(base, source_path)
@@ -229,8 +259,10 @@ def main() -> None:
 
     print("[VideoToNo] 正在提交任务…")
     try:
-        result = http_json("POST", f"{base}/api/summarize", payload, timeout=60)
+        result = http_json("POST", f"{base}{endpoint}", payload, timeout=60)
     except RuntimeError as exc:
+        if transcript_only:
+            die(f"提交失败：{exc}")
         if "API Key" in str(exc) or "422" in str(exc):
             die(
                 f"提交失败：{exc}\n提示：需要大模型 API Key。请向用户询问供应商与 Key，"
@@ -247,17 +279,28 @@ def main() -> None:
     print(f"[VideoToNo] 任务已创建：{task_id}，开始等待完成…")
 
     task = poll_task(base, task_id, args.wait)
+    task_result = task.get("result") or {}
 
-    markdown = (task.get("result") or {}).get("markdown") or ""
-    if not markdown:
-        die("任务完成但未返回笔记内容", code=2)
+    if transcript_only:
+        transcript = http_json(
+            "GET",
+            f"{base}/api/task/{task_id}/transcript?output_format=markdown",
+            timeout=60,
+        )
+        body = transcript.get("text") or ""
+        label = "转录"
+    else:
+        body = task_result.get("markdown") or ""
+        label = "笔记"
+    if not body:
+        die(f"任务完成但未返回{label}内容", code=2)
     if args.out:
-        Path(args.out).write_text(markdown, encoding="utf-8")
-        print(f"[VideoToNo] 笔记已保存：{args.out}")
+        Path(args.out).write_text(body, encoding="utf-8")
+        print(f"[VideoToNo] {label}已保存：{args.out}")
     else:
         print("\n" + "=" * 58 + "\n")
-        print(markdown)
-    output_dir = (task.get("result") or {}).get("output_directory")
+        print(body)
+    output_dir = task_result.get("output_directory")
     if output_dir:
         print(f"\n[VideoToNo] 产物目录：{output_dir}")
 
