@@ -298,6 +298,79 @@ def test_summarize_rejects_local_path_in_url_field() -> None:
     assert response.status_code == 422
 
 
+def test_summarize_accepts_uploaded_local_file_with_path_in_url_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """回归：网页端本地视频首跑必失败——上传后的 video_url 是后端目录里的文件路径，
+    曾被链接校验判成「无法识别视频链接」422，点重试才走 resume 分支跑通。"""
+    async def fake_run(task_id, request):
+        return None
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+    client = TestClient(main.app)
+    upload = client.post(
+        "/api/upload",
+        files={"file": ("课程 第一讲.mp4", b"bits", "video/mp4")},
+        data={"include_screenshots": "0"},
+    ).json()
+
+    response = client.post(
+        "/api/summarize",
+        json={
+            "video_url": upload["file_path"],
+            "upload_task_id": upload["task_id"],
+            "llm_config": {"model_type": "deepseek", "api_key": "test-key"},
+        },
+    )
+
+    assert response.status_code == 200
+    # 就地复用上传任务：另起一个任务会在历史列表里留下永远删不掉的孤儿
+    assert response.json()["task_id"] == upload["task_id"]
+    task = main.tasks[upload["task_id"]]
+    assert task["status"] == "pending"
+    assert task["uploaded_file_path"] == upload["file_path"]
+    assert task["uploaded_filename"] == "课程 第一讲.mp4"
+
+
+def test_summarize_rejects_upload_task_already_consumed_or_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def fake_run(task_id, request):
+        return None
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+    client = TestClient(main.app)
+    upload_id = client.post(
+        "/api/upload", files={"file": ("a.mp4", b"bits", "video/mp4")}
+    ).json()["task_id"]
+    payload = {
+        "upload_task_id": upload_id,
+        "llm_config": {"model_type": "deepseek", "api_key": "test-key"},
+    }
+
+    assert client.post("/api/summarize", json=payload).status_code == 200
+    assert client.post("/api/summarize", json=payload).status_code == 400
+    assert (
+        client.post(
+            "/api/summarize", json={**payload, "upload_task_id": "not-a-task"}
+        ).status_code
+        == 400
+    )
+
+
+def test_health_reports_upload_limit_for_the_frontend(monkeypatch) -> None:
+    """前端不再自己写死 500MB：本机上限只能由健康接口下发。"""
+    monkeypatch.setattr(main, "MAX_UPLOAD_MB", 1536)
+    response = TestClient(main.app).get("/api/health")
+    assert response.json()["max_upload_mb"] == 1536
+
+
 def test_summarize_accepts_douyin_url_and_does_not_front_reject(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -406,6 +479,26 @@ async def test_delete_failed_task_removes_record_and_artifacts(
 
     monkeypatch.setattr(main, "video_processor", FakeProcessor())
     main.tasks[task_id] = main.new_task("failed", task_id)
+
+    assert await main.delete_task(task_id) == {"deleted": True}
+    assert cleaned == [task_id]
+    assert task_id not in main.tasks
+
+
+@pytest.mark.asyncio
+async def test_delete_uploaded_task_removes_orphan_record_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上传后放弃的「待处理」任务没有运行中的 job，必须能直接删掉。"""
+    task_id = "uploaded-task"
+    cleaned: list[str] = []
+
+    class FakeProcessor:
+        async def cleanup(self, value: str) -> None:
+            cleaned.append(value)
+
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    main.tasks[task_id] = main.new_task("uploaded", task_id)
 
     assert await main.delete_task(task_id) == {"deleted": True}
     assert cleaned == [task_id]
@@ -663,6 +756,65 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
     assert (tmp_path / new_task_id / "notes.md").read_text(encoding="utf-8").startswith(
         "# 复用成功"
     )
+
+
+@pytest.mark.asyncio
+async def test_local_task_title_uses_uploaded_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：本地视频落地文件统一叫 input.mp4，历史与笔记标题不能显示成 input。"""
+    task_id = "local-task"
+    media = tmp_path / task_id / "input.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"bits")
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.LOCAL
+
+        @staticmethod
+        async def get_video_info(url_or_path, cookie=None, allow_local=False, notes=None):
+            return {"title": Path(url_or_path).stem, "source": "local", "duration": 0}
+
+        @staticmethod
+        async def cleanup(value):
+            return None
+
+    class FakeTranscriber:
+        @staticmethod
+        async def transcribe(
+            media_path, model, use_gpu, initial_prompt=None, cancel_event=None
+        ):
+            return {
+                "segments": [
+                    TranscriptSegment(0, 12, "这是一段用来通过文字质量检查的本地视频口播内容")
+                ],
+                "language": "zh",
+                "model": model,
+                "requested_model": model,
+                "device": "cpu",
+                "duration": 12,
+            }
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "transcriber", FakeTranscriber())
+    task = main.new_task(status="uploaded", task_id=task_id)
+    task.update(uploaded_file_path=str(media), uploaded_filename="课程 第一讲.mp4")
+    main.tasks[task_id] = task
+
+    await main.process_video_task(
+        task_id,
+        main.SummarizeRequest(
+            video_url=str(media), output="transcript", llm_config=main.LLMConfig()
+        ),
+    )
+
+    finished = main.tasks[task_id]
+    assert finished["status"] == "completed"
+    assert finished["result"]["title"] == "课程 第一讲"
+    assert any("标题：课程 第一讲" in log for log in finished["logs"])
 
 
 @pytest.mark.asyncio

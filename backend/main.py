@@ -578,7 +578,15 @@ def write_upload_manifest(task_id: str, filename: str) -> None:
 async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
     if request.whisper_model not in WHISPER_MODELS:
         raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
-    if request.video_url:
+    uploaded_task = None
+    if request.upload_task_id:
+        # 本地上传的媒体位置记在上传任务上；此时 video_url 是后端目录里的文件路径，
+        # 不是链接，不能进链接校验（否则必 422）。
+        uploaded_task = tasks.get(request.upload_task_id)
+        if not uploaded_task or uploaded_task.get("status") != "uploaded":
+            raise HTTPException(status_code=400, detail="上传任务不存在或已经处理")
+        request.video_url = ""
+    elif request.video_url:
         normalized = normalize_video_input(request.video_url)
         if not normalized:
             raise HTTPException(
@@ -598,14 +606,10 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
             raise HTTPException(status_code=404, detail="要继续的任务目录不存在")
 
     task_id = request.upload_task_id or str(uuid.uuid4())
-    if request.upload_task_id:
-        existing = tasks.get(request.upload_task_id)
-        if not existing or existing.get("status") != "uploaded":
-            raise HTTPException(status_code=400, detail="上传任务不存在或已经处理")
-        uploaded_path = existing.get("uploaded_file_path")
+    if uploaded_task is not None:
         tasks[task_id] = new_task(task_id=task_id)
-        tasks[task_id]["uploaded_file_path"] = uploaded_path
-        tasks[task_id]["uploaded_filename"] = existing.get("uploaded_filename")
+        tasks[task_id]["uploaded_file_path"] = uploaded_task.get("uploaded_file_path")
+        tasks[task_id]["uploaded_filename"] = uploaded_task.get("uploaded_filename")
     else:
         if request.video_url:
             try:
@@ -623,7 +627,11 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
         old_task = tasks.get(reused_task_id, {})
         if old_task.get("uploaded_file_path"):
             tasks[task_id]["uploaded_file_path"] = old_task["uploaded_file_path"]
-            tasks[task_id]["uploaded_filename"] = old_task.get("uploaded_filename")
+        old_filename = old_task.get("uploaded_filename") or read_task_manifest(
+            reused_task_id
+        ).get("uploaded_filename")
+        if old_filename:
+            tasks[task_id]["uploaded_filename"] = old_filename
         tasks[task_id]["logs"].append(f"将从任务 {reused_task_id} 复用已有产物")
     write_task_manifest(task_id, request, reused_task_id)
     persist_task_runtime(task_id)
@@ -1010,6 +1018,8 @@ async def health_check() -> dict[str, Any]:
         "mode": "portable" if getattr(sys, "frozen", False) else "dev",
         # 本机保存的 API Key 是加密还是明文回退，答疑时看一眼健康接口即可确认
         "llm_key_storage": secret_box.storage_backend(),
+        # 前端上传上限跟随本机配置，不再自己写死一个数字
+        "max_upload_mb": MAX_UPLOAD_MB,
         "dependencies": {
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
@@ -1289,6 +1299,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             )
             note_api_fallback()
         raise_if_cancel_requested(task)
+        if is_local:
+            # 上传落地文件统一叫 input.<ext>，路径推出来的标题就是占位名 input
+            original_name = str(task.get("uploaded_filename") or "").strip()
+            if original_name:
+                info["title"] = Path(original_name).stem
         title = info["title"]
         update_task_manifest(task_id, info)
         task["logs"].append(f"标题：{title}")
