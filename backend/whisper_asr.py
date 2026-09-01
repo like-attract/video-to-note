@@ -24,6 +24,11 @@ MIN_MODEL_FILE_BYTES = {
 # CTranslate2 加载损坏模型时的典型报错特征（小写匹配）。
 CORRUPT_MODEL_ERROR_MARKERS = ("is incomplete", "failed to read a buffer")
 
+GPU_UNAVAILABLE_NOTE = (
+    "本机 GPU 不可用，已改用 CPU 转写；后续任务不再重复尝试 GPU。"
+    "要用 GPU 请补装 CUDA 12 运行库（cuBLAS/cuDNN）后重启程序。"
+)
+
 
 class TranscriptionCancelledError(Exception):
     """转写过程中检测到用户取消请求（协作式中止信号）。
@@ -40,6 +45,9 @@ class WhisperTranscriber:
         self._models: dict[tuple[str, str], Any] = {}
         self._actual_models: dict[tuple[str, str], str] = {}
         self._last_download_error: Exception | None = None
+        # 驱动正常但缺 cuBLAS/cuDNN 运行库的机器上，模型能在 cuda 上构造成功、
+        # 一到推理才抛错。记下来，本进程后续任务直接走 CPU，不再重复付这次失败。
+        self._gpu_unusable = False
         self._model_lock = threading.Lock()
         self.download_root = download_root.resolve() if download_root else None
         if self.download_root:
@@ -94,24 +102,44 @@ class WhisperTranscriber:
         if cancel_event is not None and cancel_event.is_set():
             raise TranscriptionCancelledError()
         model_to_load = self._preferred_model(model_name)
+        gpu_known_bad = self._gpu_unusable
+        load_started = time.monotonic()
         cache_key, device = self._ensure_model(
             WhisperModel, model_name, model_to_load, use_gpu, cancel_event
         )
+        load_seconds = round(time.monotonic() - load_started, 1)
         if cancel_event is not None and cancel_event.is_set():
             raise TranscriptionCancelledError()
 
-        model = self._models[cache_key]
-        raw_segments, info = model.transcribe(
-            str(media_path),
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            repetition_penalty=1.1,
-            no_repeat_ngram_size=3,
-            hallucination_silence_threshold=2.0,
-            initial_prompt=initial_prompt,
-            word_timestamps=False,
-        )
+        fallback_note: str | None = None
+        if use_gpu and not gpu_known_bad and device == "cpu":
+            # 构造阶段就退回 CPU：这台机器的 GPU 用不了，本进程已经记下了
+            fallback_note = GPU_UNAVAILABLE_NOTE
+        transcribe_started = time.monotonic()
+        try:
+            raw_segments, info = self._run_model(
+                self._models[cache_key], media_path, initial_prompt
+            )
+        except Exception as error:
+            if device != "cuda":
+                raise
+            # 驱动在、但缺 cuBLAS/cuDNN 运行库的机器上，模型能在 cuda 上构造成功，
+            # 一到真正计算才抛 "Library cublas64_12.dll is not found"。这类错误不在
+            # 构造阶段，这里不兜住就是整个任务失败，而且坏模型会留在缓存里反复撞。
+            with self._model_lock:
+                self._models.pop(cache_key, None)
+                self._actual_models.pop(cache_key, None)
+                self._gpu_unusable = True
+            fallback_note = (
+                f"GPU 转写不可用（{error}）：已改用 CPU，本机后续任务不再尝试 GPU。"
+                "要用 GPU 请补装 CUDA 12 运行库（cuBLAS/cuDNN）后重启程序。"
+            )
+            cache_key, device = self._ensure_model(
+                WhisperModel, model_name, model_to_load, False, cancel_event
+            )
+            raw_segments, info = self._run_model(
+                self._models[cache_key], media_path, initial_prompt
+            )
         # 惰性生成器逐段消费：每取一段前检查取消事件，用户取消时在段与段
         # 之间停下，而不是等整段音频转写完。单段 C 层解码中途无法打断。
         segments: list[TranscriptSegment] = []
@@ -134,7 +162,25 @@ class WhisperTranscriber:
             "requested_model": model_name,
             "duration": float(info.duration or 0),
             "duration_after_vad": float(info.duration_after_vad or 0),
+            "fallback_note": fallback_note,
+            "model_load_seconds": load_seconds,
+            "transcribe_seconds": round(time.monotonic() - transcribe_started, 1),
         }
+
+    @staticmethod
+    def _run_model(model: Any, media_path: Path, initial_prompt: str | None):
+        """一次转写调用。参数集中在这里，GPU 降级重试时不会和首次跑偏。"""
+        return model.transcribe(
+            str(media_path),
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            repetition_penalty=1.1,
+            no_repeat_ngram_size=3,
+            hallucination_silence_threshold=2.0,
+            initial_prompt=initial_prompt,
+            word_timestamps=False,
+        )
 
     def _ensure_model(
         self,
@@ -145,6 +191,7 @@ class WhisperTranscriber:
         cancel_event: threading.Event | None = None,
     ) -> tuple[tuple[str, str], str]:
         """Load each shared model once, including first-download and GPU fallback."""
+        use_gpu = use_gpu and not self._gpu_unusable
         device = "cuda" if use_gpu else "cpu"
         compute_type = "float16" if use_gpu else "int8"
         cache_key = (model_name, device)
@@ -162,6 +209,8 @@ class WhisperTranscriber:
                         model_class, cache_key, model_name, device, gpu_error, cancel_event
                     )
                 else:
+                    # 记下来：本进程后续任务直接走 CPU，不再重付一次注定失败的 cuda 初始化
+                    self._gpu_unusable = True
                     device = "cpu"
                     cache_key = (model_name, device)
                     if cache_key not in self._models:

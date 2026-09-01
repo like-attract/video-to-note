@@ -1226,6 +1226,19 @@ def _format_page_nums(pages) -> str:
     return "、".join(str(num) for num in nums)
 
 
+def append_asr_notes(task: dict[str, Any], whisper_result: dict[str, Any]) -> None:
+    """转写阶段的降级说明与耗时入日志（单文件与 B 站多分 P 共用）。"""
+    note = whisper_result.get("fallback_note")
+    if note and note not in task["logs"]:
+        task["logs"].append(note)
+    load_seconds = float(whisper_result.get("model_load_seconds") or 0)
+    if load_seconds >= 1:
+        task["logs"].append(
+            f"Whisper 模型加载用时 {load_seconds} 秒，转写用时 "
+            f"{whisper_result.get('transcribe_seconds')} 秒"
+        )
+
+
 async def run_queued_video_task(task_id: str, request: SummarizeRequest) -> None:
     task = tasks[task_id]
     task.update(status="queued", step_name="等待执行", progress=0)
@@ -1433,6 +1446,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         f"分 P {page.page} 语音转写完成：{len(whisper_result['segments'])} 段，"
                         f"设备 {whisper_result['device']}"
                     )
+                    append_asr_notes(task, whisper_result)
                     if whisper_result["model"] != whisper_result["requested_model"]:
                         task["logs"].append(
                             f"所选 Whisper {whisper_result['requested_model']} 未缓存或无法加载，"
@@ -1512,6 +1526,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 task["logs"].append(
                     f"语音转写完成：{len(whisper_result['segments'])} 段，设备 {whisper_result['device']}"
                 )
+                append_asr_notes(task, whisper_result)
                 if whisper_result["model"] != whisper_result["requested_model"]:
                     task["logs"].append(
                         f"所选 Whisper {whisper_result['requested_model']} 未缓存或无法加载，"

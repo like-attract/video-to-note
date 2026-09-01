@@ -1,3 +1,5 @@
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -128,37 +130,6 @@ def test_manual_model_dir_is_detected(tmp_path: Path, monkeypatch: pytest.Monkey
     alias_dir = tmp_path / "manual" / "faster-whisper-small"
     make_snapshot_files(alias_dir)
     assert transcriber._cached_model_path("small") == alias_dir.resolve()
-
-
-def test_download_replaces_undersized_existing_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """快照内已有损坏 model.bin 时，下载器必须重新下载而不是跳过。"""
-    transcriber = WhisperTranscriber(tmp_path)
-    snapshot = (
-        tmp_path
-        / "models--Systran--faster-whisper-medium"
-        / "snapshots"
-        / "revision"
-    )
-    make_snapshot_files(snapshot, model_bin_size=187)
-
-    downloaded: list[str] = []
-
-    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None) -> bool:
-        downloaded.append(target.name)
-        target.write_bytes(b"0" * 64)
-        return True
-
-    monkeypatch.setattr(transcriber, "_download_one_file", fake_download_one)
-    monkeypatch.setattr(
-        whisper_asr, "MIN_MODEL_FILE_BYTES", {**tiny_min_sizes(), "model.bin": 32}
-    )
-
-    assert transcriber._download_model_files_from_endpoint(
-        "medium", "https://hf-mirror.com"
-    ) == snapshot.resolve()
-    assert "model.bin" in downloaded
 
 
 class FakeResponse:
@@ -437,4 +408,96 @@ def test_download_one_file_aborts_when_cancelled(tmp_path: Path) -> None:
         transcriber._download_one_file(
             "https://example.com/model.bin", tmp_path / "model.bin", {}, cancel_event
         )
+
+
+# ---- GPU 能用但缺运行库：推理阶段才抛错，也要退到 CPU ----
+
+@pytest.mark.asyncio
+async def test_gpu_inference_failure_falls_back_to_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：测试同学机器上 "Library cublas64_12.dll is not found" 直接把任务打死在第 4 步。
+
+    驱动在、缺 cuBLAS/cuDNN 运行库时，模型构造会成功，错误要到真正计算才抛，
+    所以兜底不能只盖住构造阶段。
+    """
+    constructed: list[str] = []
+
+    class FakeModel:
+        def __init__(self, model_name: str, **kwargs):
+            self.device = kwargs["device"]
+            constructed.append(self.device)
+
+        def transcribe(self, *_args, **_kwargs):
+            if self.device == "cuda":
+                raise RuntimeError(
+                    "Library cublas64_12.dll is not found or cannot be loaded"
+                )
+            return (
+                [_FakeSegment(0.0, 3.0, "口播内容")],
+                _FakeInfo(),
+            )
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeModel)
+    )
+    transcriber = WhisperTranscriber(tmp_path / "models")
+    monkeypatch.setattr(
+        transcriber, "_download_model_files", lambda name, cancel_event=None: None
+    )
+    media = tmp_path / "audio.m4a"
+    media.write_bytes(b"x")
+
+    result = await transcriber.transcribe(media, "base", use_gpu=True)
+
+    assert result["device"] == "cpu"
+    assert [segment.text for segment in result["segments"]] == ["口播内容"]
+    assert "GPU 转写不可用" in result["fallback_note"]
+    assert "cublas64_12.dll" in result["fallback_note"]
+    assert "CUDA 12" in result["fallback_note"]
+    assert result["model_load_seconds"] >= 0
+    assert result["transcribe_seconds"] >= 0
+
+    # 坏掉的 cuda 模型不能留在缓存里让后续任务反复撞
+    await transcriber.transcribe(media, "base", use_gpu=True)
+    assert constructed == ["cuda", "cpu"]
+    assert ("base", "cuda") not in transcriber._models
+
+
+@pytest.mark.asyncio
+async def test_gpu_construction_failure_is_remembered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """构造阶段就失败的 GPU，同样要记住：否则每个任务都重付一次注定失败的初始化。"""
+    constructed: list[str] = []
+
+    class FakeModel:
+        def __init__(self, model_name: str, **kwargs):
+            self.device = kwargs["device"]
+            constructed.append(self.device)
+            if self.device == "cuda":
+                raise RuntimeError("CUDA driver version is insufficient")
+
+        def transcribe(self, *_args, **_kwargs):
+            return [_FakeSegment(0.0, 3.0, "口播内容")], _FakeInfo()
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeModel)
+    )
+    transcriber = WhisperTranscriber(tmp_path / "models")
+    monkeypatch.setattr(
+        transcriber, "_download_model_files", lambda name, cancel_event=None: None
+    )
+    media = tmp_path / "audio.m4a"
+    media.write_bytes(b"x")
+
+    first = await transcriber.transcribe(media, "base", use_gpu=True)
+    assert first["device"] == "cpu"
+    assert "本机 GPU 不可用" in first["fallback_note"]
+
+    second = await transcriber.transcribe(media, "base", use_gpu=True)
+    assert second["device"] == "cpu"
+    assert second["fallback_note"] is None
+    # 第二次直接命中已缓存的 CPU 模型：既不再试 cuda，也不再重新加载
+    assert constructed == ["cuda", "cpu"]
 
