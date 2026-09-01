@@ -455,6 +455,7 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .recent-task-status.processing, .recent-task-status.queued, .recent-task-status.cancelling { color: var(--blue); }
 .recent-task-status.failed { color: var(--red); }
 .recent-task-status.cancelled { color: var(--text-muted); }
+.recent-task-status.uploaded, .recent-task-status.pending { color: var(--text-muted); }
 
 .progress-summary { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .progress-summary strong { min-width: 42px; text-align: right; font: 700 14px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }

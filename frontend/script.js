@@ -112,6 +112,10 @@ const LEGACY_PROVIDER_MAP = {
 };
 
 let currentTaskId = null;
+// 上传上限以本机后端 /api/health 下发为准；后端未就绪时按这个回退（与后端默认值一致）
+const DEFAULT_MAX_UPLOAD_MB = 2048;
+let maxUploadBytes = DEFAULT_MAX_UPLOAD_MB * 1024 * 1024;
+let maxUploadLabel = `${DEFAULT_MAX_UPLOAD_MB / 1024} GB`;
 let currentMarkdown = '';
 let currentHtml = '';
 let pollTimer = null;
@@ -153,8 +157,20 @@ async function loadAppVersion() {
         const response = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
         const data = await readResponse(response, '读取版本失败');
         if (data.version) byId('appVersion').textContent = `v${data.version}`;
+        applyUploadLimit(data.max_upload_mb);
     } catch {
         // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
+        applyUploadLimit(null);
+    }
+}
+
+function applyUploadLimit(maxUploadMb) {
+    const mb = Number(maxUploadMb) > 0 ? Math.floor(Number(maxUploadMb)) : DEFAULT_MAX_UPLOAD_MB;
+    maxUploadBytes = mb * 1024 * 1024;
+    maxUploadLabel = mb >= 1024 && mb % 1024 === 0 ? `${mb / 1024} GB` : `${mb} MB`;
+    const fileInfo = byId('fileInfo');
+    if (fileInfo) {
+        fileInfo.textContent = `支持 B 站/抖音等视频链接与最大 ${maxUploadLabel} 的本地视频`;
     }
 }
 
@@ -241,6 +257,9 @@ const TASK_STATUS_LABELS = {
     cancelled: '已取消'
 };
 
+// 已结束 + 尚未开始处理的任务可以直接删；运行中的任务（queued/processing）只能先取消
+const DELETABLE_TASK_STATUSES = ['failed', 'cancelled', 'uploaded', 'pending'];
+
 async function loadRecentTasks(silent = false) {
     const refreshButton = byId('refreshRecentTasksBtn');
     refreshButton.disabled = true;
@@ -283,12 +302,14 @@ function renderRecentTasks(tasks) {
         text.append(title, meta);
         button.append(text, status);
         row.append(button);
-        if (['failed', 'cancelled'].includes(task.status)) {
+        // 排队中/处理中只能取消（后端拒绝删除运行中的任务）；未开始的任务可以直接删掉，
+        // 否则上传后放弃的孤儿任务会永久占着最近任务列表
+        if (DELETABLE_TASK_STATUSES.includes(task.status)) {
             const deleteButton = document.createElement('button');
             deleteButton.type = 'button';
             deleteButton.className = 'recent-task-delete';
             deleteButton.dataset.deleteTaskId = task.task_id;
-            const statusLabel = task.status === 'cancelled' ? '已取消任务' : '失败任务';
+            const statusLabel = `${TASK_STATUS_LABELS[task.status] || ''}任务`;
             deleteButton.title = `删除${statusLabel}`;
             deleteButton.setAttribute('aria-label', `删除${statusLabel}：${task.title || '未命名任务'}`);
             deleteButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg>';
@@ -1540,13 +1561,13 @@ async function startSummary(options = {}) {
     setSubmitting(true, request.sourceType === 'local' ? '正在上传' : '正在提交');
 
     try {
-        let videoUrl = request.videoUrl;
+        const videoUrl = request.videoUrl;
         let uploadTaskId = null;
 
         if (request.sourceType === 'local' && !resumeTaskId) {
             addLog('正在上传本地视频');
             const uploadResult = await uploadLocalFile(request.file, byId('includeScreenshots').checked);
-            videoUrl = uploadResult.file_path;
+            // 文件位置由 upload_task_id 的任务记录携带；video_url 只放网络链接
             uploadTaskId = uploadResult.task_id;
             addLog(`上传完成：${uploadResult.filename || request.file.name}`, 'success');
         }
@@ -1593,7 +1614,7 @@ function validateAndBuildRequestBase(resumeTaskId = null) {
         const file = byId('localFile').files[0];
         if (resumeTaskId) return { sourceType, file: null, videoUrl: '', modelConfig };
         if (!file) return validationError('请选择本地视频文件');
-        if (file.size > 500 * 1024 * 1024) return validationError('文件不能超过 500 MB');
+        if (file.size > maxUploadBytes) return validationError(`文件不能超过 ${maxUploadLabel}`);
         return { sourceType, file, videoUrl: '', modelConfig };
     }
 
