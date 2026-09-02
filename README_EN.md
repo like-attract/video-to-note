@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.3.0</h1>
+<h1 align="center">VideoToNo v1.3.5</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -18,18 +18,20 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.2.3 → v1.3.0)
+## 🆕 What's New (v1.3.0 → v1.3.5)
 
-- **API keys can now be saved on this machine**: stored per **endpoint address**, encrypted with the system DPAPI on Windows (other platforms keep them in plaintext and say so in the UI). A saved key is only reused when the request targets the same address, **so a key for gateway A can never reach gateway B**; until you press save it lives in the page's memory only. A key-state chip next to the input shows "saved locally sk-x**** (profile)" / "not saved" / "cannot decrypt"
-- **Model profiles**: every built-in provider remembers its own selected model, and custom endpoints can be saved as multiple named profiles (name + address + model). Non-sensitive settings now autosave on change; the "Save preferences" button is gone (only "Restore defaults" remains, and it never clears locally saved keys)
-- **Bilibili credentials are no longer plaintext either**: SESSDATA / bili_jct saved via `save_bilibili_credentials` go through the same local encryption. When they cannot be decrypted after moving machines or Windows accounts, the task now fails with "cannot decrypt the locally saved Bilibili credentials" instead of silently downgrading to anonymous requests
-- **Cancellation is immediate in every stage**: cancelling during "reading video info" or "looking for captions" used to take ten-plus seconds and then mis-report the task as "failed: timed out"; now any stage reaches *Cancelled* at once, including tasks still waiting in the queue (measured 18.6s → 0.02s)
-- **Fixed model IDs bleeding across profiles** (a model from profile A appearing in profile B's input); "Test connection" no longer applies a saved key to another address given by the caller; early failures (reading credentials, fetching video info) now reach a terminal state instead of leaving the task stuck in `processing`
-- **MCP and Agent Skill**: new read-only `list_llm_keys` tool; `save_llm_config` accepts `label`; `get_saved_config` gains `endpoints` / `key_storage` (existing fields unchanged); the Skill script may omit `--api-key` when exactly one address has a key saved locally, and failures name the endpoint
+- **Transcripts without an API key**: the interface has a new output type, **Transcript only**. Note style and reasoning settings collapse, the task reads platform captions or runs local Whisper, and **no LLM is called anywhere — so this machine needs no key at all**. The timestamped transcript is kept in *Recent tasks* (tagged *Transcript*) so you can reopen, copy, or download it later, and you can still switch that task to the note route without re-running the transcription
+- **Once an agent is connected, the organising is up to you**: the same transcript exit is open to agents (MCP `transcribe_video` + `get_transcript`, Skill `--transcript-only`). After it has the timestamped text, loose follow-up instructions all work — "go deep on section X", "merge the repetition and fill the gaps", "add background the video skipped" — the structure is never dictated by this app
+- **Transcripts of past tasks can be taken directly**: availability is decided by the transcript file, not by task status — **tasks whose note generation failed still yield their transcript**, with no re-download and no re-transcription
+- **Local videos no longer fail on first run**: the page used to submit the backend's own `input.mp4` path as if it were a link, which was rejected as an unrecognised URL, so the first attempt always failed and only "retry" worked (present since v1.2.1, not a regression from this batch). Submissions now carry the upload task id; no duplicate `input` task is created, and history and note titles use your original file name
+- **The 2 GB upload limit is really in place**: the backend allowed 2048 MB while the page still checked 500 MB; the limit now comes from `/api/health`, so the picker and the copy follow the server and `MAX_UPLOAD_MB` in `.env` moves both
+- **GPU transcription falls back to CPU instead of failing**: on machines with a working driver but missing cuBLAS/cuDNN (`Library cublas64_12.dll is not found`), transcription no longer dies at stage 4 — it continues on CPU and records the reason plus how to fix it in the run log, and later tasks in the same process skip the doomed GPU init
+- **"Pending" tasks can finally be deleted**: tasks uploaded but never started had no delete control and came back after a restart, permanently crowding the 20 most recent tasks
 
 <details>
-<summary>Previous releases (v1.2.3 and earlier)</summary>
+<summary>Previous releases (v1.3.0 and earlier)</summary>
 
+- **v1.3.0**: API keys and Bilibili credentials can be **saved to this machine per endpoint address** (DPAPI-encrypted on Windows, reused only when the target address matches, with a key-state chip beside the input); model profiles each remember their own model and custom endpoints become named profiles with autosave; cancellation now reaches *Cancelled* instantly in every stage (measured 18.6s → 0.02s); fixed model IDs bleeding across profiles and early failures leaving tasks in `processing`; MCP gained `list_llm_keys`, `save_llm_config` labels, and `endpoints` / `key_storage` in `get_saved_config`.
 - **v1.2.3**: Bilibili notes survive risk control (automatic fallback to `api.bilibili.com` open endpoints for metadata, audio and preview streams across multi-part videos, Issue #1), three guardrails against the "Faithful" style hanging in generation, generation progress heartbeat, reasoning effort adapting to the note style, and automatic degradation when a channel rejects a thinking parameter
 - **v1.2.2**: Agent Skill integration (`skills/video-to-note/`, one-sentence note generation), Windows tray notifications for task results, rewritten repo and docs positioning
 - **v1.2.1**: immediate cancellation across all stages (LLM streaming/download hooks/model download per-chunk), upload limit 2 GB + auto audio extraction for large videos, Whisper base model bundle
@@ -59,12 +61,12 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.3.0-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.3.5-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
-3. Enter a provider, model, and API key, then paste a video URL or upload a local file;
-4. Generate and review your note.
+3. Paste a video URL or upload a local file — for a finished note, enter a provider, model, and API key first; **for a timestamped transcript only, choose "Transcript only" and enter nothing**;
+4. Generate and review the note or the transcript.
 
 The portable build starts the local service and stays in the system tray. The first Whisper transcription downloads a model, so keep the network available. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
 
@@ -104,10 +106,11 @@ LLM-generated timestamped Markdown note
 
 After starting the app:
 
-1. Pick a model profile and enter an API key: DeepSeek / OpenAI / GLM / Qwen / Kimi each remember their own model, and custom OpenAI-compatible endpoints can be saved as several named profiles — switching profiles never overwrites another one's settings;
-2. Choose a note style, reasoning effort, and Whisper model;
-3. Paste a video URL or upload a local file;
-4. Preview, copy, or download the generated note.
+1. Choose the output type: **Note** (needs an API key) or **Transcript only** (a timestamped transcript and nothing else — no LLM is called, **no API key needed**, and the note-style and screenshot settings collapse);
+2. For notes, pick a model profile and enter an API key: DeepSeek / OpenAI / GLM / Qwen / Kimi each remember their own model, and custom OpenAI-compatible endpoints can be saved as several named profiles — switching profiles never overwrites another one's settings;
+3. Choose a note style, reasoning effort, and Whisper model;
+4. Paste a video URL or upload a local file;
+5. Preview, copy, or download the result. A transcript stays in *Recent tasks* (tagged *Transcript*) for later review and download, and "Write notes from this transcript" switches it to the note route without re-running the transcription.
 
 Profiles, recognition settings and the theme are non-sensitive and are remembered automatically in your local browser. An API key stays in the current page only, and is lost on refresh until you press **Save to this machine**; that writes it to `workspace/llm_keys.json`, encrypted with Windows' built-in DPAPI (a copy of the file on another machine or Windows account cannot be decrypted) — other platforms store it in plaintext and the interface says so. **A saved key is bound to its endpoint address**: it is only reused when the target address matches, never sent to another gateway. QR-login Bilibili cookies still live only in the local process unless you explicitly save them; do not share those workspace files.
 
@@ -134,9 +137,20 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 <details>
 <summary>🤖 MCP / AI clients (advanced)</summary>
 
-VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
+VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a timestamped transcript or a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
 
 Pick a route: if your client already has a capable model, use `transcribe_video` + `get_transcript` to take the timestamped transcript only — **no API key for this machine**, and the client decides the note structure and style. Reach for `summarize_video` when a finished note is wanted in one shot (or for a long video best processed in the background).
+
+The recommended pattern is **get the transcript first, let the client do the organising**: this service only supplies the text, so reading order, judgement, and the final structure are up to the model on your side and your follow-up instructions can stay loose:
+
+```text
+Transcribe this video into timestamped text first: https://www.bilibili.com/video/BV1xx
+Then organise it as you see fit: go deep on the XXX part, merge what repeats,
+fill in the skipped derivations, add background where the video was thin,
+and give me something readable at the end.
+```
+
+Re-structuring, digging into a single section, or asking follow-up questions while it writes all work, and none of it needs a key on this machine or applies a fixed note template. Use `summarize_video` when you want a ready-made standard note instead (it needs a key and follows the selected style).
 
 Available tools:
 
@@ -145,7 +159,7 @@ Available tools:
 | `summarize_video` | Submit a video summarization task; URL, API key, model, and Bilibili credentials can be omitted when saved local config is available for that endpoint |
 | `transcribe_video` | Stop at the timestamped transcript: no LLM call anywhere in this route, so no API key is needed |
 | `get_transcript` | Fetch a task's transcript (full markdown or JSON segments); works for historical tasks whose note generation later failed |
-| `wait_for_task` | Wait for a terminal task state for up to 45 seconds per call and return the note when complete; use it instead of aggressive polling |
+| `wait_for_task` | Wait for a terminal task state for up to 45 seconds per call — use it instead of aggressive polling. Note tasks return the finished note; transcript-only tasks return status plus a pointer to `get_transcript` |
 | `get_task_status` | Inspect intermediate task progress |
 | `list_whisper_models` | Show local Whisper model cache status |
 | `save_llm_config` | Save the provider, model, and API key for one endpoint address locally (encrypted on Windows, plaintext with a visible note elsewhere) so calls to that address need no key |
@@ -176,6 +190,12 @@ Afterward, simply ask for what you need:
 ```text
 Summarize this Bilibili video: https://www.bilibili.com/video/BV1xx
 ```
+
+```text
+Just give me a timestamped transcript of this video, I'll write my own notes: https://www.bilibili.com/video/BV1xx
+```
+
+The second phrasing sends the client down `transcribe_video` + `get_transcript`, which needs no API key saved on this machine.
 
 ### Codex CLI
 
@@ -213,7 +233,13 @@ After installing, just ask in one sentence:
 Turn this Bilibili video into notes: https://www.bilibili.com/video/BV1xx
 ```
 
-The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the result. Common options: `--transcript-only` (timestamped transcript only, no LLM call), `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
+```text
+Transcribe this video with timestamps, then organise it as you see fit:
+go deep on XXX, merge what repeats, add background the video skipped,
+and save the result as notes.md: https://www.bilibili.com/video/BV1xx
+```
+
+The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the result. The second phrasing takes the `--transcript-only` route: no API key on this machine, and everything after the transcript — judgement, additions, structure — is the agent's call, so the instruction does not need to be precise. Common options: `--transcript-only` (timestamped transcript only, no LLM call), `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
 
 > **When the agent has its own model, prefer `--transcript-only`**: that route never calls an LLM, so it needs no API key and the agent keeps full control over note structure and style. Only the finished-note route needs an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`. If this machine has a saved key for exactly one endpoint address (web page **Save to this machine** or the MCP `save_llm_config` tool), omit them and that channel is reused.
 
