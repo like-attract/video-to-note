@@ -539,7 +539,12 @@ def read_task_manifest(task_id: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def write_task_manifest(task_id: str, request: SummarizeRequest, reused_task_id: str | None) -> None:
+def write_task_manifest(
+    task_id: str,
+    request: SummarizeRequest,
+    reused_task_id: str | None,
+    origin: str,
+) -> None:
     uploaded_filename = tasks.get(task_id, {}).get("uploaded_filename")
     payload = {
         "task_id": task_id,
@@ -553,6 +558,8 @@ def write_task_manifest(task_id: str, request: SummarizeRequest, reused_task_id:
         "uploaded_filename": uploaded_filename,
         "processing_mode": request.processing_mode,
         "output": request.output,
+        # origin=agent 的纯转录任务不进网页端历史（见 list_recent_tasks）
+        "origin": origin,
         "summary_style": request.summary_style,
         "reasoning_effort": request.reasoning_effort,
         "reused_task_id": reused_task_id,
@@ -576,6 +583,28 @@ def write_upload_manifest(task_id: str, filename: str) -> None:
 
 @app.post("/api/summarize")
 async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
+    return await submit_video_task(request, origin="web")
+
+
+@app.post("/api/transcribe")
+async def start_transcribe(request: TranscribeRequest) -> dict[str, str | None]:
+    """只做「视频 → 带时间轴转录」，全程不调用大模型，本机没有 API Key 也能用。
+
+    给自带模型的 agent 用：拿原料自己组织笔记，不必先给本机配一把 Key。
+    复用同一套任务机制（进度、取消、并发闸门、产物复用），产物停在
+    `transcript.json` / `transcript.md`；正文用 `GET /api/task/{id}/transcript` 取。
+    """
+    return await submit_video_task(
+        SummarizeRequest(
+            **request.model_dump(), output="transcript", llm_config=LLMConfig()
+        ),
+        origin="agent",
+    )
+
+
+async def submit_video_task(
+    request: SummarizeRequest, origin: str
+) -> dict[str, str | None]:
     if request.whisper_model not in WHISPER_MODELS:
         raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
     uploaded_task = None
@@ -623,6 +652,7 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
 
     tasks[task_id]["resume_task_id"] = reused_task_id
     tasks[task_id]["output"] = request.output
+    tasks[task_id]["_origin"] = origin
     if reused_task_id:
         old_task = tasks.get(reused_task_id, {})
         if old_task.get("uploaded_file_path"):
@@ -633,28 +663,13 @@ async def start_summarize(request: SummarizeRequest) -> dict[str, str | None]:
         if old_filename:
             tasks[task_id]["uploaded_filename"] = old_filename
         tasks[task_id]["logs"].append(f"将从任务 {reused_task_id} 复用已有产物")
-    write_task_manifest(task_id, request, reused_task_id)
+    write_task_manifest(task_id, request, reused_task_id, origin)
     persist_task_runtime(task_id)
 
     job = asyncio.create_task(run_queued_video_task(task_id, request))
     running_jobs[task_id] = job
     job.add_done_callback(lambda _job, current_id=task_id: running_jobs.pop(current_id, None))
     return {"task_id": task_id, "reused_task_id": reused_task_id}
-
-
-@app.post("/api/transcribe")
-async def start_transcribe(request: TranscribeRequest) -> dict[str, str | None]:
-    """只做「视频 → 带时间轴转录」，全程不调用大模型，本机没有 API Key 也能用。
-
-    给自带模型的 agent 用：拿原料自己组织笔记，不必先给本机配一把 Key。
-    复用同一套任务机制（进度、取消、并发闸门、产物复用），产物停在
-    `transcript.json` / `transcript.md`；正文用 `GET /api/task/{id}/transcript` 取。
-    """
-    return await start_summarize(
-        SummarizeRequest(
-            **request.model_dump(), output="transcript", llm_config=LLMConfig()
-        )
-    )
 
 
 def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -671,14 +686,16 @@ def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/tasks")
 async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
-    # 纯转录任务不进网页端历史：它没有 result.markdown，而且 agent 批量取原料
-    # 不应该把用户的笔记历史挤出这 20 条（过滤在截断之前）
+    # agent 经 /api/transcribe 提交的纯转录任务不进网页端历史：它没有 result.markdown，
+    # 而且批量取原料不应该把用户的笔记历史挤出这 20 条（过滤在截断之前）。
+    # 网页端自己点的「仅转录」是用户要回看的成品，照常进历史（origin=web）。
+    def is_visible(task: dict[str, Any]) -> bool:
+        if task.get("output") != "transcript":
+            return True
+        return task.get("_origin") == "web"
+
     ordered = sorted(
-        (
-            item
-            for item in tasks.items()
-            if item[1].get("output") != "transcript"
-        ),
+        (item for item in tasks.items() if is_visible(item[1])),
         key=lambda item: str(item[1].get("created_at") or ""),
         reverse=True,
     )[:20]
@@ -692,6 +709,7 @@ async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
                 "status": task.get("status"),
                 "step_name": task.get("step_name"),
                 "progress": task.get("progress", 0),
+                "output": task.get("output") or manifest.get("output") or "note",
                 "title": result.get("title") or manifest.get("title") or manifest.get("uploaded_filename") or "未命名任务",
                 "created_at": task.get("created_at"),
                 "finished_at": task.get("finished_at"),
@@ -1163,9 +1181,12 @@ async def download_summary_markdown(task_id: str) -> FileResponse:
     task_dir = WORKSPACE_DIR / task_id
     output_path = task_dir / "notes.md"
     if not output_path.is_file():
+        # 纯转录任务按设计不产出 notes.md，能下载的就是带时间轴的转录
+        output_path = task_dir / "transcript.md"
+    if not output_path.is_file():
         raise HTTPException(status_code=404, detail="Markdown 笔记不存在")
 
-    title = task["result"].get("title", "video-notes")
+    title = (task.get("result") or {}).get("title", "video-notes")
     safe_name = _safe_filename(title)
     encoded_name = quote(f"{safe_name}.md")
     return FileResponse(
@@ -1959,6 +1980,8 @@ def restore_tasks_from_workspace() -> None:
             finished_at=runtime.get("finished_at"),
             elapsed_seconds=float(runtime.get("elapsed_seconds") or 0),
             output=str(manifest.get("output") or "note"),
+            # 旧版 manifest 没有 origin：按 agent 处理，维持这类任务此前不进历史的表现
+            _origin=str(manifest.get("origin") or "agent"),
         )
         if interrupted:
             task.update(

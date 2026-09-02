@@ -1451,6 +1451,7 @@ def test_transcribe_endpoint_needs_no_llm_config(
     assert queued[0].llm_config.api_key.get_secret_value() == ""
     manifest = json.loads((tmp_path / response.json()["task_id"] / "task.json").read_text("utf-8"))
     assert manifest["output"] == "transcript"
+    assert manifest["origin"] == "agent"
 
 
 @pytest.mark.asyncio
@@ -1506,23 +1507,124 @@ async def test_transcript_only_task_finishes_before_any_llm_use(
     main.tasks.pop(task_id, None)
 
 
-def test_transcript_only_tasks_stay_out_of_the_web_history(monkeypatch) -> None:
+def test_agent_transcript_tasks_stay_out_of_the_web_history(monkeypatch) -> None:
+    """agent 批量取原料不得挤掉用户的笔记历史；网页端自己点的「仅转录」要能回看。"""
     note_task = main.new_task(status="completed", task_id="note-task")
     note_task.update(
         created_at="2026-08-09T12:00:00+00:00",
         result={"title": "笔记任务", "markdown": "# private body"},
     )
-    transcript_task = main.new_task(status="completed", task_id="transcript-task")
-    transcript_task.update(
+    agent_task = main.new_task(status="completed", task_id="agent-transcript")
+    agent_task.update(
         created_at="2026-08-09T13:00:00+00:00",
         output="transcript",
-        result={"title": "转录任务", "output": "transcript"},
+        _origin="agent",
+        result={"title": "agent 取的转录", "output": "transcript"},
     )
-    monkeypatch.setattr(main, "tasks", {"note-task": note_task, "transcript-task": transcript_task})
+    web_task = main.new_task(status="completed", task_id="web-transcript")
+    web_task.update(
+        created_at="2026-08-09T14:00:00+00:00",
+        output="transcript",
+        _origin="web",
+        result={"title": "网页端字幕稿", "output": "transcript"},
+    )
+    monkeypatch.setattr(
+        main,
+        "tasks",
+        {"note-task": note_task, "agent-transcript": agent_task, "web-transcript": web_task},
+    )
 
     items = TestClient(main.app).get("/api/tasks").json()["tasks"]
 
-    assert [item["task_id"] for item in items] == ["note-task"]
+    assert [item["task_id"] for item in items] == ["web-transcript", "note-task"]
+    # 前端靠 output 打「转录」标记，并决定结果是走 result.markdown 还是现取转录
+    assert [item["output"] for item in items] == ["transcript", "note"]
+    assert all("markdown" not in item for item in items)
+
+
+def test_web_transcript_submission_needs_no_key(monkeypatch, tmp_path: Path) -> None:
+    """网页端「仅转录」仍走 /api/summarize：本机没有 Key 也必须收下并记成 web 来源。"""
+    queued: list = []
+
+    async def fake_run(task_id, request):
+        queued.append(request)
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+
+    response = TestClient(main.app).post(
+        "/api/summarize",
+        json={
+            "video_url": "https://www.bilibili.com/video/BV1xx",
+            "output": "transcript",
+            "llm_config": {},
+        },
+    )
+
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+    assert queued[0].output == "transcript"
+    assert main.tasks[task_id]["_origin"] == "web"
+    manifest = json.loads((tmp_path / task_id / "task.json").read_text("utf-8"))
+    assert manifest["origin"] == "web"
+
+
+def test_download_falls_back_to_transcript_without_notes(tmp_path, monkeypatch) -> None:
+    """纯转录任务按设计不产出 notes.md，下载要能拿到 transcript.md。"""
+    write_transcript_artifacts(tmp_path, "transcript-download", "字幕稿正文")
+    task_id = "transcript-download"
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.tasks[task_id] = main.new_task(
+        status="completed",
+        task_id=task_id,
+    )
+    main.tasks[task_id].update(
+        output="transcript",
+        _origin="web",
+        result={"title": "字幕稿", "output": "transcript"},
+    )
+
+    response = TestClient(main.app).get(f"/api/download/{task_id}")
+
+    assert response.status_code == 200
+    assert "字幕稿正文" in response.text
+    main.tasks.pop(task_id, None)
+
+
+def test_restart_keeps_web_transcript_task_in_history(monkeypatch, tmp_path) -> None:
+    """origin 必须落盘：重启后网页端的字幕稿仍要留在「最近任务」里。"""
+    task_id = "restored-web-transcript"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    write_transcript_artifacts(tmp_path, task_id)
+    (task_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "title": "网页端字幕稿",
+                "output": "transcript",
+                "origin": "web",
+                "runtime": {
+                    "status": "completed",
+                    "step": 7,
+                    "step_name": "转录完成",
+                    "result": {"title": "网页端字幕稿", "output": "transcript"},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+
+    main.restore_tasks_from_workspace()
+
+    assert main.tasks[task_id]["_origin"] == "web"
+    items = TestClient(main.app).get("/api/tasks").json()["tasks"]
+    assert [item["task_id"] for item in items] == [task_id]
 
 
 def write_transcript_artifacts(workspace: Path, task_id: str, text: str = "转录内容") -> None:

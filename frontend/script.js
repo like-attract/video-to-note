@@ -124,6 +124,8 @@ let isSubmitting = false;
 let isTaskActive = false;
 let isDownloading = false;
 let isCancelling = false;
+// 结果区当前展示的是字幕稿还是笔记：标题、按钮文案与进度步数都跟着它走
+let isTranscriptTask = false;
 let elapsedTimer = null;
 let elapsedBaseSeconds = 0;
 let elapsedSyncedAt = 0;
@@ -179,7 +181,13 @@ function bindEvents() {
     bindListener('submitBtn', 'click', () => startSummary());
     bindListener('retryBtn', 'click', () => startSummary({ resumeCurrent: true }));
     bindListener('restartBtn', 'click', () => startSummary({ forceRestart: true }));
-    bindListener('regenerateBtn', 'click', () => startSummary({ resumeCurrent: true }));
+    // 字幕稿跑完后这个按钮的含义是"改用大模型出笔记"：先把输出类型切回笔记再提交
+    bindListener('regenerateBtn', 'click', () => startSummary({
+        resumeCurrent: true, outputMode: 'note'
+    }));
+    document.querySelectorAll('input[name="outputMode"]').forEach((input) => {
+        input.addEventListener('change', handleOutputModeChange);
+    });
     bindListener('cancelTaskBtn', 'click', cancelCurrentTask);
     bindListener('downloadMdBtn', 'click', downloadSummary);
     bindListener('copyNoteBtn', 'click', copyFullNote);
@@ -288,7 +296,14 @@ function renderRecentTasks(tasks) {
         button.dataset.taskId = task.task_id;
 
         const title = document.createElement('strong');
-        title.textContent = task.title || '未命名任务';
+        if (task.output === 'transcript') {
+            // 标签放最前：长标题被省略号截断时，仍能看出这是一条字幕稿
+            const kind = document.createElement('span');
+            kind.className = 'recent-task-kind';
+            kind.textContent = '转录';
+            title.append(kind);
+        }
+        title.append(task.title || '未命名任务');
         const meta = document.createElement('span');
         const elapsed = formatElapsedCompact(task.elapsed_seconds);
         const created = formatTaskDate(task.created_at);
@@ -374,11 +389,12 @@ async function openRecentTask(taskId) {
         toggleSourceType();
         updateProgress(task.progress || 0);
         updateStep(task.step || 0);
+        setTranscriptTaskView(task.output === 'transcript');
         renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs)) updateLogs(task.logs);
 
         if (task.status === 'completed') {
-            completeTask(task.result, task.elapsed_seconds);
+            await completeTask(task.result, task.elapsed_seconds);
         } else if (['queued', 'processing', 'cancelling'].includes(task.status)) {
             setTaskActive(true);
             startElapsedTimer(task.elapsed_seconds);
@@ -423,7 +439,8 @@ const GLOBAL_PREF_KEYS = [
     'use_gpu',
     'summary_style',
     'reasoning_effort',
-    'processing_mode'
+    'processing_mode',
+    'output_mode'
 ];
 
 function defaultProvider() {
@@ -445,7 +462,8 @@ function defaultPrefs() {
             use_gpu: false,
             summary_style: 'detailed',
             reasoning_effort: 'auto',
-            processing_mode: 'restart'
+            processing_mode: 'restart',
+            output_mode: 'note'
         },
         ui: { theme: 'system' }
     };
@@ -726,6 +744,12 @@ function applyPreferencesToForm() {
         `input[name="processingMode"][value="${prefs.global.processing_mode}"]`
     );
     if (processingModeInput) processingModeInput.checked = true;
+    // 旧版 HTML 缓存里没有这组单选时，selectedOutputMode() 自然回落到笔记路线
+    const outputModeInput = document.querySelector(
+        `input[name="outputMode"][value="${prefs.global.output_mode}"]`
+    );
+    if (outputModeInput) outputModeInput.checked = true;
+    applyOutputMode();
     toggleScreenshotSettings();
     applyTheme(prefs.ui.theme);
     refreshKeyStatus();
@@ -761,6 +785,8 @@ function persistGlobals() {
     values.reasoning_effort = byId('reasoningEffort').value;
     values.processing_mode = document.querySelector('input[name="processingMode"]:checked')?.value
         || values.processing_mode;
+    values.output_mode = document.querySelector('input[name="outputMode"]:checked')?.value
+        || values.output_mode;
     persistPrefs();
 }
 
@@ -1144,6 +1170,52 @@ function toggleSourceType() {
     updateBiliHint();
 }
 
+// ---- 输出类型：生成笔记 / 仅转录字幕 ----
+// 仅转录仍提交到 /api/summarize + output=transcript，而不是 /api/transcribe：
+// 后者是 agent 取原料的路线，任务不进网页端「最近任务」。
+function selectedOutputMode() {
+    return document.querySelector('input[name="outputMode"]:checked')?.value || 'note';
+}
+
+function isTranscriptMode() {
+    return selectedOutputMode() === 'transcript';
+}
+
+function handleOutputModeChange() {
+    applyOutputMode();
+    persistGlobals();
+}
+
+// 程序化切换输出类型（例如从字幕稿转去生成笔记），保持界面与偏好和单选一致
+function setOutputMode(mode) {
+    const input = document.querySelector(`input[name="outputMode"][value="${mode}"]`);
+    if (!input || input.checked) return;
+    input.checked = true;
+    applyOutputMode();
+    persistGlobals();
+}
+
+function applyOutputMode() {
+    const transcript = isTranscriptMode();
+    // 笔记专用设置整组藏掉（不是灰掉）：这条路上没有大模型调用，也没有第 5 步截图
+    ['summaryStyleField', 'reasoningEffortField', 'includeScreenshotsField', 'screenshotIntervalField']
+        .forEach((id) => {
+            const element = byId(id);
+            if (element) element.hidden = transcript;
+        });
+    const hint = byId('outputModeHint');
+    if (hint) {
+        hint.hidden = !transcript;
+        hint.textContent = transcript
+            ? '仅转录字幕：只读平台字幕或用本地 Whisper 转写，全程不调用大模型、不需要 API Key。'
+                + '产出带时间轴的字幕稿，可直接复制或下载，之后仍能在它基础上生成笔记。'
+            : '';
+    }
+    if (!isSubmitting && !isTaskActive) {
+        setSubmitButton(false, transcript ? '开始转写' : '开始生成');
+    }
+}
+
 let biliHintDebounce = null;
 let biliPromptDismissed = false;
 let douyinLoginTimer = null;
@@ -1505,13 +1577,13 @@ async function startSummary(options = {}) {
         return;
     }
     flushPendingPrefs();   // 本次提交用的设置必须同步落盘，不能留在防抖里
+    if (options.outputMode) setOutputMode(options.outputMode);
 
     const resumeTaskId = options.resumeCurrent ? currentTaskId : null;
     const selectedMode = document.querySelector('input[name="processingMode"]:checked')?.value || 'restart';
     const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
-
     // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）。
     // 以下情况跳过确认：复用转录/续跑（不用 Whisper）、明显走平台字幕的提交
     // （B 站已填凭据、抖音已验证）、已在任意会话确认过该模型下载的用户
@@ -1566,14 +1638,20 @@ async function startSummary(options = {}) {
 
         if (request.sourceType === 'local' && !resumeTaskId) {
             addLog('正在上传本地视频');
-            const uploadResult = await uploadLocalFile(request.file, byId('includeScreenshots').checked);
+            // 仅转录不会走截图阶段，上传时就不必让后端保留视频轨
+            const wantScreenshots = !request.transcriptOnly && byId('includeScreenshots').checked;
+            const uploadResult = await uploadLocalFile(request.file, wantScreenshots);
             // 文件位置由 upload_task_id 的任务记录携带；video_url 只放网络链接
             uploadTaskId = uploadResult.task_id;
             addLog(`上传完成：${uploadResult.filename || request.file.name}`, 'success');
         }
 
-        const config = buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId, forceRestart);
-        addLog(`正在提交总结任务 · ${request.modelConfig.name}`);
+        const config = buildSummarizeConfig(
+            videoUrl, uploadTaskId, resumeTaskId, forceRestart, request.transcriptOnly
+        );
+        addLog(request.transcriptOnly
+            ? '正在提交转写任务（只到字幕稿为止，不调用大模型）'
+            : `正在提交总结任务 · ${request.modelConfig.name}`);
         const response = await fetch(`${API_BASE}/summarize`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1583,6 +1661,7 @@ async function startSummary(options = {}) {
 
         if (!data.task_id) throw new Error('后端未返回任务 ID');
         currentTaskId = data.task_id;
+        setTranscriptTaskView(request.transcriptOnly);
         loadRecentTasks(true);
         if (data.reused_task_id) addLog(`已复用任务 ${data.reused_task_id} 的中间结果`, 'success');
         addLog(`任务已创建：${currentTaskId}`, 'success');
@@ -1600,28 +1679,32 @@ async function startSummary(options = {}) {
 
 function validateAndBuildRequestBase(resumeTaskId = null) {
     const sourceType = byId('sourceType').value;
-    const modelConfig = getSelectedModelConfig();
+    const transcriptOnly = isTranscriptMode();
+    const modelConfig = transcriptOnly ? null : getSelectedModelConfig();
     const apiKey = typedApiKey();
 
-    if (!modelConfig) return validationError('请选择有效的模型档案');
-    if (!modelConfig.model) return validationError('请输入模型 ID');
-    if (!modelConfig.baseUrl) return validationError('请输入 API Base URL');
-    if (!apiKey && !hasReusableKey()) {
-        return validationError(`请输入「${modelConfig.profileLabel}」的 API Key，或点「保存到本机」后复用`);
+    // 仅转录路线不调用大模型：档案与 Key 都不是这条路的必要条件
+    if (!transcriptOnly) {
+        if (!modelConfig) return validationError('请选择有效的模型档案');
+        if (!modelConfig.model) return validationError('请输入模型 ID');
+        if (!modelConfig.baseUrl) return validationError('请输入 API Base URL');
+        if (!apiKey && !hasReusableKey()) {
+            return validationError(`请输入「${modelConfig.profileLabel}」的 API Key，或点「保存到本机」后复用`);
+        }
     }
 
     if (sourceType === 'local') {
         const file = byId('localFile').files[0];
-        if (resumeTaskId) return { sourceType, file: null, videoUrl: '', modelConfig };
+        if (resumeTaskId) return { sourceType, file: null, videoUrl: '', modelConfig, transcriptOnly };
         if (!file) return validationError('请选择本地视频文件');
         if (file.size > maxUploadBytes) return validationError(`文件不能超过 ${maxUploadLabel}`);
-        return { sourceType, file, videoUrl: '', modelConfig };
+        return { sourceType, file, videoUrl: '', modelConfig, transcriptOnly };
     }
 
     const videoUrl = normalizeVideoInput(byId('videoUrl').value);
     if (!videoUrl) return validationError('请输入有效链接，或包含 B 站链接 / BV 号的分享文本');
     byId('videoUrl').value = videoUrl;
-    return { sourceType, file: null, videoUrl, modelConfig };
+    return { sourceType, file: null, videoUrl, modelConfig, transcriptOnly };
 }
 
 // 宽松识别：完整 http(s) 链接原样返回；否则从分享文本提取 B 站/抖音链接（可缺省 scheme），
@@ -1650,29 +1733,39 @@ function validationError(message) {
     return null;
 }
 
-function buildSummarizeConfig(videoUrl, uploadTaskId, resumeTaskId = null, forceRestart = false) {
-    const modelConfig = getSelectedModelConfig();
-    const typedKey = typedApiKey();
-    const llmConfig = {
-        model_type: modelConfig.provider,
-        base_url: modelConfig.baseUrl,
-        model: modelConfig.model
-    };
-    if (typedKey) llmConfig.api_key = typedKey;
-
+function buildSummarizeConfig(
+    videoUrl, uploadTaskId, resumeTaskId = null, forceRestart = false, transcriptOnly = false
+) {
     const config = {
         video_url: videoUrl,
-        screenshot_interval: normalizeScreenshotInterval(),
         prefer_subtitles: true,
-        include_screenshots: byId('includeScreenshots').checked,
         whisper_model: byId('whisperModel').value,
         use_gpu: byId('useGpu').checked,
-        processing_mode: forceRestart ? 'restart' : 'reuse',
-        summary_style: byId('summaryStyle').value,
-        reasoning_effort: byId('reasoningEffort').value,
-        llm_config: llmConfig
+        processing_mode: forceRestart ? 'restart' : 'reuse'
     };
 
+    if (transcriptOnly) {
+        // 这条路上根本没有大模型调用：llm_config 是后端模型的必填字段，给空对象即可，
+        // 笔记风格、推理强度和截图字段都不下发
+        config.output = 'transcript';
+        config.llm_config = {};
+    } else {
+        const modelConfig = getSelectedModelConfig();
+        const typedKey = typedApiKey();
+        const llmConfig = {
+            model_type: modelConfig.provider,
+            base_url: modelConfig.baseUrl,
+            model: modelConfig.model
+        };
+        if (typedKey) llmConfig.api_key = typedKey;
+        config.screenshot_interval = normalizeScreenshotInterval();
+        config.include_screenshots = byId('includeScreenshots').checked;
+        config.summary_style = byId('summaryStyle').value;
+        config.reasoning_effort = byId('reasoningEffort').value;
+        config.llm_config = llmConfig;
+    }
+
+    // 平台字幕（B 站 AI 字幕 / 抖音）两条路都要靠凭据，与是否调用大模型无关
     const sessdata = byId('sessdata').value.trim();
     if (sessdata) {
         config.bilibili_cookie = {
@@ -1724,7 +1817,7 @@ async function pollTask(taskId) {
         if (Array.isArray(task.logs) && task.logs.length) updateLogs(task.logs);
 
         if (task.status === 'completed') {
-            completeTask(task.result, task.elapsed_seconds);
+            await completeTask(task.result, task.elapsed_seconds);
             return;
         }
         if (task.status === 'failed') {
@@ -1809,6 +1902,7 @@ function resetTaskView() {
     currentTaskId = null;
     currentMarkdown = '';
     currentHtml = '';
+    setTranscriptTaskView(false);
     byId('progressArea').hidden = false;
     byId('resultArea').hidden = true;
     byId('taskError').hidden = true;
@@ -1826,19 +1920,28 @@ function resetTaskView() {
     setTaskState('processing', '准备中');
 }
 
-function completeTask(result, elapsedSeconds = null) {
+// 结果区标题、复制按钮文案与进度步数都跟着"这一条是字幕稿还是笔记"变
+function setTranscriptTaskView(on) {
+    isTranscriptTask = Boolean(on);
+    byId('progressArea').classList.toggle('transcript-mode', isTranscriptTask);
+    byId('resultTitle').textContent = isTranscriptTask ? '字幕稿（带时间轴）' : '视频笔记';
+    byId('copyNoteBtn').textContent = isTranscriptTask ? '复制字幕稿' : '复制笔记';
+    byId('regenerateBtn').textContent = isTranscriptTask ? '基于字幕稿生成笔记' : '基于转录重新生成';
+}
+
+async function completeTask(result, elapsedSeconds = null) {
     stopPolling();
     stopElapsedTimer(elapsedSeconds ?? result?.processing_seconds ?? null);
-    if (!showResult(result)) return;
+    if (!await showResult(result)) return;
     setTaskActive(false);
     updateProgress(100);
     updateStep(7);
     byId('regenerateBtn').disabled = false;
-    setTaskState('completed', '已完成');
+    setTaskState('completed', isTranscriptTask ? '转录完成' : '已完成');
     byId('networkState').textContent = '任务完成';
-    addLog('视频笔记已生成', 'success');
-    setSubmitButton(false, '再次生成');
-    showToast('视频笔记已生成', 'success');
+    addLog(isTranscriptTask ? '带时间轴字幕稿已生成' : '视频笔记已生成', 'success');
+    setSubmitButton(false, isTranscriptTask ? '再次转写' : '再次生成');
+    showToast(isTranscriptTask ? '字幕稿已生成' : '视频笔记已生成', 'success');
     loadRecentTasks(true);
     // 任务期间可能下载/补全了 Whisper 模型，自动纠正下拉框缓存状态，避免下次提交误弹确认
     refreshWhisperModelHints();
@@ -1930,7 +2033,7 @@ function setSourceControlsDisabled(disabled) {
     byId('localFile').disabled = disabled;
     byId('summaryStyle').disabled = disabled;
     byId('reasoningEffort').disabled = disabled;
-    document.querySelectorAll('input[name="processingMode"]').forEach((input) => {
+    document.querySelectorAll('input[name="processingMode"], input[name="outputMode"]').forEach((input) => {
         input.disabled = disabled;
     });
 }
@@ -2004,16 +2107,39 @@ function createLogEntry(message, type = 'info', includeTime = false) {
     return entry;
 }
 
-function showResult(result) {
-    if (!result || typeof result.markdown !== 'string') {
+async function showResult(result) {
+    if (!result || typeof result !== 'object') {
+        failTask('任务完成，但后端未返回可用的结果');
+        return false;
+    }
+    const transcript = result.output === 'transcript';
+    setTranscriptTaskView(transcript);
+
+    let markdown = result.markdown;
+    if (transcript && typeof markdown !== 'string') {
+        // 转录正文刻意不放进 result：它会被每 2 秒一次的轮询反复搬运并落盘，
+        // 所以完成或从历史打开时现读磁盘上的 transcript.md
+        try {
+            markdown = await fetchTranscriptText();
+        } catch (error) {
+            failTask(error.message);
+            return false;
+        }
+    }
+    if (typeof markdown !== 'string') {
         failTask('任务完成，但后端未返回可用的 Markdown 内容');
         return false;
     }
 
-    currentMarkdown = result.markdown;
-    currentHtml = replaceImagePaths(result.markdown);
+    currentMarkdown = markdown;
     const content = byId('markdownContent');
-    content.innerHTML = renderMarkdown(currentHtml);
+    if (transcript) {
+        currentHtml = '';
+        renderTranscript(content, markdown);
+    } else {
+        currentHtml = replaceImagePaths(markdown);
+        content.innerHTML = renderMarkdown(currentHtml);
+    }
     byId('resultArea').hidden = false;
     byId('downloadMdBtn').disabled = false;
     byId('copyNoteBtn').disabled = false;
@@ -2028,6 +2154,52 @@ function showResult(result) {
     byId('archivedPath').textContent = archivedPath;
     byId('archivedNotice').hidden = !archivedPath;
     return true;
+}
+
+async function fetchTranscriptText() {
+    if (!currentTaskId) throw new Error('没有可读取的转录任务');
+    const response = await fetch(
+        `${API_BASE}/task/${encodeURIComponent(currentTaskId)}/transcript?output_format=markdown`,
+        { cache: 'no-store' }
+    );
+    const data = await readResponse(response, '读取字幕稿失败');
+    if (typeof data.text !== 'string') throw new Error('后端未返回转录正文');
+    return data.text;
+}
+
+// 一行一段字幕渲染成一行 DOM：时间轴单独成列，正文用 textContent 注入（不过 marked，
+// 也没有 HTML 拼接），所以不需要再过一遍 DOMPurify。
+function renderTranscript(content, text) {
+    const rows = [];
+    text.split(/\r?\n/).forEach((rawLine) => {
+        const line = rawLine.trim();
+        if (!line) return;
+        const heading = line.match(/^#{1,6}\s+(.*)$/);
+        if (heading) {
+            const node = document.createElement('p');
+            node.className = 'transcript-heading';
+            node.textContent = heading[1];
+            rows.push(node);
+            return;
+        }
+        const timed = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+        if (!timed) {
+            const node = document.createElement('p');
+            node.className = 'transcript-plain';
+            node.textContent = line;
+            rows.push(node);
+            return;
+        }
+        const row = document.createElement('div');
+        row.className = 'transcript-line';
+        const time = document.createElement('time');
+        time.textContent = `[${timed[1]}]`;
+        const body = document.createElement('span');
+        body.textContent = timed[2];
+        row.append(time, body);
+        rows.push(row);
+    });
+    content.replaceChildren(...rows);
 }
 
 function replaceImagePaths(markdown) {

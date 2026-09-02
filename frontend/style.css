@@ -374,6 +374,7 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .mode-control span { min-height: 30px; display: grid; place-items: center; padding: 5px 9px; border-radius: 4px; color: var(--text-muted); font-size: 12px; }
 .mode-control input:checked + span { background: var(--blue-soft); color: var(--blue); }
 .mode-control input:focus-visible + span { outline: 2px solid var(--blue); outline-offset: 1px; }
+.heading-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; flex: none; }
 
 .header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .theme-control {
@@ -417,6 +418,7 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .file-picker > span { display: none; }
 .submit-button { min-width: 124px; }
 .source-meta { display: flex; justify-content: space-between; gap: 16px; margin-top: 11px; color: var(--text-muted); font-size: 11px; }
+.output-mode-hint { margin: 11px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 
 .recent-heading { margin-bottom: 12px; }
 .compact-button { min-height: 32px; padding: 5px 10px; font-size: 12px; }
@@ -449,6 +451,7 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .recent-task-item:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .recent-task-text { min-width: 0; display: grid; gap: 4px; }
 .recent-task-text strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.recent-task-kind { display: inline-block; margin-right: 6px; padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-raised); color: var(--text-muted); font-size: 10px; font-weight: 700; }
 .recent-task-text span { color: var(--text-muted); font-size: 11px; }
 .recent-task-status { min-width: 54px; font-size: 11px; font-style: normal; text-align: right; }
 .recent-task-status.completed { color: var(--green); }
@@ -480,6 +483,10 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .step.active span { border-color: var(--blue); background: var(--blue-soft); }
 .step.completed { color: var(--green); }
 .step.completed span { border-color: var(--green); background: var(--green-soft); }
+/* 仅转录任务没有第 5、6 步（截图、生成笔记），进度条收掉这两格并改成 4 列 */
+.task-panel.transcript-mode .progress-steps { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.task-panel.transcript-mode .progress-steps .step[data-step="5"],
+.task-panel.transcript-mode .progress-steps .step[data-step="6"] { display: none; }
 .task-advisory { margin: -8px 0 20px; padding: 10px 12px; border-left: 3px solid var(--amber); background: var(--amber-soft); color: var(--text-soft); font-size: 12px; line-height: 1.6; }
 
 .error-panel { margin-bottom: 18px; padding: 14px; border: 1px solid rgba(240, 120, 120, 0.35); border-radius: var(--radius); background: var(--red-soft); }
@@ -517,6 +524,13 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .markdown-body table { width: 100%; border-collapse: collapse; }
 .markdown-body th, .markdown-body td { padding: 9px 10px; border: 1px solid var(--border); text-align: left; }
 .markdown-body th { color: var(--text); background: var(--surface-raised); }
+
+/* 字幕稿：transcript.md 一行一段且没有空行，交给 marked 会被并成一大段，所以前端按行渲染 */
+.transcript-line { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 12px; padding: 3px 0; }
+.transcript-line time { color: var(--blue); font: 600 12px/1.75 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+.transcript-heading { margin: 18px 0 6px; color: var(--text); font-size: 15px; font-weight: 700; }
+.transcript-heading:first-child { margin-top: 0; }
+.transcript-plain { padding: 3px 0; }
 
 .clipboard-fallback { position: fixed; left: -10000px; top: 0; }
 .image-export-stage { position: fixed; left: -100000px; top: 0; z-index: -1; width: 900px; background: #ffffff; }
@@ -571,12 +585,16 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
     .workspace-header { flex-direction: column; }
     .source-panel, .recent-panel, .task-panel, .result-panel { padding: 17px; }
     .source-panel > .section-heading { align-items: flex-start; flex-direction: column; }
+    .heading-controls { width: 100%; }
+    .heading-controls .mode-control { flex: 1 1 0; width: auto; min-width: 0; }
     .mode-control { width: 100%; }
     .mode-control label { min-width: 0; }
     .source-controls { grid-template-columns: 1fr; }
     .submit-button { width: 100%; }
     .source-meta { flex-direction: column; gap: 5px; }
     .progress-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .task-panel.transcript-mode .progress-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .transcript-line { grid-template-columns: 92px minmax(0, 1fr); gap: 8px; }
     .result-heading { align-items: flex-start; flex-direction: column; }
     .result-actions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .result-actions #regenerateBtn { width: 100%; grid-column: 1 / -1; }

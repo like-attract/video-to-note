@@ -38,7 +38,7 @@
                 <span>手动模型 ID</span>
                 <input type="text" id="customModelName" placeholder="provider-model-id">
             </label>
-            <label class="field">
+            <label class="field" id="summaryStyleField">
                 <span>笔记风格</span>
                 <select id="summaryStyle">
                     <option value="detailed" selected>详细笔记 + 点评分析</option>
@@ -46,7 +46,7 @@
                     <option value="concise">精简摘要</option>
                 </select>
             </label>
-            <label class="field">
+            <label class="field" id="reasoningEffortField">
                 <span>推理强度</span>
                 <select id="reasoningEffort">
                     <option value="auto" selected>模型默认（推荐）</option>
@@ -112,7 +112,7 @@
                 <input type="checkbox" id="useGpu">
                 <span>启用 NVIDIA GPU 加速</span>
             </label>
-            <label class="check-field">
+            <label class="check-field" id="includeScreenshotsField">
                 <input type="checkbox" id="includeScreenshots">
                 <span>附带定时截图（会额外下载低清视频）</span>
             </label>
@@ -182,17 +182,30 @@
                     <span class="section-kicker">输入</span>
                     <h3 id="sourceTitle">选择视频来源</h3>
                 </div>
-                <fieldset class="mode-control">
-                    <legend class="sr-only">处理方式</legend>
-                    <label>
-                        <input type="radio" name="processingMode" value="reuse">
-                        <span>复用转录</span>
-                    </label>
-                    <label>
-                        <input type="radio" name="processingMode" value="restart" checked>
-                        <span>从头处理</span>
-                    </label>
-                </fieldset>
+                <div class="heading-controls">
+                    <fieldset class="mode-control">
+                        <legend class="sr-only">输出类型</legend>
+                        <label>
+                            <input type="radio" name="outputMode" value="note" checked>
+                            <span>生成笔记</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="outputMode" value="transcript">
+                            <span>仅转录字幕</span>
+                        </label>
+                    </fieldset>
+                    <fieldset class="mode-control">
+                        <legend class="sr-only">处理方式</legend>
+                        <label>
+                            <input type="radio" name="processingMode" value="reuse">
+                            <span>复用转录</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="processingMode" value="restart" checked>
+                            <span>从头处理</span>
+                        </label>
+                    </fieldset>
+                </div>
             </div>
 
             <div class="source-controls">
@@ -216,6 +229,7 @@
                     <span class="btn-text">开始生成</span>
                 </button>
             </div>
+            <p id="outputModeHint" class="output-mode-hint" hidden></p>
             <div id="biliHint" class="bili-hint" hidden>
                 <div class="bili-hint-text">
                     <strong id="biliHintTitle">检测到 B 站链接</strong>
@@ -331,6 +345,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260901-1"></script>
+<script src="script.js?v=20260902-1"></script>
 </body>
 </html>
