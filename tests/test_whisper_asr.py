@@ -132,6 +132,55 @@ def test_manual_model_dir_is_detected(tmp_path: Path, monkeypatch: pytest.Monkey
     assert transcriber._cached_model_path("small") == alias_dir.resolve()
 
 
+def test_turbo_and_belle_repos_map_to_ct2_layouts() -> None:
+    """turbo 的官方 CT2 不存在（Systran 仓 404），映射社区仓；CT2 转换仓用 vocabulary.json。"""
+    assert whisper_asr.WHISPER_MODEL_REPOS["turbo"] == "deepdml/faster-whisper-large-v3-turbo-ct2"
+    assert whisper_asr.WHISPER_MODEL_REPOS["belle-turbo-zh"] == (
+        "wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8"
+    )
+    # 未知模型名回落 Systran 命名约定
+    assert WhisperTranscriber._model_repo("base") == "Systran/faster-whisper-base"
+    assert WhisperTranscriber._model_repo("custom") == "Systran/faster-whisper-custom"
+
+    for name in ("turbo", "belle-turbo-zh"):
+        required = WhisperTranscriber._required_files(name)
+        assert "vocabulary.json" in required
+        assert "vocabulary.txt" not in required
+        # faster-whisper 靠 preprocessor_config.json 读 feature_size（128 mel）
+        assert "preprocessor_config.json" in required
+    assert "vocabulary.txt" in WhisperTranscriber._required_files("base")
+
+
+def test_belle_turbo_zh_snapshot_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """belle-turbo-zh 缓存目录按泛化命名（models--{org}--{repo}）+ vocabulary.json 识别。"""
+    monkeypatch.setattr(whisper_asr, "MIN_MODEL_FILE_BYTES", tiny_min_sizes())
+    snapshot = (
+        tmp_path
+        / "models--wolfofbackstreet--faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8"
+        / "snapshots"
+        / "revision"
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    (snapshot / "model.bin").write_bytes(b"0" * 64)
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (snapshot / "vocabulary.json").write_text("{}", encoding="utf-8")
+    (snapshot / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+
+    transcriber = WhisperTranscriber(tmp_path)
+    assert transcriber._cached_model_path("belle-turbo-zh") == snapshot.resolve()
+    assert transcriber._model_cache_status("belle-turbo-zh") == "cached"
+
+    # 缺 vocabulary.json / preprocessor_config.json 时是 incomplete 而不是 cached
+    (snapshot / "vocabulary.json").unlink()
+    assert transcriber._model_cache_status("belle-turbo-zh") == "incomplete"
+    (snapshot / "vocabulary.json").write_text("{}", encoding="utf-8")
+    (snapshot / "preprocessor_config.json").unlink()
+    assert transcriber._model_cache_status("belle-turbo-zh") == "incomplete"
+
+
 class FakeResponse:
     def __init__(self, status: int = 200, body: bytes = b"", headers: dict | None = None) -> None:
         self.status = status
@@ -193,8 +242,8 @@ def test_download_one_file_rejects_truncated_body(
     def fake_urlopen(request, timeout):  # noqa: ANN001
         return FakeResponse(200, body, {"Content-Length": "1000"})
 
-    monkeypatch.setattr("backend.whisper_asr.urllib.request.urlopen", fake_urlopen)
-    monkeypatch.setattr(whisper_asr.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("backend.download.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backend.download.time.sleep", lambda _seconds: None)
     transcriber = WhisperTranscriber(tmp_path)
     target = tmp_path / "model.bin"
 
@@ -211,7 +260,7 @@ def test_download_one_file_accepts_complete_body(
     def fake_urlopen(request, timeout):  # noqa: ANN001
         return FakeResponse(200, body, {"Content-Length": "1000"})
 
-    monkeypatch.setattr("backend.whisper_asr.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backend.download.urllib.request.urlopen", fake_urlopen)
     transcriber = WhisperTranscriber(tmp_path)
     target = tmp_path / "model.bin"
 
@@ -306,6 +355,20 @@ def test_load_model_does_not_repeat_hub_download_after_custom_failure(
 
 
 # ---- 转写取消：段粒度协作式中止 ----
+
+def test_run_model_beam_size_depends_on_device() -> None:
+    """CPU 转写用 beam=1（速度优先），GPU 保持 beam=5。"""
+    calls: list[dict] = []
+
+    class FakeModel:
+        def transcribe(self, _media_path: str, **kwargs):
+            calls.append(kwargs)
+
+    WhisperTranscriber._run_model(FakeModel(), Path("a.mp3"), None, "cpu")
+    WhisperTranscriber._run_model(FakeModel(), Path("a.mp3"), None, "cuda")
+
+    assert [call["beam_size"] for call in calls] == [1, 5]
+
 
 class _FakeSegment:
     def __init__(self, start: float, end: float, text: str) -> None:

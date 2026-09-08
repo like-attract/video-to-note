@@ -9,6 +9,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .download import download_to_file
 from .transcript import TranscriptSegment
 
 # 缓存文件完整性的下限校验：历史上中断的下载可能遗留只有几十字节的
@@ -19,6 +20,39 @@ MIN_MODEL_FILE_BYTES = {
     "model.bin": 30 * 1024 * 1024,
     "tokenizer.json": 100 * 1024,
     "vocabulary.txt": 100 * 1024,
+    "vocabulary.json": 100 * 1024,
+    "preprocessor_config.json": 256,
+}
+
+# 模型 id → HF 仓库。Systran 系是官方 CT2 转换；turbo 的"官方 CT2"并不存在
+# （Systran/faster-whisper-turbo 在 HF 上是 404，turbo 档自动下载从未成功过），
+# 映射到社区事实标准 deepdml/faster-whisper-large-v3-turbo-ct2；
+# belle-turbo-zh 是 whisper-turbo 的中文微调（int8，~0.8GB），中文优于 large-v3。
+WHISPER_MODEL_REPOS = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "turbo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+    "belle-turbo-zh": "wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8",
+}
+
+# 必需文件清单按模型区分：Systran 官方仓用 vocabulary.txt，
+# 社区 CT2 转换仓（turbo / belle-turbo-zh）用 vocabulary.json。
+# preprocessor_config.json 必须带上：faster-whisper 靠它读 feature_size
+# 决定 80/128 mel，缺了 turbo 系（128 mel）会直接报 shape 不匹配。
+DEFAULT_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+CT2_MODEL_FILES = (
+    "config.json",
+    "model.bin",
+    "tokenizer.json",
+    "vocabulary.json",
+    "preprocessor_config.json",
+)
+MODEL_REQUIRED_FILES = {
+    "turbo": CT2_MODEL_FILES,
+    "belle-turbo-zh": CT2_MODEL_FILES,
 }
 
 # CTranslate2 加载损坏模型时的典型报错特征（小写匹配）。
@@ -118,7 +152,7 @@ class WhisperTranscriber:
         transcribe_started = time.monotonic()
         try:
             raw_segments, info = self._run_model(
-                self._models[cache_key], media_path, initial_prompt
+                self._models[cache_key], media_path, initial_prompt, device
             )
         except Exception as error:
             if device != "cuda":
@@ -138,7 +172,7 @@ class WhisperTranscriber:
                 WhisperModel, model_name, model_to_load, False, cancel_event
             )
             raw_segments, info = self._run_model(
-                self._models[cache_key], media_path, initial_prompt
+                self._models[cache_key], media_path, initial_prompt, device
             )
         # 惰性生成器逐段消费：每取一段前检查取消事件，用户取消时在段与段
         # 之间停下，而不是等整段音频转写完。单段 C 层解码中途无法打断。
@@ -168,11 +202,12 @@ class WhisperTranscriber:
         }
 
     @staticmethod
-    def _run_model(model: Any, media_path: Path, initial_prompt: str | None):
+    def _run_model(model: Any, media_path: Path, initial_prompt: str | None, device: str):
         """一次转写调用。参数集中在这里，GPU 降级重试时不会和首次跑偏。"""
         return model.transcribe(
             str(media_path),
-            beam_size=5,
+            # CPU 上 beam=5 的时间代价远大于中文收益：CPU 档用 1，GPU 保持 5
+            beam_size=5 if device == "cuda" else 1,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             repetition_penalty=1.1,
@@ -259,7 +294,9 @@ class WhisperTranscriber:
                 and self._looks_like_corrupt_model_error(exc)
                 and self._is_managed_model_dir(Path(cached_path))
             ):
-                self._discard_corrupt_model(Path(cached_path))
+                self._discard_corrupt_model(
+                    Path(cached_path), self._required_files(model_name)
+                )
                 refreshed = (
                     self._download_model_files(model_name, cancel_event)
                     if self.download_root
@@ -269,7 +306,15 @@ class WhisperTranscriber:
                     return model_class(str(refreshed), **options)
             raise
 
-    WHISPER_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+    @staticmethod
+    def _model_repo(model_name: str) -> str:
+        return WHISPER_MODEL_REPOS.get(
+            model_name, f"Systran/faster-whisper-{model_name}"
+        )
+
+    @staticmethod
+    def _required_files(model_name: str) -> tuple[str, ...]:
+        return MODEL_REQUIRED_FILES.get(model_name, DEFAULT_MODEL_FILES)
 
     def _download_model_files(
         self, model_name: str, cancel_event: threading.Event | None = None
@@ -304,7 +349,7 @@ class WhisperTranscriber:
         self, model_name: str, endpoint: str, cancel_event: threading.Event | None = None
     ) -> Path | None:
         """从单个 Hugging Face endpoint 下载完整快照。"""
-        repo = f"Systran/faster-whisper-{model_name}"
+        repo = self._model_repo(model_name)
         base_url = f"{endpoint}/{repo}/resolve/main"
         headers = {"User-Agent": "VideoToNo/1.0", "Accept-Encoding": "identity"}
 
@@ -321,12 +366,13 @@ class WhisperTranscriber:
 
         snapshot = (
             self.download_root
-            / f"models--Systran--faster-whisper-{model_name}"
+            / f"models--{repo.replace('/', '--')}"
             / "snapshots"
             / commit
         )
         snapshot.mkdir(parents=True, exist_ok=True)
-        for filename in self.WHISPER_MODEL_FILES:
+        required_files = self._required_files(model_name)
+        for filename in required_files:
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError("任务已取消")
             target = snapshot / filename
@@ -339,7 +385,7 @@ class WhisperTranscriber:
                 if self._last_download_error:
                     raise self._last_download_error
                 return None
-        if not self._snapshot_complete(snapshot):
+        if not self._snapshot_complete(snapshot, required_files):
             return None
         return snapshot
 
@@ -351,55 +397,10 @@ class WhisperTranscriber:
         cancel_event: threading.Event | None = None,
     ) -> bool:
         """单文件下载：断点续传（Range）+ 重试三次 + Content-Length 完整性校验。"""
-        part = target.with_suffix(target.suffix + ".part")
-        self._last_download_error = None
-        for attempt in range(3):
-            if cancel_event is not None and cancel_event.is_set():
-                raise asyncio.CancelledError("任务已取消")
-            try:
-                resume = part.stat().st_size if part.is_file() else 0
-                request_headers = dict(headers)
-                if resume:
-                    request_headers["Range"] = f"bytes={resume}-"
-                request = urllib.request.Request(url, headers=request_headers)
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    if response.status == 200 and resume:
-                        # 服务端忽略 Range，从头重下
-                        part.unlink(missing_ok=True)
-                        resume = 0
-                    expected_total: int | None = None
-                    content_length = response.headers.get("Content-Length")
-                    if content_length and content_length.isdigit():
-                        expected_total = int(content_length) + resume
-                    mode = "ab" if resume else "wb"
-                    with open(part, mode) as out:
-                        while True:
-                            if cancel_event is not None and cancel_event.is_set():
-                                raise asyncio.CancelledError("任务已取消")
-                            chunk = response.read(256 * 1024)
-                            if not chunk:
-                                break
-                            out.write(chunk)
-                actual_size = part.stat().st_size
-                if actual_size == 0:
-                    part.unlink(missing_ok=True)
-                    return False
-                if expected_total is not None and actual_size != expected_total:
-                    # 连接中断但未抛异常时会得到截断文件：保留 .part 以便断点续传，
-                    # 绝不能把不完整文件改名成正式文件（历史上损坏缓存的来源之一）。
-                    self._last_download_error = RuntimeError(
-                        f"下载不完整：已接收 {actual_size} 字节，预期 {expected_total} 字节"
-                    )
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                if target.exists():
-                    target.unlink()
-                part.rename(target)
-                return True
-            except Exception as exc:
-                self._last_download_error = exc
-                time.sleep(1.5 * (attempt + 1))
-        return False
+        ok, error = download_to_file(url, target, headers, cancel_event)
+        if error is not None:
+            self._last_download_error = error
+        return ok
 
     def _load_cached_base_or_raise(
         self,
@@ -425,7 +426,7 @@ class WhisperTranscriber:
     def _snapshot_dirs(self, model_name: str) -> list[Path]:
         """该模型可能存放文件的所有目录：手动导入目录优先，其次各 revision 快照。"""
         dirs: list[Path] = []
-        repo_name = f"models--Systran--faster-whisper-{model_name}"
+        repo_name = f"models--{self._model_repo(model_name).replace('/', '--')}"
         roots: list[Path] = []
         if self.download_root:
             # 手动导入约定目录：manual/{model}/ 或 manual/faster-whisper-{model}/
@@ -456,8 +457,9 @@ class WhisperTranscriber:
         if direct_path.is_dir():
             return direct_path.resolve()
 
+        required_files = self._required_files(model_name)
         for snapshot in self._snapshot_dirs(model_name):
-            if self._snapshot_complete(snapshot):
+            if self._snapshot_complete(snapshot, required_files):
                 return snapshot.resolve()
         return None
 
@@ -468,14 +470,14 @@ class WhisperTranscriber:
         for snapshot in self._snapshot_dirs(model_name):
             if snapshot.is_dir() and any(
                 (snapshot / filename).is_file()
-                for filename in self.WHISPER_MODEL_FILES
+                for filename in self._required_files(model_name)
             ):
                 return "incomplete"
         return "missing"
 
     @classmethod
-    def _snapshot_complete(cls, snapshot: Path) -> bool:
-        return all(cls._file_complete(snapshot / name) for name in cls.WHISPER_MODEL_FILES)
+    def _snapshot_complete(cls, snapshot: Path, files: tuple[str, ...]) -> bool:
+        return all(cls._file_complete(snapshot / name) for name in files)
 
     @staticmethod
     def _file_complete(path: Path) -> bool:
@@ -506,11 +508,11 @@ class WhisperTranscriber:
         except (ImportError, ValueError):
             return False
 
-    def _discard_corrupt_model(self, snapshot: Path) -> None:
+    def _discard_corrupt_model(self, snapshot: Path, files: tuple[str, ...]) -> None:
         """删除损坏的模型文件（加载报错的 model.bin 及未完成分片、体积异常的小文件）。"""
         (snapshot / "model.bin").unlink(missing_ok=True)
         (snapshot / "model.bin.part").unlink(missing_ok=True)
-        for name in self.WHISPER_MODEL_FILES:
+        for name in files:
             path = snapshot / name
             minimum = MIN_MODEL_FILE_BYTES.get(name, 1)
             if path.is_file() and path.stat().st_size < minimum:
