@@ -1037,6 +1037,53 @@ async def test_rejected_reasoning_effort_falls_back_to_model_default(
 
 
 @pytest.mark.asyncio
+async def test_rejected_reasoning_effort_value_degrades_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只否认取值的 400 也要降级，不能把任务判失败。
+
+    ModelScope 这类兼容网关不认关思考用的 ``none``，报错既没有 ``param`` 字段也不是
+    ``is not supported`` 句式（``'reasoning_effort' must be one of: 'low', ...``）。
+    """
+    import backend.llm_summarizer as module
+
+    monkeypatch.setattr(module, "_REJECTED_REASONING_PARAMS", {})
+    attempts: list[dict] = []
+
+    class RejectValue(Exception):
+        status_code = 400
+
+        def __init__(self, name: str):
+            super().__init__(
+                f"Error code: 400 - {{'error': {{'code': 'invalid_value', 'message': "
+                f"'{name}' must be one of: 'low', 'medium', 'high', 'xhigh', 'max', "
+                f"'param': None}}}}"
+            )
+
+    async def create(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) <= 2:
+            raise RejectValue("reasoning_effort" if len(attempts) == 1 else "reasoning")
+        return _stream_response("摘要")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "deepseek-ai/DeepSeek-V4"
+    summarizer.base_url = "https://api-inference.modelscope.cn/v1"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 800, "off") == "摘要"
+    # flat reasoning_effort=none → 嵌套 reasoning.effort → 两个都被拒后干脆不注入
+    assert len(attempts) == 3
+    assert "reasoning_effort" not in attempts[2]
+    assert "extra_body" not in attempts[2]
+    assert any("不支持关闭深度思考" in warning for warning in summarizer.warnings)
+
+
+@pytest.mark.asyncio
 async def test_reasoning_effort_ladder_flat_then_nested_then_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

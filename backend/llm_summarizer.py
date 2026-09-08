@@ -138,6 +138,14 @@ _UNSUPPORTED_PARAM_RE = re.compile(
     [^"',()]{0,40}?\s+(?:is|are|was|were|seems\s+to\s+be)\s+not\s+supported""",
     re.IGNORECASE | re.VERBOSE,
 )
+# 另一种形状：网关不否认参数名，只否认我们给的取值（ModelScope 对
+# `reasoning_effort: none` 回 "'reasoning_effort' must be one of: 'low', ..."）。
+# 对我们的目的来说这等同于「这个参数在这条通道上不能用」，同样该走降级而不是判失败。
+_REJECTED_VALUE_RE = re.compile(
+    r"""["'`](thinking|reasoning_effort|enable_thinking|reasoning|max_tokens|max_completion_tokens)["'`]
+    [^"']{0,40}?\s+(?:must\s+be\s+one\s+of|must\s+be\b|is\s+invalid|invalid\s+value)""",
+    re.IGNORECASE | re.VERBOSE,
+)
 _REJECTED_REASONING_PARAMS: dict[tuple[str, str, str], set[str]] = {}
 # 参数被拒后的最多降级次数（thinking → reasoning_effort → 不注入）
 MAX_PARAM_RETRIES = 2
@@ -1336,11 +1344,15 @@ class LLMSummarizer:
     def _rejected_request_params(
         self, exc: Exception, request: dict[str, Any]
     ) -> tuple[str, ...]:
-        """从报错里认出“被拒的思考参数”，且只处理本次确实下发过的参数。
+        """从报错里认出“本次确实下发过、但这条通道不认的思考/额度参数”。
+
+        两种形状都要认：否认参数名（``"thinking" is not supported``），以及只否认我们给的
+        取值（``'reasoning_effort' must be one of: 'low', ...``）。后者按参数不可用处理——
+        会多花两次请求把 flat → 嵌套的阶梯试完，之后按 (provider, model, base_url) 记住。
 
         不能简单“看消息里提到了哪个名字”：拒绝提示会同时推荐另一个参数
         （"thinking" is not supported ... use "reasoning_effort"），所以只取服务端
-        标出的 param 字段，或引号包住且紧跟 is/was not supported 的那个名字。
+        标出的 param 字段，或引号包住且紧跟拒绝措辞的那个名字。
         """
         text = str(exc)
         lowered = text.lower()
@@ -1352,6 +1364,9 @@ class LLMSummarizer:
                 "unsupported parameter",
                 "unknown parameter",
                 "unrecognized",
+                "must be one of",
+                "invalid_value",
+                "invalid value",
             )
         ):
             return ()
@@ -1361,7 +1376,8 @@ class LLMSummarizer:
             error = body.get("error")
             if isinstance(error, dict) and error.get("param"):
                 names.add(str(error["param"]).strip().lower())
-        names.update(match.group(1).lower() for match in _UNSUPPORTED_PARAM_RE.finditer(text))
+        for pattern in (_UNSUPPORTED_PARAM_RE, _REJECTED_VALUE_RE):
+            names.update(match.group(1).lower() for match in pattern.finditer(text))
         sent = set(request)
         extra_body = request.get("extra_body")
         if isinstance(extra_body, dict):
