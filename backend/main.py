@@ -58,6 +58,7 @@ from .video_processor import (
     merge_bilibili_pages,
     normalize_video_input,
 )
+from .paraformer_asr import ParaformerTranscriber
 from .whisper_asr import WhisperTranscriber
 
 
@@ -93,13 +94,14 @@ ALLOWED_MEDIA_SUFFIXES = {
     ".webm",
     ".avi",
 }
-WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo"}
+WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo", "belle-turbo-zh"}
+ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"}
 DOUYIN_HINT = (
     "抖音链接解析失败。可以先点击“打开抖音浏览器”，在本机窗口完成登录/验证后重试；"
     "也可能是媒体地址已过期，请重新提交链接。"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.3.5")
+app = FastAPI(title="VideoToNo API", version="1.4.0")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -180,6 +182,24 @@ app.add_middleware(LocalSecurityMiddleware)
 
 video_processor = VideoProcessor(WORKSPACE_DIR)
 transcriber = WhisperTranscriber(WHISPER_CACHE_DIR)
+paraformer_transcriber = ParaformerTranscriber(WHISPER_CACHE_DIR)
+
+
+async def run_transcription(
+    media_path: Path,
+    model_name: str,
+    use_gpu: bool,
+    title: str | None,
+    cancel_event: Any,
+) -> dict:
+    """按所选模型路由转写引擎：paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。"""
+    if model_name == "paraformer-zh":
+        return await paraformer_transcriber.transcribe(
+            media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
+        )
+    return await transcriber.transcribe(
+        media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
+    )
 bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
 douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
@@ -605,8 +625,8 @@ async def start_transcribe(request: TranscribeRequest) -> dict[str, str | None]:
 async def submit_video_task(
     request: SummarizeRequest, origin: str
 ) -> dict[str, str | None]:
-    if request.whisper_model not in WHISPER_MODELS:
-        raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
+    if request.whisper_model not in ASR_MODELS:
+        raise HTTPException(status_code=422, detail="不支持的转写模型")
     uploaded_task = None
     if request.upload_task_id:
         # 本地上传的媒体位置记在上传任务上；此时 video_url 是后端目录里的文件路径，
@@ -791,6 +811,7 @@ async def whisper_models_status() -> dict[str, Any]:
         }
         for model_id in sorted(WHISPER_MODELS)
     ]
+    models.append({"id": "paraformer-zh", "status": paraformer_transcriber.cache_status()})
     return {"models": models, "manual_dir": str(WHISPER_CACHE_DIR / "manual")}
 
 
@@ -822,8 +843,8 @@ async def open_whisper_manual_folder(payload: WhisperManualFolderPayload) -> dic
     return {
         "path": str(manual_dir),
         "opened": _open_in_file_manager(manual_dir),
-        "files": list(WhisperTranscriber.WHISPER_MODEL_FILES),
-        "download_url": f"https://hf-mirror.com/Systran/faster-whisper-{payload.model}/tree/main",
+        "files": list(transcriber._required_files(payload.model)),
+        "download_url": f"https://hf-mirror.com/{transcriber._model_repo(payload.model)}/tree/main",
     }
 
 
@@ -1454,12 +1475,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         38,
                         f"正在转写分 P {page.page}（{request.whisper_model} 模型）",
                     )
-                    whisper_result = await transcriber.transcribe(
+                    whisper_result = await run_transcription(
                         media_path,
                         request.whisper_model,
                         request.use_gpu,
-                        initial_prompt=title,
-                        cancel_event=task.get("_cancel_event"),
+                        title,
+                        task.get("_cancel_event"),
                     )
                     raise_if_cancel_requested(task)
                     whisper_by_page[page.page] = whisper_result
@@ -1527,20 +1548,24 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     4,
                     "语音转写",
                     38,
-                    f"正在加载 faster-whisper {request.whisper_model}（未缓存时可能下载模型）",
+                    f"正在加载 {request.whisper_model}（未缓存时可能下载模型）",
                 )
-                whisper_result = await transcriber.transcribe(
+                whisper_result = await run_transcription(
                     media_path,
                     request.whisper_model,
                     request.use_gpu,
-                    initial_prompt=title,
-                    cancel_event=task.get("_cancel_event"),
+                    title,
+                    task.get("_cancel_event"),
                 )
                 raise_if_cancel_requested(task)
                 transcript_result = {
                     "segments": whisper_result["segments"],
                     "language": whisper_result["language"],
-                    "source": "faster_whisper",
+                    "source": (
+                        "paraformer"
+                        if request.whisper_model == "paraformer-zh"
+                        else "faster_whisper"
+                    ),
                 }
                 if not info.get("duration"):
                     info["duration"] = whisper_result["duration"]
@@ -1563,7 +1588,10 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             f"文字质量检查：{quality['characters']} 字，语音覆盖 {quality['speech_coverage']:.0%}"
         )
         await write_transcript_files(task_id, segments, transcript_result)
-        if transcript_result["source"] == "faster_whisper" and quality["insufficient"]:
+        if (
+            transcript_result["source"] in {"faster_whisper", "paraformer"}
+            and quality["insufficient"]
+        ):
             stage = "调用大模型" if request.output == "note" else "返回转录"
             raise RuntimeError(
                 f"可识别语音覆盖过低，已在{stage}前停止。源视频可能被静音、替换、"

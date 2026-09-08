@@ -1456,7 +1456,9 @@ const WHISPER_MODEL_SIZES = {
     small: '~466MB',
     medium: '~1.5GB',
     'large-v3': '~3.1GB',
-    turbo: '~1.6GB'
+    turbo: '~1.6GB',
+    'belle-turbo-zh': '~0.8GB',
+    'paraformer-zh': '~0.5GB'
 };
 
 let whisperFallbackNotified = false;
