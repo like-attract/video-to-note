@@ -42,7 +42,12 @@ from pydantic import BaseModel, Field, SecretStr
 
 from . import secret_box
 from .config_store import LLM_KEYS_FILE, ConfigStore
-from .llm_summarizer import LLMSummarizer, default_base_url, normalize_endpoint_host
+from .llm_summarizer import (
+    LONG_TRANSCRIPT_CHARACTERS,
+    LLMSummarizer,
+    default_base_url,
+    normalize_endpoint_host,
+)
 from .bili_login import BiliLoginManager
 from .douyin_login import DouyinLoginManager
 from .transcript import (
@@ -1645,12 +1650,24 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         transcript_characters = int(quality.get("characters") or 0)
         duration_seconds = float(info.get("duration") or 0)
-        if transcript_characters >= 9_000 or duration_seconds >= 1_800:
-            task["advisory"] = (
+        advisory = ""
+        if (
+            transcript_characters > LONG_TRANSCRIPT_CHARACTERS
+            and request.summary_style != "concise"
+        ):
+            advisory = (
+                "这段内容很长，笔记会按时间顺序逐段完整记录（不做预先压缩），"
+                "因此耗时和 Token 消耗会随时长明显增加，输出量与口播字数同量级。"
+                "想省一些可以改用「精简摘要」。"
+            )
+        elif transcript_characters >= 9_000 or duration_seconds >= 1_800:
+            advisory = (
                 "这段内容较长，将通过多轮整理生成完整笔记，耗时和 Token 消耗会相应增加。"
                 "上下文容量较大、指令理解能力较强的模型通常更稳定；免费或轻量模型可能出现遗漏或截断。"
             )
-            task["logs"].append(task["advisory"])
+        if advisory:
+            task["advisory"] = advisory
+            task["logs"].append(advisory)
         set_progress(task, 6, "生成笔记", 55, "正在规划笔记生成流程")
         config = request.llm_config
         base_url = config.base_url or config.custom_base_url

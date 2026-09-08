@@ -1,3 +1,5 @@
+import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -5,7 +7,11 @@ import pytest
 from backend.llm_summarizer import (
     LLM_MAX_RETRIES,
     LLM_TIMEOUT_SECONDS,
+    NOTE_SECTION_CHARACTERS,
     NOTE_TAIL_CHARACTERS,
+    SECTION_MAX_TOKENS_MAX,
+    SECTION_MAX_TOKENS_MIN,
+    SECTION_WRITE_CONCURRENCY,
     TAIL_PATCH_MAX_GAP_SECONDS,
     TAIL_PATCH_MAX_INPUT_CHARACTERS,
     LLMSummarizer,
@@ -476,7 +482,7 @@ async def test_short_transcript_uses_one_call_or_two_focused_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_long_transcript_uses_hierarchical_reduction_and_reports_progress() -> None:
+async def test_below_threshold_still_uses_hierarchical_reduction() -> None:
     summarizer = object.__new__(LLMSummarizer)
     summarizer.warnings = []
     calls: list[str] = []
@@ -494,9 +500,10 @@ async def test_long_transcript_uses_hierarchical_reduction_and_reports_progress(
         progress.append(value)
 
     summarizer._complete = complete
+    # 21,012 净字数：低于 LONG_TRANSCRIPT_CHARACTERS，但逐段压缩后仍超过 14,000 字预算
     segments = [
-        TranscriptSegment(index, index + 1, f"第{index}段" + "内容" * 4_500)
-        for index in range(4)
+        TranscriptSegment(index, index + 1, f"第{index}段" + "内容" * 3_500)
+        for index in range(3)
     ]
 
     result = await summarizer.generate_summary(
@@ -505,8 +512,327 @@ async def test_long_transcript_uses_hierarchical_reduction_and_reports_progress(
 
     assert result == "# 长视频笔记"
     assert sum("归并" in prompt for prompt in calls) >= 2
+    assert not any("这是全片第" in prompt for prompt in calls)
     assert progress == sorted(progress)
     assert progress[-1] == 99
+
+
+_SECTION_RANGE_RE = re.compile(r"覆盖时间轴 (\S+?) – (\S+?)。")
+_SECTION_COVERS_RE = re.compile(r"（覆盖到 (\S+?)）")
+
+
+def _section_end(prompt: str) -> str:
+    """从提示词里取该段覆盖到的时间点——提示词句式是管线与测试之间的契约。"""
+    first_draft = _SECTION_RANGE_RE.search(prompt)
+    if first_draft:
+        return first_draft.group(2)
+    return _SECTION_COVERS_RE.search(prompt).group(1)
+
+
+def _section_index(prompt: str) -> int:
+    return int(re.search(r"这是全片第 (\d+)/", prompt).group(1))
+
+
+def _sectioned_transcript(sections: int = 4) -> list[TranscriptSegment]:
+    """净字数超过阈值、且刚好切成 ``sections`` 段的碎行转录。"""
+    lines_per_section = NOTE_SECTION_CHARACTERS // 100
+    count = lines_per_section * sections
+    return [
+        TranscriptSegment(index * 3.0, index * 3.0 + 2.0, "字" * 97 + f"{index:03d}")
+        for index in range(count)
+    ]
+
+
+def _summarizer_with(fake_complete) -> tuple[LLMSummarizer, list]:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    calls: list[tuple[str, int, str]] = []
+
+    async def wrapped(prompt, max_tokens, effort="auto", **kwargs):
+        calls.append((prompt, max_tokens, effort))
+        return await fake_complete(prompt, max_tokens, effort)
+
+    summarizer._complete = wrapped
+    return summarizer, calls
+
+
+def test_section_stage_effort_is_one_notch_below_the_draft() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "deepseek"
+    summarizer.model = "deepseek-v4-flash"
+    summarizer.base_url = "https://api.deepseek.com"
+
+    # max 档的思考链实测会吃光整段输出额度，逐段直写这种局部任务用 high
+    assert summarizer._stage_effort("auto", "faithful", "section") == "high"
+    assert summarizer._stage_effort("auto", "faithful", "notes") == "max"
+    # 用户显式选择仍然优先
+    assert summarizer._stage_effort("max", "faithful", "section") == "max"
+
+
+@pytest.mark.asyncio
+async def test_long_transcript_writes_sections_without_merging() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "这份笔记覆盖四段内容。"
+        if "这是全片第" in prompt:
+            return f"## 小节{_section_index(prompt)}\n\n[{_section_end(prompt)}] 写到结尾"
+        return "# 视频笔记"
+
+    summarizer, calls = _summarizer_with(fake)
+    progress: list[int] = []
+
+    result = await summarizer.generate_summary(
+        "长视频",
+        _sectioned_transcript(),
+        style="faithful",
+        progress_callback=lambda value, message: progress.append(value),
+    )
+
+    assert not any("归并" in prompt for prompt, *_ in calls)
+    assert sum("这是全片第" in prompt for prompt, *_ in calls) == 4
+    assert result.startswith("# 视频笔记：《长视频》")
+    assert "这份笔记覆盖四段内容。" in result
+    # 目录由代码生成：区间端点必须落在整片时间轴上
+    toc = result.split("## 本片目录")[1].split("## 小节")[0]
+    assert "`00:00 –" in toc and "写到结尾" in result.split("## 小节4")[1]
+    assert progress == sorted(progress)
+    assert progress[-1] == 99
+
+
+def test_section_output_budget_scales_with_section_size() -> None:
+    tiny = [TranscriptSegment(0, 1, "字" * 200)]
+    small = [TranscriptSegment(0, 1, "字" * 3_000)]
+    large = [TranscriptSegment(0, 1, "字" * 6_000)]
+    huge = [TranscriptSegment(0, 1, "字" * 40_000)]
+
+    assert LLMSummarizer._section_max_tokens(tiny) == SECTION_MAX_TOKENS_MIN
+    assert LLMSummarizer._section_max_tokens(huge) == SECTION_MAX_TOKENS_MAX
+    # 落在上下限之间时，额度与这一段要记录的字数成正比
+    assert LLMSummarizer._section_max_tokens(large) == 2 * (
+        LLMSummarizer._section_max_tokens(small)
+    )
+    assert SECTION_MAX_TOKENS_MIN < LLMSummarizer._section_max_tokens(
+        small
+    ) < SECTION_MAX_TOKENS_MAX
+
+
+@pytest.mark.asyncio
+async def test_stopped_section_is_continued_from_its_last_timestamp() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "还没写完" in prompt:
+            return f"[{_section_end(prompt)}] 续写把剩下的讲完了"
+        return f"## 小节{_section_index(prompt)}\n\n[00:03] 只写了开头"
+
+    summarizer, calls = _summarizer_with(fake)
+    result = await summarizer.generate_summary(
+        "长视频", _sectioned_transcript(), style="faithful"
+    )
+
+    continuations = [
+        effort for prompt, _tokens, effort in calls if "还没写完" in prompt
+    ]
+    assert len(continuations) == 4
+    # 思考已在首写时做过，续写不再注入思考参数（off 会被某些兼容网关翻译成
+    # reasoning_effort=none 并被拒，auto 才是最不会把任务打翻的写法）
+    assert set(continuations) == {"auto"}
+    assert result.count("续写把剩下的讲完了") == 4
+    assert summarizer.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_continuation_failure_keeps_the_section_already_written() -> None:
+    """续写阶段报错不得打死整条任务：首写已产出的内容必须留在笔记里。"""
+
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "还没写完" in prompt:
+            raise RuntimeError("通道把 reasoning_effort 的值拒了")
+        return f"## 小节{_section_index(prompt)}\n\n[00:03] 首写只到这里"
+
+    summarizer, calls = _summarizer_with(fake)
+    result = await summarizer.generate_summary(
+        "长视频", _sectioned_transcript(), style="faithful"
+    )
+
+    assert "## 小节1" in result and "## 小节4" in result
+    assert sum("还没写完" in prompt for prompt, *_ in calls) >= 4
+    assert len(summarizer.warnings) == 4
+    assert "补写结尾失败" in summarizer.warnings[0]
+    # 首写没推进到区间末尾，未覆盖的原文必须补上
+    assert "### 未能整理的原文" in result
+
+
+@pytest.mark.asyncio
+async def test_section_falls_back_to_raw_transcript_instead_of_losing_content() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "这是全片第" in prompt:
+            return f"## 小节{_section_index(prompt)}\n\n整段都没有时间戳"
+        if "还没写完" in prompt:
+            return "仍然没有时间戳"
+        return "其他"
+
+    summarizer, _ = _summarizer_with(fake)
+    segments = _sectioned_transcript()
+    result = await summarizer.generate_summary("长视频", segments, style="faithful")
+
+    assert result.count("### 未能整理的原文") == 4
+    assert len(summarizer.warnings) == 4
+    assert "多次整理后仍未写到本段结尾" in summarizer.warnings[0]
+    # 内容一条都不能少：每段原文都必须在笔记里出现
+    for segment in segments:
+        assert segment.text in result
+
+
+@pytest.mark.asyncio
+async def test_model_error_in_one_section_does_not_fail_the_task() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "这是全片第" in prompt:
+            if _section_index(prompt) == 2:
+                raise RuntimeError("模型未返回正文")
+            return f"## 小节{_section_index(prompt)}\n\n[{_section_end(prompt)}] 正常"
+        return "其他"
+
+    summarizer, _ = _summarizer_with(fake)
+    result = await summarizer.generate_summary("长视频", _sectioned_transcript(), style="faithful")
+
+    assert "## 小节1" in result and "## 小节4" in result
+    assert "### 未能整理的原文" in result
+    assert "模型调用失败" in summarizer.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_completion_order_does_not_change_assembly() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "这是全片第" in prompt:
+            index = _section_index(prompt)
+            await asyncio.sleep((5 - index) * 0.02)  # 后面的段先完成
+            return f"## 小节{index}\n\n[{_section_end(prompt)}] 内容{index}"
+        return "其他"
+
+    summarizer, _ = _summarizer_with(fake)
+    result = await summarizer.generate_summary("长视频", _sectioned_transcript(4), style="faithful")
+
+    positions = [result.index(f"内容{index}") for index in range(1, 5)]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_section_writing_stays_within_the_concurrency_limit() -> None:
+    inflight = {"now": 0, "peak": 0}
+
+    async def fake(prompt, max_tokens, effort):
+        if "这是全片第" in prompt:
+            inflight["now"] += 1
+            inflight["peak"] = max(inflight["peak"], inflight["now"])
+            await asyncio.sleep(0.02)
+            inflight["now"] -= 1
+            return f"## 小节{_section_index(prompt)}\n\n[{_section_end(prompt)}] 内容"
+        if "各段标题与时间范围" not in prompt:
+            return "其他"
+        return "概览"
+
+    summarizer, _ = _summarizer_with(fake)
+    await summarizer.generate_summary("长视频", _sectioned_transcript(6), style="faithful")
+
+    assert inflight["peak"] == SECTION_WRITE_CONCURRENCY
+
+
+@pytest.mark.asyncio
+async def test_cancellation_inside_a_section_is_not_swallowed_by_the_fallback() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "这是全片第" in prompt and _section_index(prompt) == 2:
+            raise asyncio.CancelledError("任务已取消")
+        if "这是全片第" in prompt:
+            await asyncio.sleep(0.05)
+            return f"## 小节\n\n[{_section_end(prompt)}] 内容"
+        return "概览"
+
+    summarizer, _ = _summarizer_with(fake)
+    with pytest.raises(asyncio.CancelledError):
+        await summarizer.generate_summary("长视频", _sectioned_transcript(), style="faithful")
+
+
+@pytest.mark.asyncio
+async def test_detailed_analysis_sees_the_whole_assembled_note() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "点评对象是视频里的内容" in prompt:
+            return "## 点评与分析\n\n点评正文"
+        return f"## 小节{_section_index(prompt)}\n\n[{_section_end(prompt)}] 内容{_section_index(prompt)}"
+
+    summarizer, calls = _summarizer_with(fake)
+    result = await summarizer.generate_summary("长视频", _sectioned_transcript(), style="detailed")
+
+    analysis_prompt = next(prompt for prompt, *_ in calls if "点评对象是视频里的内容" in prompt)
+    assert "内容1" in analysis_prompt and "内容4" in analysis_prompt
+    assert result.endswith("点评正文")
+    # 点评必须是最后一个调用
+    assert "点评对象是视频里的内容" in calls[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_explicit_effort_is_respected_by_mechanical_stages() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "还没写完" in prompt:
+            return f"[{_section_end(prompt)}] 续写"
+        return f"## 小节\n\n[00:03] 只写了开头"
+
+    summarizer, calls = _summarizer_with(fake)
+    await summarizer.generate_summary(
+        "长视频", _sectioned_transcript(), style="faithful", reasoning_effort="max"
+    )
+
+    mechanical = [
+        effort
+        for prompt, _tokens, effort in calls
+        if "还没写完" in prompt or "各段标题与时间范围" in prompt
+    ]
+    # 4 次段内续写 + 1 次概览
+    assert len(mechanical) == 5
+    # 用户显式选了档位，机械阶段也照它的选择下发
+    assert set(mechanical) == {"max"}
+
+
+@pytest.mark.asyncio
+async def test_overview_failure_keeps_the_note_body() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            raise RuntimeError("模型未返回正文")
+        return f"## 小节{_section_index(prompt)}\n\n[{_section_end(prompt)}] 内容"
+
+    summarizer, _ = _summarizer_with(fake)
+    result = await summarizer.generate_summary("长视频", _sectioned_transcript(), style="faithful")
+
+    assert "## 小节1" in result and "## 本片目录" in result
+    assert "内容概览生成失败，已跳过" in summarizer.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_concise_style_keeps_the_condensed_path() -> None:
+    async def fake(prompt, max_tokens, effort):
+        if "这是第" in prompt and "个连续片段" in prompt:
+            return "片段材料" * 1_500
+        return "# 精简摘要"
+
+    summarizer, calls = _summarizer_with(fake)
+    result = await summarizer.generate_summary(
+        "长视频", _sectioned_transcript(), style="concise"
+    )
+
+    assert result == "# 精简摘要"
+    assert not any("这是全片第" in prompt for prompt, *_ in calls)
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from backend.transcript import (
     TranscriptSegment,
     chunk_segments,
     format_timestamp,
+    merge_segment_lines,
     parse_subtitle_payload,
     segments_to_prompt,
     transcript_quality,
@@ -59,6 +60,41 @@ def test_chunking_keeps_segment_boundaries() -> None:
     chunks = chunk_segments(segments, max_characters=700)
     assert [item for chunk in chunks for item in chunk] == segments
     assert len(chunks) > 1
+
+
+def test_chunking_can_count_content_only() -> None:
+    """长视频逐段直写按净字数切块：时间戳开销不该决定一段有多少话要说。"""
+    segments = [
+        TranscriptSegment(index, index + 1, "内容" * 75) for index in range(6)
+    ]
+    with_overhead = chunk_segments(segments, max_characters=500)
+    content_only = chunk_segments(
+        segments, max_characters=500, include_timestamp_overhead=False
+    )
+    assert [len(chunk) for chunk in with_overhead] == [2, 2, 2]
+    assert [len(chunk) for chunk in content_only] == [3, 3]
+    assert [item for chunk in content_only for item in chunk] == segments
+
+
+def test_merge_segment_lines_groups_short_lines_with_range_timestamps() -> None:
+    segments = [
+        TranscriptSegment(index, index + 1, "短句" * 4) for index in range(6)
+    ]
+
+    merged = merge_segment_lines(segments, target_characters=20)
+    group = "短句短句短句短句 短句短句短句短句 短句短句短句短句"
+
+    assert merged == [TranscriptSegment(0, 3, group), TranscriptSegment(3, 6, group)]
+    # 一个字都不能丢
+    assert " ".join(segment.text for segment in merged).split() == [
+        segment.text for segment in segments
+    ]
+
+
+def test_merge_segment_lines_keeps_long_lines_untouched() -> None:
+    long = TranscriptSegment(0, 5, "本来就很长的一行口播内容" * 6)
+    assert merge_segment_lines([long], target_characters=48) == [long]
+    assert merge_segment_lines([], target_characters=48) == []
 
 
 def test_chunk_size_has_a_sensible_lower_bound() -> None:

@@ -13,6 +13,7 @@ from .transcript import (
     TranscriptSegment,
     chunk_segments,
     format_timestamp,
+    merge_segment_lines,
     segments_to_prompt,
 )
 
@@ -72,6 +73,9 @@ DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
 # 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量，
 # 因此默认拉高换内容完整性；非 DeepSeek 通道保持模型默认不注入参数。
 STYLE_DEFAULT_EFFORT = {"detailed": "max", "faithful": "max", "concise": "high"}
+# 逐段直写（长视频）在 auto 下的档位：比成稿低一档。那一段只有几千字材料，属局部任务，
+# 而 max 的思考链实测会吃光整个输出额度——累计 1.9 万字思考后一个字正文都不返回。
+SECTION_EFFORT = "high"
 # 笔记末尾时间戳落后转写结尾超过该秒数视为丢尾。
 TAIL_GAP_SECONDS = 60.0
 # 补尾时附带给模型参考的已有笔记结尾长度。
@@ -87,8 +91,36 @@ TAIL_PATCH_MAX_GAP_SECONDS = 600.0
 TAIL_PATCH_MAX_INPUT_CHARACTERS = 4_000
 # 补写请求的整体耗时上限：超时则保留原笔记，绝不让任务停在补写阶段不放。
 TAIL_PATCH_TIMEOUT_SECONDS = 240.0
-# 流式读取心跳间隔：把“模型仍在输出”反映到任务进度上，避免长时间同一句话看起来像死锁。
+# 流式读取心跳间隔：把"模型仍在输出"反映到任务进度上，避免长时间同一句话看起来像死锁。
 LLM_HEARTBEAT_SECONDS = 20.0
+# 转录净字数超过该值时改走“逐段直写成稿”管线（见 ``_write_long_transcript_notes``）。
+# 根因：``_reduce_chunks`` 把成稿可见材料压到恒 ≤ ``MERGE_INPUT_CHARACTERS`` 字、成稿输出
+# 恒 ≤ 4_600 token，两个上限都与视频时长无关。3 小时课（6.2 万字）因此丢约 2 小时内容，
+# 而 37 分钟这一档逐段压缩后本来就 < 14000 字、归并未触发、额度也够用，实测是正常的，
+# 所以阈值以下一律保持原管线，不拿已验证良好的行为去换未验证的路径。
+# 24_000 净字数 ≈ 70~80 分钟口播，是策略选择而非推导值：中长度视频若反馈变差就下调。
+LONG_TRANSCRIPT_CHARACTERS = 24_000
+# 每段直写的转录净字数预算（时间戳开销不计入，见 chunk_segments 的同名参数）。
+NOTE_SECTION_CHARACTERS = 6_500
+# 提示词内把碎 ASR 行合并到的目标字数：whisper 常切成平均 7.5 字一段，逐行加时间戳会让
+# 时间戳吃掉 81% 的输入预算，模型读到的也不像话。
+SECTION_LINE_MERGE_CHARACTERS = 48
+# 同时直写的段数。这是本仓第一处并行模型调用：task_slots 只管任务级，不与之冲突。
+SECTION_WRITE_CONCURRENCY = 3
+# 每段输出额度 = 净字数 / 字每 token × 保留率，夹在上下限之间。
+# 1.6 字/token 与 ``_tail_patch_material`` 里“+33 字行开销”同一套估算口径；
+# 0.8 是口语转写成书面笔记的经验保留率（去掉语气词与重复后仍略短于原文）。
+SECTION_TOKENS_PER_CHARACTER = 1.6
+SECTION_TOKEN_KEEP_RATIO = 0.8
+SECTION_MAX_TOKENS_MIN = 1_200
+SECTION_MAX_TOKENS_MAX = 5_000
+# 每段最多尝试次数（首次 + 重试一次）与段内续写次数。
+SECTION_ATTEMPTS = 2
+SECTION_CONTINUATION_MAX = 3
+# 各段标题写完之后，概览文本的一次小请求额度。
+OVERVIEW_MAX_TOKENS = 600
+# 兜底时附在提示词里的“上一段结尾原话”长度，只用于让模型看懂指代。
+SECTION_CONTEXT_CHARACTERS = 160
 # 匹配笔记中的 [MM:SS]、[MM:SS-MM:SS]、[HH:MM:SS] 等时间戳（起点与区间终点都计入）。
 # 分钟位允许 1~3 位：长视频模型常把 1 小时 45 分写成 [105:30]，识别不到会被误判成丢尾。
 _NOTE_TIMESTAMP_RE = re.compile(
@@ -267,6 +299,62 @@ class LLMSummarizer:
             raise asyncio.CancelledError("任务已取消")
 
         await self._report_progress(progress_callback, 2, "正在分析转录内容")
+        notes_effort = self._stage_effort(reasoning_effort, style, "notes")
+        if style != "concise" and self._is_long_transcript(segments):
+            draft = await self._write_long_transcript_notes(
+                title,
+                segments,
+                style,
+                reasoning_effort,
+                progress_callback,
+                should_abort,
+            )
+        else:
+            draft = await self._write_condensed_notes(
+                title,
+                segments,
+                metadata or {},
+                style,
+                notes_effort,
+                reasoning_effort,
+                progress_callback,
+                should_abort,
+            )
+        await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
+        if style == "detailed":
+            analysis_progress = 93
+            analysis_stage = "正在补充点评与分析"
+            await self._report_progress(progress_callback, analysis_progress, analysis_stage)
+            analysis = await self._complete(
+                self._analysis_prompt(title, draft),
+                max_tokens=3_200,
+                effort=self._stage_effort(reasoning_effort, style, "analysis"),
+                progress_callback=progress_callback,
+                progress=analysis_progress,
+                stage=analysis_stage,
+                should_abort=should_abort,
+            )
+            draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
+        await self._report_progress(progress_callback, 99, "正在保存笔记")
+        return self._strip_code_fence(draft)
+
+    async def _write_condensed_notes(
+        self,
+        title: str,
+        segments: Sequence[TranscriptSegment],
+        metadata: dict[str, Any],
+        style: str,
+        notes_effort: str,
+        reasoning_effort: str,
+        progress_callback: ProgressCallback | None,
+        should_abort: Callable[[], bool] | None,
+    ) -> str:
+        """原有管线：逐段压缩成片段笔记 → 分层归并 → 一次成稿。
+
+        继续服务 concise，以及净字数不超过 ``LONG_TRANSCRIPT_CHARACTERS`` 的短片——这个规模
+        下逐段压缩后的总量本来就小于 ``MERGE_INPUT_CHARACTERS``，归并根本不会触发，实测质量
+        与排版都良好（37 分钟用户重测通过），所以不拿已验证的行为去换未验证的路径。
+        """
         chunks = chunk_segments(segments, max_characters=SUMMARY_CHUNK_CHARACTERS)
         if len(chunks) == 1:
             source = segments_to_prompt(chunks[0])
@@ -286,7 +374,7 @@ class LLMSummarizer:
                     await self._complete(
                         self._chunk_prompt(title, index, len(chunks), chunk),
                         max_tokens=1_200,
-                        effort=self._stage_effort(reasoning_effort, style, "notes"),
+                        effort=notes_effort,
                         progress_callback=progress_callback,
                         progress=chunk_progress,
                         stage=chunk_stage,
@@ -310,13 +398,12 @@ class LLMSummarizer:
             )
 
         max_tokens = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}[style]
-        notes_effort = self._stage_effort(reasoning_effort, style, "notes")
         coverage_end = format_timestamp(segments[-1].end)
         draft_progress = 78
         draft_stage = "正在生成完整笔记"
         await self._report_progress(progress_callback, draft_progress, draft_stage)
         draft = await self._complete(
-            self._note_prompt(title, source, metadata or {}, style, coverage_end),
+            self._note_prompt(title, source, metadata, style, coverage_end),
             max_tokens=max_tokens,
             effort=notes_effort,
             progress_callback=progress_callback,
@@ -324,7 +411,7 @@ class LLMSummarizer:
             stage=draft_stage,
             should_abort=should_abort,
         )
-        draft = await self._ensure_tail_coverage(
+        return await self._ensure_tail_coverage(
             title,
             draft,
             segments,
@@ -333,23 +420,421 @@ class LLMSummarizer:
             progress_callback,
             should_abort,
         )
-        await self._report_progress(progress_callback, 91, "完整笔记初稿已生成")
-        if style == "detailed":
-            analysis_progress = 93
-            analysis_stage = "正在补充点评与分析"
-            await self._report_progress(progress_callback, analysis_progress, analysis_stage)
-            analysis = await self._complete(
-                self._analysis_prompt(title, draft),
-                max_tokens=3_200,
-                effort=self._stage_effort(reasoning_effort, style, "analysis"),
-                progress_callback=progress_callback,
-                progress=analysis_progress,
-                stage=analysis_stage,
+
+    @staticmethod
+    def _is_long_transcript(segments: Sequence[TranscriptSegment]) -> bool:
+        """转录净字数是否超过长视频阈值（时间戳开销不计，见 ``_write_long_transcript_notes``）。"""
+        return sum(len(segment.text) for segment in segments) > LONG_TRANSCRIPT_CHARACTERS
+
+    @staticmethod
+    def _mechanical_effort(reasoning_effort: str) -> str:
+        """续写与概览这类机械阶段的档位。
+
+        ``auto`` 时返回 ``auto``（= 不注入任何思考参数，交给通道默认）而不是 ``off``：
+        ``off`` 在非官方 deepseek 兼容网关上会被翻译成 ``reasoning_effort=none``，而
+        ModelScope 这类网关只认 ``low/medium/high/xhigh/max``，直接回 400 且那条报错的
+        形状（"'reasoning_effort' must be one of ..."）不在参数降级匹配里。
+        少关一次思考只是慢一点，任务失败是把内容整段丢掉。
+        用户显式选了 off/high/max 时一律照原样尊重。
+        """
+        return "auto" if reasoning_effort == "auto" else reasoning_effort
+
+    async def _write_long_transcript_notes(
+        self,
+        title: str,
+        segments: Sequence[TranscriptSegment],
+        style: str,
+        reasoning_effort: str,
+        progress_callback: ProgressCallback | None,
+        should_abort: Callable[[], bool] | None,
+    ) -> str:
+        """长转录管线：切块 → 并发把每块直接写成终稿 → 机械拼接 → 目录与概览。
+
+        与 ``_write_condensed_notes`` 的唯一区别是**正文层没有有损归并**：每块转录都由一段
+        笔记直接负责，成稿可见的材料量随视频长度线性增长，而不是被压成与时长无关的
+        ``MERGE_INPUT_CHARACTERS`` 常数。之所以必须拆成多次写作请求：3 万字量级的笔记单次
+        输出装不下（思考链还要先吃掉几千 token），拆完再压缩反而是丢内容的地方。
+
+        ``_ensure_tail_coverage`` 在这一路不需要：末段的尾部推进已经在段级检查里做过。
+        """
+        merged = merge_segment_lines(segments, SECTION_LINE_MERGE_CHARACTERS)
+        sections = chunk_segments(
+            merged,
+            max_characters=NOTE_SECTION_CHARACTERS,
+            include_timestamp_overhead=False,
+        )
+        total = len(sections)
+        effort = self._stage_effort(reasoning_effort, style, "section")
+        mechanical_effort = self._mechanical_effort(reasoning_effort)
+        # 并发完成顺序不定，对外回报只允许单调不减；心跳沿用同一个峰值。
+        peak = [0]
+
+        async def report(value: int, message: str) -> None:
+            peak[0] = max(peak[0], value)
+            await self._report_progress(progress_callback, peak[0], message)
+
+        await report(4, f"转录较长，分 {total} 段逐段完整记录")
+
+        results: list[str] = [""] * total
+        done = 0
+        semaphore = asyncio.Semaphore(SECTION_WRITE_CONCURRENCY)
+
+        async def worker(index: int) -> None:
+            nonlocal done
+            async with semaphore:
+                results[index] = await self._write_one_section(
+                    title,
+                    index + 1,
+                    total,
+                    sections[index],
+                    self._context_tail(sections, index),
+                    effort,
+                    mechanical_effort,
+                    report,
+                    should_abort,
+                )
+            done += 1
+            await report(
+                5 + int(60 * done / total), f"已完成 {done}/{total} 段笔记"
+            )
+
+        jobs = [asyncio.create_task(worker(index)) for index in range(total)]
+        try:
+            await asyncio.gather(*jobs)
+        finally:
+            # 某一段抛出（含用户取消）时把兄弟段一起收掉，不留后台请求。
+            for job in jobs:
+                if not job.done():
+                    job.cancel()
+
+        headings = [self._section_heading(piece) for piece in results]
+        overview = await self._write_overview(
+            title,
+            self._toc_lines(sections, headings),
+            mechanical_effort,
+            report,
+            should_abort,
+        )
+        await report(74, f"{total} 段笔记已按时间顺序拼接")
+        return self._assemble_sections(title, sections, results, headings, overview)
+
+    async def _write_one_section(
+        self,
+        title: str,
+        index: int,
+        total: int,
+        section: Sequence[TranscriptSegment],
+        context_tail: str,
+        effort: str,
+        mechanical_effort: str,
+        report: Callable[[int, str], Awaitable[None]],
+        should_abort: Callable[[], bool] | None,
+    ) -> str:
+        """把一段转录直接写成终稿笔记，并保证它推进到自己那段的时间末尾。
+
+        唯一的质检判据是段级尾部推进（本段最大时间戳离区间结尾还差 60 秒以上就算没写完），
+        它同时覆盖「被输出额度截断」和「模型自己提前收尾」两种失败，所以不需要读
+        ``finish_reason``。整篇笔记做不到「结尾必须带时间戳」这个要求，单段 6,500 字可以——
+        这也是拆段顺带换来的可检验性。
+
+        两次尝试都不合格时仍然不丢内容：已写出的部分保留，没覆盖到的原文附在后面。
+        """
+        stage = f"直写第 {index}/{total} 段"
+        max_tokens = self._section_max_tokens(section)
+        best = ""
+        reason = ""
+        for attempt in range(SECTION_ATTEMPTS):
+            try:
+                text = await self._complete(
+                    self._section_note_prompt(
+                        title,
+                        index,
+                        total,
+                        section,
+                        context_tail,
+                        retried=attempt > 0,
+                    ),
+                    max_tokens=max_tokens,
+                    effort=effort,
+                    progress_callback=report,
+                    stage=stage,
+                    should_abort=should_abort,
+                )
+                try:
+                    text = await self._continue_section(
+                        title,
+                        index,
+                        total,
+                        text,
+                        section,
+                        mechanical_effort,
+                        report,
+                        stage,
+                        should_abort,
+                    )
+                except Exception as exc:
+                    # 续写失败不推翻首写：这一段已经写出来的部分照样要留在笔记里
+                    reason = f"补写结尾失败（{type(exc).__name__}: {exc}）"
+            except Exception as exc:
+                # CancelledError 不是 Exception 子类：用户取消必须原样往外抛
+                reason = f"模型调用失败（{type(exc).__name__}: {exc}）"
+                continue
+            if self._coverage_gap(section, text) <= TAIL_GAP_SECONDS:
+                return text
+            reason = reason or "多次整理后仍未写到本段结尾"
+            if len(text) > len(best):
+                best = text
+        uncovered = self._uncovered(section, best)
+        self.warnings.append(
+            f"第 {index}/{total} 段（{format_timestamp(section[0].start)} 起）{reason}，"
+            "已把未覆盖的原文附在笔记里"
+        )
+        if not uncovered:
+            return best
+        block = self._raw_block(uncovered, reason)
+        return f"{best.rstrip()}\n\n{block}" if best else block
+
+    async def _continue_section(
+        self,
+        title: str,
+        index: int,
+        total: int,
+        text: str,
+        section: Sequence[TranscriptSegment],
+        effort: str,
+        report: Callable[[int, str], Awaitable[None]],
+        stage: str,
+        should_abort: Callable[[], bool] | None,
+    ) -> str:
+        """本段没写到自己区间末尾时接着写，最多 ``SECTION_CONTINUATION_MAX`` 次。
+
+        续写不设 ``TAIL_PATCH_MAX_INPUT_CHARACTERS`` 那样的规模上限，也不需要整体耗时上限：
+        剩余材料天然被一段的 ``NOTE_SECTION_CHARACTERS`` 框住，且每次请求都有心跳回报。
+        """
+        previous_covered: float | None = None
+        for _ in range(SECTION_CONTINUATION_MAX):
+            if self._coverage_gap(section, text) <= TAIL_GAP_SECONDS:
+                return text
+            covered = self._max_note_timestamp(text)
+            if covered is None or (
+                previous_covered is not None and covered <= previous_covered
+            ):
+                # 没有可用的时间锚点，或续写并没有往前推进：交给外层重试与兜底
+                return text
+            previous_covered = covered
+            remaining = [segment for segment in section if segment.end > covered + 0.5]
+            if not remaining:
+                return text
+            patch = await self._complete(
+                self._section_continuation_prompt(
+                    title,
+                    index,
+                    total,
+                    text,
+                    remaining,
+                    format_timestamp(covered),
+                    format_timestamp(section[-1].end),
+                ),
+                max_tokens=self._section_max_tokens(remaining),
+                effort=effort,
+                progress_callback=report,
+                stage=f"{stage}续写",
                 should_abort=should_abort,
             )
-            draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
-        await self._report_progress(progress_callback, 99, "正在保存笔记")
-        return self._strip_code_fence(draft)
+            if not patch.strip():
+                return text
+            text = f"{text.rstrip()}\n\n{patch.strip()}"
+        return text
+
+    @classmethod
+    def _coverage_gap(
+        cls, section: Sequence[TranscriptSegment], text: str
+    ) -> float:
+        """本段区间结尾与笔记里最大时间戳的差距；没有任何时间戳视为无穷大缺口。"""
+        covered = cls._max_note_timestamp(text)
+        if covered is None:
+            return float("inf")
+        return section[-1].end - covered
+
+    @classmethod
+    def _uncovered(
+        cls, section: Sequence[TranscriptSegment], text: str
+    ) -> Sequence[TranscriptSegment]:
+        covered = cls._max_note_timestamp(text)
+        if covered is None:
+            return section
+        remaining = [segment for segment in section if segment.end > covered + 0.5]
+        return remaining
+
+    @staticmethod
+    def _section_max_tokens(segments: Sequence[TranscriptSegment]) -> int:
+        """每段输出额度随该段转录净字数缩放，不用与时长无关的常数。"""
+        characters = sum(len(segment.text) for segment in segments)
+        estimate = int(
+            characters / SECTION_TOKENS_PER_CHARACTER * SECTION_TOKEN_KEEP_RATIO
+        )
+        return max(SECTION_MAX_TOKENS_MIN, min(SECTION_MAX_TOKENS_MAX, estimate))
+
+    @staticmethod
+    def _context_tail(sections: Sequence[Sequence[TranscriptSegment]], index: int) -> str:
+        """上一段结尾的原话，只用来让模型看懂「接着上面那道题」这类指代。
+
+        并发直写时拿不到上一段的成稿（可能还没写完），所以取的是原文而不是笔记——
+        它在切块时就已知，且不会诱导模型去复述上一段。
+        """
+        if index == 0:
+            return ""
+        return sections[index - 1][-1].text[-SECTION_CONTEXT_CHARACTERS:]
+
+    @staticmethod
+    def _section_heading(text: str) -> str:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                return stripped[3:].strip()
+        return ""
+
+    @staticmethod
+    def _toc_lines(
+        sections: Sequence[Sequence[TranscriptSegment]], headings: Sequence[str]
+    ) -> str:
+        """目录完全由代码生成：每段的起止时间是已知的，不给模型编时间戳的机会。"""
+        lines = []
+        for section, heading in zip(sections, headings):
+            span = (
+                f"{format_timestamp(section[0].start)} – "
+                f"{format_timestamp(section[-1].end)}"
+            )
+            lines.append(f"- `{span}` {heading or '（该段未给出小节标题）'}")
+        return "\n".join(lines)
+
+    async def _write_overview(
+        self,
+        title: str,
+        listing: str,
+        effort: str,
+        report: Callable[[int, str], Awaitable[None]],
+        should_abort: Callable[[], bool] | None,
+    ) -> str:
+        """一次小请求写概览。摘要是唯一允许有损的层，失败只跳过，不影响正文。"""
+        stage = "生成内容概览"
+        await report(68, "正在写内容概览")
+        try:
+            return await self._complete(
+                self._overview_prompt(title, listing),
+                max_tokens=OVERVIEW_MAX_TOKENS,
+                effort=effort,
+                progress_callback=report,
+                stage=stage,
+                should_abort=should_abort,
+            )
+        except Exception as exc:
+            self.warnings.append(
+                f"内容概览生成失败，已跳过（{type(exc).__name__}: {exc}）"
+            )
+            return ""
+
+    @classmethod
+    def _assemble_sections(
+        cls,
+        title: str,
+        sections: Sequence[Sequence[TranscriptSegment]],
+        pieces: Sequence[str],
+        headings: Sequence[str],
+        overview: str,
+    ) -> str:
+        parts = [f"# 视频笔记：《{title}》"]
+        overview = overview.strip()
+        if overview:
+            parts.append(overview)
+        parts.append("## 本片目录\n\n" + cls._toc_lines(sections, headings))
+        for piece in pieces:
+            cleaned = cls._strip_document_heading(piece)
+            if cleaned:
+                parts.append(cleaned)
+        return "\n\n".join(parts).strip() + "\n"
+
+    @staticmethod
+    def _strip_document_heading(text: str) -> str:
+        """去掉模型自作主张补的文档级标题（整篇只应有一个 # 标题，由代码写在最前）。"""
+        lines = text.strip().splitlines()
+        if lines and lines[0].startswith("# "):
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _raw_block(uncovered: Sequence[TranscriptSegment], reason: str) -> str:
+        return (
+            f"### 未能整理的原文（{format_timestamp(uncovered[0].start)} – "
+            f"{format_timestamp(uncovered[-1].end)}）\n\n"
+            f"{reason}，为保证内容不丢失，这里直接附上原始转录：\n\n"
+            f"{segments_to_prompt(uncovered)}"
+        )
+
+    @staticmethod
+    def _section_note_prompt(
+        title: str,
+        index: int,
+        total: int,
+        section: Sequence[TranscriptSegment],
+        context_tail: str,
+        retried: bool = False,
+    ) -> str:
+        start = format_timestamp(section[0].start)
+        end = format_timestamp(section[-1].end)
+        context = (
+            f"\n上一段结尾的原话（仅供理解指代，绝对不要写进笔记）：{context_tail}\n"
+            if context_tail
+            else ""
+        )
+        retry_hint = (
+            "\n- 上一次这一段写到一半就停了，这次必须推进到 " + end
+            if retried
+            else ""
+        )
+        return f"""视频标题：{title}
+这是全片第 {index}/{total} 段，覆盖时间轴 {start} – {end}。直接把这一段写成最终成稿的笔记正文：不要写提纲、不要预告后文、不要总结全片。
+
+要求：
+- 完整记录本段的每一个话题、例子、推导过程和数字，本段材料一直推进到 {end}
+- 把讲同一件事的连续几句合并成通顺段落，不要一行对应一句口播；长度约为本段材料的五到七成。压缩的是说法，不是话题——每个话题、例子和数字都必须留下
+- 本段最后一行以接近 {end} 的时间戳开头，用于核对有没有写到本段结尾{retry_hint}
+- 时间点只能取自材料，写成 [MM:SS] 或 [起点-终点]，超过一小时请带上小时
+- 用 ## 组织小节、### 组织子话题；不要输出 # 开头的文档标题，也不要输出视频元信息
+- 忠实于讲者本意，允许结合上下文修正明显的口误与转写错误；不补充外部知识，不做评价
+{context}
+本段转录：
+{segments_to_prompt(section)}"""
+
+    @staticmethod
+    def _section_continuation_prompt(
+        title: str,
+        index: int,
+        total: int,
+        text: str,
+        remaining: Sequence[TranscriptSegment],
+        covered_ts: str,
+        end: str,
+    ) -> str:
+        return f"""视频《{title}》笔记第 {index}/{total} 段（覆盖到 {end}）已经写到 {covered_ts}，后半部分还没写完。
+
+请接着已有结尾往下写，只输出剩余内容：
+- 不要重复已有内容；需要新小节时直接起一个 ## 或 ### 标题，不要重复整篇结构
+- 时间戳格式与已有结尾保持一致，一直写到 {end} 为止
+- 忠实转录内容，不补充外部知识，不做评价
+
+已有结尾（仅供衔接参考）：
+{text[-NOTE_TAIL_CHARACTERS:]}
+
+还没整理的转录：
+{segments_to_prompt(remaining)}"""
+
+    @staticmethod
+    def _overview_prompt(title: str, listing: str) -> str:
+        return f"""下面是视频《{title}》笔记的各段标题与时间范围。写 2~3 句话的内容概览，说明这份笔记覆盖了什么。
+不要评价，不补充外部知识，只输出概览正文，不要重复下面的标题清单。
+
+{listing}"""
 
     async def _reduce_chunks(
         self,
@@ -571,12 +1056,16 @@ class LLMSummarizer:
         - 用户显式选择（off/high/max）永远优先；
         - auto 在 DeepSeek 兼容通道（含 custom 中识别出的 DeepSeek 模型）按
           笔记风格给默认档：detailed/faithful → max，concise → high；
+          但 ``section``（长视频的逐段直写）一律降到 high——那一段材料只有几千字，
+          是局部任务，而 max 的思考链实测能吃光整个输出额度（累计 1.9 万字思考后
+          直接不返回正文），额度并没有分给正文；
         - 其余通道返回 auto，保持模型默认，不注入私有参数。
-        stage 参数保留给将来按阶段（成稿/点评）差异化档位使用。
         """
         if selected in {"off", "high", "max"}:
             return selected
         if self._uses_deepseek_compatibility():
+            if stage == "section":
+                return SECTION_EFFORT
             return STYLE_DEFAULT_EFFORT.get(style, "high")
         return "auto"
 

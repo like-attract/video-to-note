@@ -34,17 +34,57 @@ def segments_to_prompt(segments: Sequence[TranscriptSegment]) -> str:
     )
 
 
+def merge_segment_lines(
+    segments: Sequence[TranscriptSegment], target_characters: int = 48
+) -> list[TranscriptSegment]:
+    """把相邻的碎行拼成接近 ``target_characters`` 字的长行，时间戳取整组区间。
+
+    只为提示词服务：语音转写常切成平均几个字的碎行，逐行加时间戳会让时间戳占掉大部分
+    输入预算，模型读到的也不像话。**不要拿它改写盘用的 ``transcript.md``**——那份产物的
+    逐句粒度是字幕用途的一部分。
+    """
+    merged: list[TranscriptSegment] = []
+    group: list[TranscriptSegment] = []
+    used = 0
+    for segment in segments:
+        group.append(segment)
+        used += len(segment.text) + 1
+        if used >= target_characters:
+            merged.append(_merge_group(group))
+            group, used = [], 0
+    if group:
+        merged.append(_merge_group(group))
+    return merged
+
+
+def _merge_group(group: Sequence[TranscriptSegment]) -> TranscriptSegment:
+    if len(group) == 1:
+        return group[0]
+    return TranscriptSegment(
+        group[0].start, group[-1].end, " ".join(segment.text for segment in group)
+    )
+
+
 def chunk_segments(
-    segments: Sequence[TranscriptSegment], max_characters: int = 14_000
+    segments: Sequence[TranscriptSegment],
+    max_characters: int = 14_000,
+    *,
+    include_timestamp_overhead: bool = True,
 ) -> list[list[TranscriptSegment]]:
+    """按字符预算切块，保持段边界不被切断。
+
+    ``include_timestamp_overhead=False`` 时预算只算转录净字数，用于"每块都要直接写成
+    终稿"的管线：那里每块的目标是固定的口播量，不该被时间戳开销稀释。
+    """
     if max_characters < 500:
         raise ValueError("max_characters must be at least 500")
 
+    overhead = 32 if include_timestamp_overhead else 0
     chunks: list[list[TranscriptSegment]] = []
     current: list[TranscriptSegment] = []
     current_size = 0
     for segment in segments:
-        line_size = len(segment.text) + 32
+        line_size = len(segment.text) + overhead
         if current and current_size + line_size > max_characters:
             chunks.append(current)
             current = []
