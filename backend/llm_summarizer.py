@@ -117,6 +117,15 @@ SECTION_MAX_TOKENS_MAX = 5_000
 # 每段最多尝试次数（首次 + 重试一次）与段内续写次数。
 SECTION_ATTEMPTS = 2
 SECTION_CONTINUATION_MAX = 3
+# 撞到限流时，重试前先等多久。实测并发 3 会让免费兼容网关（如 ModelScope 推理服务）瞬间
+# 把整批请求全打成 429，而紧接着的第二次重试等于继续砸请求 ⇒ 11 段全部落到「内嵌原文」
+# 兜底，笔记虽没丢内容但完全没法看。等待期间仍占着并发额度，顺带起到节流作用。
+SECTION_RATE_LIMIT_BACKOFF_SECONDS = 20.0
+_RATE_LIMIT_RE = re.compile(
+    r"429|rate.?limit|too many requests|insufficient_quota|out of quota", re.IGNORECASE
+)
+# 兜底小节的标题字样（测试与核对脚本按它区分「整理过的正文」和「内嵌的原文」）。
+RAW_FALLBACK_HEADING = "### 未能整理的原文"
 # 各段标题写完之后，概览文本的一次小请求额度。
 OVERVIEW_MAX_TOKENS = 600
 # 兜底时附在提示词里的“上一段结尾原话”长度，只用于让模型看懂指代。
@@ -149,6 +158,11 @@ _REJECTED_VALUE_RE = re.compile(
 _REJECTED_REASONING_PARAMS: dict[tuple[str, str, str], set[str]] = {}
 # 参数被拒后的最多降级次数（thinking → reasoning_effort → 不注入）
 MAX_PARAM_RETRIES = 2
+
+def _looks_rate_limited(exc: BaseException) -> bool:
+    """这次失败是否像限流/配额（决定逐段直写重试前要不要先等一会）。"""
+    return bool(_RATE_LIMIT_RE.search(f"{type(exc).__name__}: {exc}"))
+
 
 def _rejected_params_from_env() -> set[str]:
     """逃生口：`VIDEOTONOTES_REJECTED_LLM_PARAMS=thinking,reasoning_effort`。
@@ -551,7 +565,14 @@ class LLMSummarizer:
         max_tokens = self._section_max_tokens(section)
         best = ""
         reason = ""
+        rate_limited = False
         for attempt in range(SECTION_ATTEMPTS):
+            if rate_limited:
+                await report(
+                    0, f"{stage} 遇到限流，等待 {SECTION_RATE_LIMIT_BACKOFF_SECONDS:.0f} 秒后重试"
+                )
+                # 不做 try：用户取消必须从这里直接抛出去（asyncio.sleep 可被取消）
+                await asyncio.sleep(SECTION_RATE_LIMIT_BACKOFF_SECONDS)
             try:
                 text = await self._complete(
                     self._section_note_prompt(
@@ -583,9 +604,11 @@ class LLMSummarizer:
                 except Exception as exc:
                     # 续写失败不推翻首写：这一段已经写出来的部分照样要留在笔记里
                     reason = f"补写结尾失败（{type(exc).__name__}: {exc}）"
+                    rate_limited = _looks_rate_limited(exc)
             except Exception as exc:
                 # CancelledError 不是 Exception 子类：用户取消必须原样往外抛
                 reason = f"模型调用失败（{type(exc).__name__}: {exc}）"
+                rate_limited = _looks_rate_limited(exc)
                 continue
             if self._coverage_gap(section, text) <= TAIL_GAP_SECONDS:
                 return text
@@ -773,7 +796,7 @@ class LLMSummarizer:
     @staticmethod
     def _raw_block(uncovered: Sequence[TranscriptSegment], reason: str) -> str:
         return (
-            f"### 未能整理的原文（{format_timestamp(uncovered[0].start)} – "
+            f"{RAW_FALLBACK_HEADING}（{format_timestamp(uncovered[0].start)} – "
             f"{format_timestamp(uncovered[-1].end)}）\n\n"
             f"{reason}，为保证内容不丢失，这里直接附上原始转录：\n\n"
             f"{segments_to_prompt(uncovered)}"

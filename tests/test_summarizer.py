@@ -708,6 +708,48 @@ async def test_model_error_in_one_section_does_not_fail_the_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rate_limited_section_backs_off_before_retrying() -> None:
+    """限流不能立刻再砸一次请求：先退避，否则整段直接退化成内嵌原文。"""
+    import backend.llm_summarizer as module
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    original_sleep = asyncio.sleep
+    asyncio.sleep = fake_sleep
+    attempts: dict[int, int] = {}
+
+    async def fake(prompt, max_tokens, effort):
+        if "各段标题与时间范围" in prompt:
+            return "概览"
+        if "这是全片第" not in prompt:
+            return "其他"
+        index = _section_index(prompt)
+        attempts[index] = attempts.get(index, 0) + 1
+        if index == 2 and attempts[index] == 1:
+            raise RuntimeError(
+                "Error code: 429 - {'error': {'code': 'insufficient_quota',"
+                " 'message': 'You exceeded your current quota'}}"
+            )
+        return f"## 小节{index}\n\n[{_section_end(prompt)}] 内容{index}"
+
+    try:
+        summarizer, _ = _summarizer_with(fake)
+        result = await summarizer.generate_summary(
+            "长视频", _sectioned_transcript(), style="faithful"
+        )
+    finally:
+        asyncio.sleep = original_sleep
+
+    # 只有撞限流那一次等待，非限流失败不白等
+    assert sleeps == [module.SECTION_RATE_LIMIT_BACKOFF_SECONDS]
+    assert "内容2" in result
+    assert module.RAW_FALLBACK_HEADING not in result  # 退避后重试成功，没落到兜底
+
+
+@pytest.mark.asyncio
 async def test_concurrent_completion_order_does_not_change_assembly() -> None:
     async def fake(prompt, max_tokens, effort):
         if "各段标题与时间范围" in prompt:
