@@ -523,7 +523,11 @@ class LLMSummarizer:
             peak[0] = max(peak[0], value)
             await self._report_progress(progress_callback, peak[0], message)
 
-        await report(4, f"转录较长，分 {total} 段逐段完整记录")
+        await report(
+            4,
+            f"转录 {sum(len(segment.text) for segment in segments):,} 字，"
+            f"按每段约 {NOTE_SECTION_CHARACTERS:,} 字分成 {total} 段逐段完整记录",
+        )
 
         results: list[str] = [""] * total
         done = 0
