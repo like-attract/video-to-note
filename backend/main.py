@@ -1657,8 +1657,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         ):
             advisory = (
                 "这段内容很长，笔记会按时间顺序逐段完整记录（不做预先压缩），"
-                "因此耗时和 Token 消耗会随时长明显增加，输出量与口播字数同量级。"
-                "想省一些可以改用「精简摘要」。"
+                "因此 Token 消耗与耗时都随时长增长，输出量与口播字数同量级。"
+                "3 小时量级的课可能要几十分钟才出稿（限流的免费通道更慢），"
+                "挂着等即可，任何时候都能取消。想省一些可以改用「精简摘要」。"
             )
         elif transcript_characters >= 9_000 or duration_seconds >= 1_800:
             advisory = (

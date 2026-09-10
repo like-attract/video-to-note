@@ -616,6 +616,27 @@ def test_section_output_budget_scales_with_section_size() -> None:
     ) < SECTION_MAX_TOKENS_MAX
 
 
+def test_section_prompt_asks_for_timestamped_headings() -> None:
+    prompt = LLMSummarizer._section_note_prompt(
+        "测试视频",
+        1,
+        4,
+        [TranscriptSegment(0, 60, "内容"), TranscriptSegment(60, 120, "内容")],
+        "",
+    )
+    # 用户反馈：小标题带时间更好读；文档级标题仍统一由代码写在最前
+    assert "「## [起点-终点] 标题」" in prompt
+    assert "不要输出 # 开头的文档标题" in prompt
+
+
+def test_toc_heading_drops_the_leading_timestamp() -> None:
+    assert (
+        LLMSummarizer._section_heading("## [01:02-03:04] 主存编址\n\n正文") == "主存编址"
+    )
+    assert LLMSummarizer._section_heading("## 没有时间的标题") == "没有时间的标题"
+    assert LLMSummarizer._section_heading("整段没有二级标题") == ""
+
+
 @pytest.mark.asyncio
 async def test_stopped_section_is_continued_from_its_last_timestamp() -> None:
     async def fake(prompt, max_tokens, effort):
