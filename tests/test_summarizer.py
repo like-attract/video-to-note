@@ -624,15 +624,17 @@ def test_section_prompt_asks_for_timestamped_headings() -> None:
         [TranscriptSegment(0, 60, "内容"), TranscriptSegment(60, 120, "内容")],
         "",
     )
-    # 用户反馈：小标题带时间更好读；文档级标题仍统一由代码写在最前
-    assert "「## [起点-终点] 标题」" in prompt
+    # 用户反馈：小标题带时间更好读（放在标题文字之后）；文档级标题仍统一由代码写在最前
+    assert "「## 标题 [起点-终点]」" in prompt
     assert "不要输出 # 开头的文档标题" in prompt
 
 
-def test_toc_heading_drops_the_leading_timestamp() -> None:
+def test_toc_heading_drops_the_trailing_timestamp() -> None:
     assert (
-        LLMSummarizer._section_heading("## [01:02-03:04] 主存编址\n\n正文") == "主存编址"
+        LLMSummarizer._section_heading("## 主存编址 [01:02-03:04]\n\n正文") == "主存编址"
     )
+    # 只剥时钟样式，标题里正常的方括号内容要留着
+    assert LLMSummarizer._section_heading("## 重点 [务必注意]") == "重点 [务必注意]"
     assert LLMSummarizer._section_heading("## 没有时间的标题") == "没有时间的标题"
     assert LLMSummarizer._section_heading("整段没有二级标题") == ""
 
