@@ -352,16 +352,39 @@ class LLMSummarizer:
             analysis_progress = 93
             analysis_stage = "正在补充点评与分析"
             await self._report_progress(progress_callback, analysis_progress, analysis_stage)
-            analysis = await self._complete(
-                self._analysis_prompt(title, draft),
-                max_tokens=3_200,
-                effort=self._stage_effort(reasoning_effort, style, "analysis"),
-                progress_callback=progress_callback,
-                progress=analysis_progress,
-                stage=analysis_stage,
-                should_abort=should_abort,
-            )
-            draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
+            analysis = ""
+            reason = ""
+            # 点评是初稿之后的可选增强：免费网关的公共并发随时段波动（群测期实测 429），
+            # 限流退避一次再试，仍失败就保留初稿正常完成，不能把 96% 的任务判死
+            for attempt in range(2):
+                if attempt:
+                    await self._report_progress(
+                        progress_callback,
+                        0,
+                        f"{analysis_stage} 遇到限流，等待 {SECTION_RATE_LIMIT_BACKOFF_SECONDS:.0f} 秒后重试",
+                    )
+                    # 不做 try：用户取消必须从这里直接抛出去（asyncio.sleep 可被取消）
+                    await asyncio.sleep(SECTION_RATE_LIMIT_BACKOFF_SECONDS)
+                try:
+                    analysis = await self._complete(
+                        self._analysis_prompt(title, draft),
+                        max_tokens=3_200,
+                        effort=self._stage_effort(reasoning_effort, style, "analysis"),
+                        progress_callback=progress_callback,
+                        progress=analysis_progress,
+                        stage=analysis_stage,
+                        should_abort=should_abort,
+                    )
+                    break
+                except Exception as exc:
+                    # CancelledError 不是 Exception 子类：用户取消必须原样往外抛
+                    reason = f"{type(exc).__name__}: {exc}"
+                    if not _looks_rate_limited(exc):
+                        break
+            if analysis.strip():
+                draft = f"{draft.rstrip()}\n\n{analysis.lstrip()}"
+            else:
+                self.warnings.append(f"点评与分析未生成（{reason}），笔记正文不受影响")
         await self._report_progress(progress_callback, 99, "正在保存笔记")
         return self._strip_code_fence(draft)
 
