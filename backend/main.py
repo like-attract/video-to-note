@@ -1281,7 +1281,7 @@ def append_asr_notes(task: dict[str, Any], whisper_result: dict[str, Any]) -> No
     load_seconds = float(whisper_result.get("model_load_seconds") or 0)
     if load_seconds >= 1:
         task["logs"].append(
-            f"Whisper 模型加载用时 {load_seconds} 秒，转写用时 "
+            f"模型加载用时 {load_seconds} 秒，转写用时 "
             f"{whisper_result.get('transcribe_seconds')} 秒"
         )
 
