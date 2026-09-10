@@ -771,6 +771,46 @@ async def test_rate_limited_section_backs_off_before_retrying() -> None:
 
 
 @pytest.mark.asyncio
+async def test_backoff_tolerates_a_sync_progress_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """退避提示不得直接 await 回调：调用方传同步函数也得活。"""
+
+    async def no_wait(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", no_wait)
+    seen: list[str] = []
+
+    def sync_report(value: int, message: str) -> None:
+        seen.append(message)
+
+    calls: list[str] = []
+
+    async def fake(prompt, max_tokens, effort="auto", **kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise RuntimeError("Error code: 429 - We have to rate limit you")
+        return f"## 小节1\n\n[{_section_end(prompt)}] 重试后写成"
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    summarizer._complete = fake
+    section = [
+        TranscriptSegment(index * 60.0, index * 60.0 + 59.0, "字" * 100)
+        for index in range(3)
+    ]
+
+    piece = await summarizer._write_one_section(
+        "长视频", 1, 1, section, "", "high", "auto", sync_report, None
+    )
+
+    assert any("遇到限流" in message for message in seen)
+    assert piece.endswith("重试后写成")
+    assert summarizer.warnings == []
+
+
+@pytest.mark.asyncio
 async def test_concurrent_completion_order_does_not_change_assembly() -> None:
     async def fake(prompt, max_tokens, effort):
         if "各段标题与时间范围" in prompt:

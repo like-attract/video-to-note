@@ -570,8 +570,11 @@ class LLMSummarizer:
         rate_limited = False
         for attempt in range(SECTION_ATTEMPTS):
             if rate_limited:
-                await report(
-                    0, f"{stage} 遇到限流，等待 {SECTION_RATE_LIMIT_BACKOFF_SECONDS:.0f} 秒后重试"
+                # 走 _report_progress 而不是直接 await report：回调可能是同步函数
+                await self._report_progress(
+                    report,
+                    0,
+                    f"{stage} 遇到限流，等待 {SECTION_RATE_LIMIT_BACKOFF_SECONDS:.0f} 秒后重试",
                 )
                 # 不做 try：用户取消必须从这里直接抛出去（asyncio.sleep 可被取消）
                 await asyncio.sleep(SECTION_RATE_LIMIT_BACKOFF_SECONDS)
