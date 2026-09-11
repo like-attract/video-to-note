@@ -131,11 +131,10 @@ RAW_FALLBACK_HEADING = "### 未能整理的原文"
 OVERVIEW_MAX_TOKENS = 600
 # 兜底时附在提示词里的“上一段结尾原话”长度，只用于让模型看懂指代。
 SECTION_CONTEXT_CHARACTERS = 160
-# 背景资料（简介 + 高赞评论）进提示词的预算：帮助模型认出这是哪门课/谁的视频、
+# 背景资料（视频简介）进提示词的预算：帮助模型认出这是哪门课/谁的视频、
 # 核对术语与专有名词写法；只用于理解与校对，不允许当成视频内容写进笔记。
+# 评论区热评多为玩梗，误导风险大于信息量，刻意不采集。
 BRIEF_DESCRIPTION_CHARACTERS = 400
-BRIEF_COMMENT_CHARACTERS = 80
-BRIEF_COMMENT_COUNT = 8
 # 匹配笔记中的 [MM:SS]、[MM:SS-MM:SS]、[HH:MM:SS] 等时间戳（起点与区间终点都计入）。
 # 分钟位允许 1~3 位：长视频模型常把 1 小时 45 分写成 [105:30]，识别不到会被误判成丢尾。
 _NOTE_TIMESTAMP_RE = re.compile(
@@ -1537,32 +1536,20 @@ class LLMSummarizer:
 
     @staticmethod
     def _context_brief(metadata: dict[str, Any]) -> str:
-        """把简介与热门评论压成一小块背景资料；两者都没有时返回空串。
+        """把视频简介压成一小块背景资料；没有简介时返回空串。
 
-        字幕稿本身往往不点名「这是谁的课」，简介和评论区通常一眼可辨；术语与
-        专有名词的正确写法也常由评论区率先给出。只允许用于理解与校对。
+        字幕稿本身往往不点名「这是谁的课」，简介通常一眼可辨。只允许用于
+        理解与校对；热评多为玩梗（误导风险大于信息量），刻意不采集。
         """
         description = str(metadata.get("description") or "").strip()
-        comments = [
-            str(comment).strip()
-            for comment in (metadata.get("hot_comments") or [])
-            if str(comment).strip()
-        ]
-        if not description and not comments:
+        if not description:
             return ""
-        lines = [
-            "视频背景资料（来自平台简介与热门评论，用于理解主题背景、识别这是哪门课程"
-            "或哪个系列、核对术语与专有名词写法；不要把其中内容当成视频内容写进笔记）："
-        ]
-        if description:
-            lines.append(f"简介：{description[:BRIEF_DESCRIPTION_CHARACTERS]}")
-        if comments:
-            lines.append("热门评论摘录：")
-            lines.extend(
-                f"- {comment[:BRIEF_COMMENT_CHARACTERS]}"
-                for comment in comments[:BRIEF_COMMENT_COUNT]
-            )
-        return "\n".join(lines)
+        return (
+            "视频背景资料（来自平台简介，用于理解主题背景、识别这是哪门课程"
+            "或哪个系列、核对术语与专有名词写法；不要把简介内容当成视频内容"
+            "写进笔记）：\n"
+            f"简介：{description[:BRIEF_DESCRIPTION_CHARACTERS]}"
+        )
 
     @staticmethod
     def _note_prompt(

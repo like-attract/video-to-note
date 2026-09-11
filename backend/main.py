@@ -1762,23 +1762,6 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             mapped = 55 + round(max(0, min(100, progress)) * 0.44)
             set_progress(task, 6, "生成笔记", mapped, message)
 
-        hot_comments: list[str] = []
-        try:
-            if (
-                not is_local
-                and video_processor.detect_source(source_url or "")
-                == VideoSource.BILIBILI
-            ):
-                hot_comments = await asyncio.to_thread(
-                    video_processor.fetch_bilibili_comments, source_url, cookie
-                )
-                if hot_comments:
-                    task["logs"].append(
-                        f"已取 {len(hot_comments)} 条热门评论作为背景资料辅助成稿"
-                    )
-        except Exception:
-            hot_comments = []
-
         summary = await summarizer.generate_summary(
             title,
             segments,
@@ -1790,7 +1773,6 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                 "like_count": info.get("like_count") or 0,
                 "transcript_source": transcript_result["source"],
                 "description": (info.get("description") or "")[:600],
-                "hot_comments": hot_comments,
             },
             style=request.summary_style,
             reasoning_effort=request.reasoning_effort,

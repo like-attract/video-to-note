@@ -637,7 +637,7 @@ def test_section_prompt_includes_brief_and_math_delimiters() -> None:
         4,
         [TranscriptSegment(0, 60, "内容")],
         "",
-        brief="视频背景资料（来自平台简介与热门评论）：\n简介：线性代数课程",
+        brief="视频背景资料（来自平台简介）：\n简介：线性代数课程",
     )
     assert "线性代数课程" in prompt
     # 多数 Markdown 渲染器只认 $ 系定界符，\( \) / \[ \] 会渲染成裸反斜杠
@@ -649,19 +649,18 @@ def test_section_prompt_includes_brief_and_math_delimiters() -> None:
     assert "视频背景资料" not in bare
 
 
-def test_context_brief_combines_description_and_comments() -> None:
-    brief = LLMSummarizer._context_brief(
-        {
-            "description": "宋浩老师的线性代数课程",
-            "hot_comments": ["讲得好 " + "很" * 90, "   ", "前排支持"],
-        }
-    )
+def test_context_brief_uses_video_description_only() -> None:
+    brief = LLMSummarizer._context_brief({"description": "宋浩老师的线性代数课程"})
     assert "简介：宋浩老师的线性代数课程" in brief
-    assert "前排支持" in brief
-    # 评论按预算截断，不让评论区吃掉提示词
-    assert "很" * 81 not in brief
-    # 只有空白内容时不要输出空壳背景块
-    assert LLMSummarizer._context_brief({"description": "  ", "hot_comments": [""]}) == ""
+    # 热评多为玩梗，刻意不采集：即使元数据里带了也不进提示词
+    assert (
+        LLMSummarizer._context_brief(
+            {"description": "线代课程", "hot_comments": ["前排"]}
+        ).count("前排")
+        == 0
+    )
+    # 缺失或空白简介时不输出空壳背景块
+    assert LLMSummarizer._context_brief({"description": "  "}) == ""
     assert LLMSummarizer._context_brief({}) == ""
 
 
