@@ -1353,8 +1353,10 @@ function dismissBiliHint() {
 }
 
 // ---- B 站分 P 勾选面板 ----
-// 多分 P 链接在提交前显式决定转写范围：默认勾选与后端规则一致
-// （链接带 ?p=N 只勾该 P，否则全选），改动后随请求下发 bilibili_pages。
+// 多分 P 链接在提交前显式决定转写范围：**默认一个都不勾**，要用户主动勾。
+// 42 P 的课误点「开始生成」就是几十小时的转写，代价远大于多点几下。
+// 只有链接里已经表达过意图时才预勾（?p=N 勾该 P）。勾选结果总是随请求下发
+// bilibili_pages（全选也下发），否则「URL 带 ?p=N + 勾了全部」会落回只转该 P。
 // 预览是尽力而为：接口失败就藏面板，提交行为退回原来的 URL 规则。
 let biliPagesDebounce = null;
 let biliPagesToken = 0;
@@ -1426,7 +1428,7 @@ function renderBiliPagesPanel(url, payload) {
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.value = String(page.page);
-        checkbox.checked = pinned ? page.page === pinned : true;
+        checkbox.checked = page.page === pinned;
         checkbox.addEventListener('change', updateBiliPagesSummary);
         const index = document.createElement('span');
         index.className = 'bili-page-index';

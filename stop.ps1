@@ -1,9 +1,39 @@
-param([switch]$Quiet)
+param(
+    [switch]$Quiet,
+    [switch]$All
+)
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $statePath = Join-Path $projectRoot ".runtime\server.json"
 $expectedPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+
+if ($All) {
+    # 默认路径只停状态文件记的那一个实例；状态文件被覆盖或删掉后留下的孤儿
+    # 就再没有入口了——开发实例没有托盘图标，除了脚本无处可关
+    $owned = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -match 'backend\.main:app' -and
+            $_.CommandLine -match [regex]::Escape($projectRoot)
+        })
+    foreach ($proc in $owned) {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        if (-not $Quiet) { Write-Host "Stopped VideoToNo dev server (PID $($proc.ProcessId))." -ForegroundColor Green }
+    }
+    if (-not $owned -and -not $Quiet) {
+        Write-Host "No VideoToNo dev server process found for this project." -ForegroundColor DarkGray
+    }
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+
+    # 打包版不在此列：它可能正跑着任务，且有托盘图标可以退，脚本不越俎代庖
+    $packaged = @(Get-Process -Name "VideoToNo*" -ErrorAction SilentlyContinue)
+    if ($packaged -and -not $Quiet) {
+        foreach ($proc in $packaged) {
+            Write-Host "Packaged instance still running (PID $($proc.Id)) - not touched; quit it from its tray icon." -ForegroundColor Yellow
+        }
+    }
+    exit 0
+}
 
 if (-not (Test-Path -LiteralPath $statePath)) {
     if (-not $Quiet) { Write-Host "VideoToNo is not running (no PID state file)." -ForegroundColor DarkGray }

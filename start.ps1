@@ -55,6 +55,9 @@ if (Test-Path -LiteralPath $statePath) {
         $existing = Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue
         if ($existing) {
             Write-Host "VideoToNo is already running (PID $($state.pid)): $($state.url)" -ForegroundColor Green
+            if ($PSBoundParameters.ContainsKey("Port") -and $state.url -ne "http://${BindHost}:$Port") {
+                Write-Host "Requested port $Port was NOT used - one instance per state file; run .\stop.ps1 -All first." -ForegroundColor Yellow
+            }
             Open-VideoToNoPage $state.url
             exit 0
         }
@@ -141,5 +144,5 @@ $state = [ordered]@{
 $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
 Write-Host "VideoToNo started (PID $listenerPid): $url" -ForegroundColor Green
-Write-Host "Stop it with .\stop.ps1; logs are in .runtime\." -ForegroundColor DarkGray
+Write-Host "Stop it with .\stop.ps1 (orphaned instances: .\stop.ps1 -All); logs are in .runtime\." -ForegroundColor DarkGray
 Open-VideoToNoPage $url
