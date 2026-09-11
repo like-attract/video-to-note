@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+    <!-- style-src 放开 inline style：KaTeX 产物的上下标/矩阵定位全靠 inline style 属性
+         （模型内容仍被 DOMPurify 剥掉 style，放行的只有本机生成的 KaTeX 输出）。
+         注意 hash 与 'unsafe-inline' 并存时后者会被忽略，必须整个替换。 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
     <title>VideoToNo - 本地视频笔记</title>
     <link rel="icon" href="/favicon.ico">
     <script src="theme-bootstrap.js"></script>

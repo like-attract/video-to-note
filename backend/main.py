@@ -125,9 +125,14 @@ def is_loopback_client(host: str | None) -> bool:
 
 
 SECURITY_HEADERS = {
+    # style-src 放开 inline style：KaTeX 产物的上下标/矩阵定位全靠 inline style 属性。
+    # 模型产出的 HTML 仍被前端 DOMPurify 剥掉 style（FORBID_ATTR），放行的只有
+    # 本机 KaTeX 渲染结果。注意 CSP 的 hash 与 'unsafe-inline' 并存时后者会被
+    # 忽略，必须整体替换；此处与 frontend/index.html 的 meta 是两份独立生效的
+    # CSP，改一处就要同步改另一处。
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; "
+        "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
         "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     ),
