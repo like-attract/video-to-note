@@ -75,13 +75,13 @@ DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
 # 正文一个字没拿到，靠关思考重试才救回）。×5 给思考留出收尾余地，正常产出规模
 # 仍由各阶段的 max_tokens 把住。
 MAX_EFFORT_BUDGET_MULTIPLIER = 5
-# auto 档在 DeepSeek 兼容通道按笔记风格解析出的默认推理档位。
-# 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量。
-# 曾默认 detailed/faithful → max，两次实测都撑不住：max 的思考链要么涨到输出额度
-# 上限把正文挤没了（28 分钟视频，思考 2.2 万字后正文为 0），要么单纯思考太久
-# （8 分钟视频、2200 字字幕稿，思考 2.2 万字 20 分钟才开始输出正文）。
-# 成稿的输入多是已压缩材料或短片，high 足够；max 仅在用户显式选择时使用。
-STYLE_DEFAULT_EFFORT = {"detailed": "high", "faithful": "high", "concise": "high"}
+# auto 档在 DeepSeek 兼容通道的默认推理档位：一律关闭思考。
+# 累计六次实测：max 思考要么吃满输出额度正文为 0（28 分钟视频思考 2.2 万字后正文 0），
+# 要么拖到十几分钟被网关掐断长流（昇腾通道 peer closed）；high 仍有万字号思考；而 off
+# 档在 8 分钟视频（95s 成稿）与 3 小时 6.2 万字真题课（8.4 分钟，90 秒块覆盖 119/120、
+# 15 道真题结论全对）上质量与 GLM agent 流程持平。要深度思考请显式选 high/max；
+# 非 DeepSeek 通道 auto 仍保持模型默认，不注入私有参数。
+STYLE_DEFAULT_EFFORT = "off"
 # 逐段直写（长视频）在 auto 下的档位：直接关思考。这一步是“照着几千字原文整理成稿”
 # 的局部任务，思考链帮不上忙——实测 high 档每段 1 万多字思考只换 1 千字正文，
 # 28 分钟的视频总共跑了 44 分钟；关掉后输出额度全部留给正文。
@@ -1189,7 +1189,7 @@ class LLMSummarizer:
         if self._uses_deepseek_compatibility():
             if stage == "section":
                 return SECTION_EFFORT
-            return STYLE_DEFAULT_EFFORT.get(style, "high")
+            return STYLE_DEFAULT_EFFORT
         return "auto"
 
     def describe_effort(self, reasoning_effort: str, style: str) -> str:
@@ -1202,11 +1202,7 @@ class LLMSummarizer:
         if reasoning_effort in {"off", "high", "max"}:
             return f"{reasoning_effort}{rejected}"
         if self._uses_deepseek_compatibility():
-            resolved = STYLE_DEFAULT_EFFORT.get(style, "high")
-            return (
-                f"auto（DeepSeek 通道按风格默认：{resolved}；"
-                f"长视频逐段直写关思考{rejected}）"
-            )
+            return f"auto（DeepSeek 通道默认关思考{rejected}）"
         return "auto（使用模型默认）"
 
     def _param_cache_key(self) -> tuple[str, str, str]:

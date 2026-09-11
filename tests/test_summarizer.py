@@ -566,7 +566,7 @@ def test_section_stage_effort_disables_thinking_in_auto_mode() -> None:
 
     # 逐段直写是局部任务：实测 high 档每段 1 万多字思考只换 1 千字正文，auto 下直接关思考
     assert summarizer._stage_effort("auto", "faithful", "section") == "off"
-    assert summarizer._stage_effort("auto", "faithful", "notes") == "high"
+    assert summarizer._stage_effort("auto", "faithful", "notes") == "off"
     # 用户显式选择仍然优先
     assert summarizer._stage_effort("max", "faithful", "section") == "max"
     assert summarizer._stage_effort("off", "faithful", "section") == "off"
@@ -1418,9 +1418,9 @@ def test_auto_resolves_style_default_only_on_deepseek_compatible_channels() -> N
     summarizer.model_type = "deepseek"
     summarizer.model = "deepseek-v4-flash"
     summarizer.base_url = "https://api.deepseek.com"
-    assert summarizer._stage_effort("auto", "detailed", "notes") == "high"
-    assert summarizer._stage_effort("auto", "faithful", "notes") == "high"
-    assert summarizer._stage_effort("auto", "concise", "notes") == "high"
+    assert summarizer._stage_effort("auto", "detailed", "notes") == "off"
+    assert summarizer._stage_effort("auto", "faithful", "notes") == "off"
+    assert summarizer._stage_effort("auto", "concise", "notes") == "off"
     # 用户显式选择永远优先
     assert summarizer._stage_effort("off", "detailed", "notes") == "off"
     assert summarizer._stage_effort("high", "detailed", "analysis") == "high"
@@ -1429,7 +1429,7 @@ def test_auto_resolves_style_default_only_on_deepseek_compatible_channels() -> N
     summarizer.model_type = "custom"
     summarizer.model = "deepseek-ai/DeepSeek-V4-Flash-0731"
     summarizer.base_url = "https://api-inference.modelscope.cn/v1/"
-    assert summarizer._stage_effort("auto", "detailed", "notes") == "high"
+    assert summarizer._stage_effort("auto", "detailed", "notes") == "off"
 
     # 非 DeepSeek 通道保持模型默认，不注入私有参数
     summarizer.model_type = "custom"
@@ -1448,7 +1448,7 @@ def test_describe_effort_reports_effective_level() -> None:
     assert summarizer.describe_effort("max", "detailed") == "max"
     assert (
         summarizer.describe_effort("auto", "detailed")
-        == "auto（DeepSeek 通道按风格默认：high；长视频逐段直写关思考）"
+        == "auto（DeepSeek 通道默认关思考）"
     )
 
     summarizer.model_type = "openai"
