@@ -969,6 +969,8 @@ function addCustomProfile() {
     renderProfileForm();
     persistPrefs();
     refreshKeyStatus();
+    // 新档案默认叫「新的自定义接口」，聚焦名称框引导第一件事就是改名
+    byId('customProfileLabel').focus();
     showToast('已新建自定义接口档案，填好名称和地址即可使用', 'info');
 }
 
