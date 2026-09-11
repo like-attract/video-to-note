@@ -198,6 +198,7 @@ class VideoProcessor:
     # 但 api.bilibili.com 的开放接口可用。yt-dlp 拉不到页面时回退到这些接口。
     BILI_VIEW_API = "https://api.bilibili.com/x/web-interface/view"
     BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl"
+    BILI_REPLY_API = "https://api.bilibili.com/x/v2/reply"
     BILI_BLOCKED_MARKERS = (
         "412",
         "precondition failed",
@@ -316,6 +317,48 @@ class VideoProcessor:
         return BiliVideoInfo(
             bvid=bvid, aid=aid, title=str(data.get("title") or ""), pages=pages
         )
+
+    def fetch_bilibili_comments(
+        self,
+        url: str,
+        cookie: dict[str, str] | None = None,
+        limit: int = 8,
+    ) -> list[str]:
+        """取热门评论摘录，供笔记阶段理解视频背景（这是谁的课、讲什么主题）。
+
+        纯增强通道：任何失败都返回空列表，绝不阻塞或拖垮笔记生成。
+        评论区接口只认 av 号，链接里只有 BV 号时先调一次 view 接口补齐。
+        """
+        try:
+            bvid, aid = self._bilibili_ids(url)
+            if not bvid and not aid:
+                return []
+            if not aid:
+                payload = self._bilibili_get_json(
+                    self.BILI_VIEW_API,
+                    {"bvid": bvid},
+                    self._bili_headers(cookie),
+                )
+                aid = int((payload.get("data") or {}).get("aid") or 0)
+            if not aid:
+                return []
+            payload = self._bilibili_get_json(
+                self.BILI_REPLY_API,
+                {"type": 1, "oid": aid, "pn": 1, "ps": 20, "sort": 2},
+                self._bili_headers(cookie),
+            )
+            replies = (payload.get("data") or {}).get("replies") or []
+            comments: list[str] = []
+            for reply in replies:
+                message = str((reply.get("content") or {}).get("message") or "")
+                message = re.sub(r"\s+", " ", message).strip()
+                if message:
+                    comments.append(message[:80])
+                if len(comments) >= limit:
+                    break
+            return comments
+        except Exception:
+            return []
 
     async def fetch_bilibili_subtitles(
         self,

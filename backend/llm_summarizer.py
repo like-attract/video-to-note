@@ -73,9 +73,10 @@ DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
 # 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量，
 # 因此默认拉高换内容完整性；非 DeepSeek 通道保持模型默认不注入参数。
 STYLE_DEFAULT_EFFORT = {"detailed": "max", "faithful": "max", "concise": "high"}
-# 逐段直写（长视频）在 auto 下的档位：比成稿低一档。那一段只有几千字材料，属局部任务，
-# 而 max 的思考链实测会吃光整个输出额度——累计 1.9 万字思考后一个字正文都不返回。
-SECTION_EFFORT = "high"
+# 逐段直写（长视频）在 auto 下的档位：直接关思考。这一步是“照着几千字原文整理成稿”
+# 的局部任务，思考链帮不上忙——实测 high 档每段 1 万多字思考只换 1 千字正文，
+# 28 分钟的视频总共跑了 44 分钟；关掉后输出额度全部留给正文。
+SECTION_EFFORT = "off"
 # 笔记末尾时间戳落后转写结尾超过该秒数视为丢尾。
 TAIL_GAP_SECONDS = 60.0
 # 补尾时附带给模型参考的已有笔记结尾长度。
@@ -130,6 +131,11 @@ RAW_FALLBACK_HEADING = "### 未能整理的原文"
 OVERVIEW_MAX_TOKENS = 600
 # 兜底时附在提示词里的“上一段结尾原话”长度，只用于让模型看懂指代。
 SECTION_CONTEXT_CHARACTERS = 160
+# 背景资料（简介 + 高赞评论）进提示词的预算：帮助模型认出这是哪门课/谁的视频、
+# 核对术语与专有名词写法；只用于理解与校对，不允许当成视频内容写进笔记。
+BRIEF_DESCRIPTION_CHARACTERS = 400
+BRIEF_COMMENT_CHARACTERS = 80
+BRIEF_COMMENT_COUNT = 8
 # 匹配笔记中的 [MM:SS]、[MM:SS-MM:SS]、[HH:MM:SS] 等时间戳（起点与区间终点都计入）。
 # 分钟位允许 1~3 位：长视频模型常把 1 小时 45 分写成 [105:30]，识别不到会被误判成丢尾。
 _NOTE_TIMESTAMP_RE = re.compile(
@@ -140,6 +146,10 @@ _NOTE_TIMESTAMP_RE = re.compile(
 _HEADING_TIMESTAMP_RE = re.compile(
     r"\s*\[\d{1,3}:\d{2}(?::\d{2})?(?:\s*[-–—~]\s*\d{1,3}:\d{2}(?::\d{2})?)?\]$"
 )
+# 模型常把公式写成 \(...\) / \[...\]，而多数 Markdown 渲染器只认 $...$ / $$...$$。
+# 成稿收尾时统一归一；代码块内是字面文本，跳过不改。
+_MATH_DISPLAY_RE = re.compile(r"\\\[(.+?)\\\]", re.S)
+_MATH_INLINE_RE = re.compile(r"\\\((.+?)\\\)", re.S)
 # 思考类参数兼容差异：官方 DeepSeek 认私有 thinking，很多第三方 OpenAI 兼容网关
 # 只认标准 reasoning_effort（v1.2.3 用户反馈 400 unsupported_parameter "thinking"）。
 # 被拒过的参数按 (provider, model, base_url) 记住，同进程后续任务不再重复踩。
@@ -331,6 +341,7 @@ class LLMSummarizer:
             draft = await self._write_long_transcript_notes(
                 title,
                 segments,
+                metadata or {},
                 style,
                 reasoning_effort,
                 progress_callback,
@@ -386,7 +397,7 @@ class LLMSummarizer:
             else:
                 self.warnings.append(f"点评与分析未生成（{reason}），笔记正文不受影响")
         await self._report_progress(progress_callback, 99, "正在保存笔记")
-        return self._strip_code_fence(draft)
+        return self._normalize_math_delimiters(self._strip_code_fence(draft))
 
     async def _write_condensed_notes(
         self,
@@ -493,6 +504,7 @@ class LLMSummarizer:
         self,
         title: str,
         segments: Sequence[TranscriptSegment],
+        metadata: dict[str, Any] | None,
         style: str,
         reasoning_effort: str,
         progress_callback: ProgressCallback | None,
@@ -516,6 +528,7 @@ class LLMSummarizer:
         total = len(sections)
         effort = self._stage_effort(reasoning_effort, style, "section")
         mechanical_effort = self._mechanical_effort(reasoning_effort)
+        brief = self._context_brief(metadata or {})
         # 并发完成顺序不定，对外回报只允许单调不减；心跳沿用同一个峰值。
         peak = [0]
 
@@ -546,6 +559,7 @@ class LLMSummarizer:
                     mechanical_effort,
                     report,
                     should_abort,
+                    brief,
                 )
             done += 1
             await report(
@@ -583,6 +597,7 @@ class LLMSummarizer:
         mechanical_effort: str,
         report: Callable[[int, str], Awaitable[None]],
         should_abort: Callable[[], bool] | None,
+        brief: str = "",
     ) -> str:
         """把一段转录直接写成终稿笔记，并保证它推进到自己那段的时间末尾。
 
@@ -616,6 +631,7 @@ class LLMSummarizer:
                         total,
                         section,
                         context_tail,
+                        brief=brief,
                         retried=attempt > 0,
                     ),
                     max_tokens=max_tokens,
@@ -845,6 +861,7 @@ class LLMSummarizer:
         total: int,
         section: Sequence[TranscriptSegment],
         context_tail: str,
+        brief: str = "",
         retried: bool = False,
     ) -> str:
         start = format_timestamp(section[0].start)
@@ -859,9 +876,10 @@ class LLMSummarizer:
             if retried
             else ""
         )
+        brief_block = f"\n{brief}\n" if brief else ""
         return f"""视频标题：{title}
 这是全片第 {index}/{total} 段，覆盖时间轴 {start} – {end}。直接把这一段写成最终成稿的笔记正文：不要写提纲、不要预告后文、不要总结全片。
-
+{brief_block}
 要求：
 - 完整记录本段的每一个话题、例子、推导过程和数字，本段材料一直推进到 {end}
 - 把讲同一件事的连续几句合并成通顺段落，不要一行对应一句口播；长度约为本段材料的五到七成。压缩的是说法，不是话题——每个话题、例子和数字都必须留下
@@ -869,6 +887,7 @@ class LLMSummarizer:
 - 本段最后一行以接近 {end} 的时间戳开头，用于核对有没有写到本段结尾{retry_hint}
 - 时间点只能取自材料，写成 [MM:SS] 或 [起点-终点]，超过一小时请带上小时
 - 用 ## 组织小节、### 组织子话题；不要输出 # 开头的文档标题，也不要输出视频元信息
+- 数学公式一律写成 Markdown 公式：行内用 $...$，独立公式块用 $$...$$，不要用 \\(...\\) 或 \\[...\\] 包裹
 - 忠实于讲者本意，允许结合上下文修正明显的口误与转写错误；不补充外部知识，不做评价
 {context}
 本段转录：
@@ -889,6 +908,7 @@ class LLMSummarizer:
 请接着已有结尾往下写，只输出剩余内容：
 - 不要重复已有内容；需要新小节时直接起一个 ## 或 ### 标题，不要重复整篇结构
 - 时间戳格式与已有结尾保持一致，一直写到 {end} 为止
+- 数学公式与已有笔记保持一致，用 Markdown 公式：行内 $...$、独立公式块 $$...$$
 - 忠实转录内容，不补充外部知识，不做评价
 
 已有结尾（仅供衔接参考）：
@@ -1099,6 +1119,7 @@ class LLMSummarizer:
 
 请根据下面的结尾部分转录补写这一部分的笔记：
 - 与已有笔记保持一致的结构、语气和时间戳格式（[MM:SS] 或 [起点-终点]）
+- 数学公式与已有笔记保持一致，用 Markdown 公式：行内 $...$、独立公式块 $$...$$
 - 忠实转录内容，不补充外部知识，不做评价
 - 只输出补写的 Markdown 正文，不要重复已有笔记，不要输出标题或解释
 
@@ -1124,9 +1145,9 @@ class LLMSummarizer:
         - 用户显式选择（off/high/max）永远优先；
         - auto 在 DeepSeek 兼容通道（含 custom 中识别出的 DeepSeek 模型）按
           笔记风格给默认档：detailed/faithful → max，concise → high；
-          但 ``section``（长视频的逐段直写）一律降到 high——那一段材料只有几千字，
-          是局部任务，而 max 的思考链实测能吃光整个输出额度（累计 1.9 万字思考后
-          直接不返回正文），额度并没有分给正文；
+          但 ``section``（长视频的逐段直写）一律关闭思考——那一段材料只有几千字，
+          是“照着原文整理成稿”的局部任务，思考链实测只会吃掉输出额度与时间
+          （每段 1 万多字思考换 1 千字正文，28 分钟视频总耗时 44 分钟）；
         - 其余通道返回 auto，保持模型默认，不注入私有参数。
         """
         if selected in {"off", "high", "max"}:
@@ -1148,7 +1169,10 @@ class LLMSummarizer:
             return f"{reasoning_effort}{rejected}"
         if self._uses_deepseek_compatibility():
             resolved = STYLE_DEFAULT_EFFORT.get(style, "high")
-            return f"auto（DeepSeek 通道按风格默认：{resolved}{rejected}）"
+            return (
+                f"auto（DeepSeek 通道按风格默认：{resolved}；"
+                f"长视频逐段直写关思考{rejected}）"
+            )
         return "auto（使用模型默认）"
 
     def _param_cache_key(self) -> tuple[str, str, str]:
@@ -1512,6 +1536,35 @@ class LLMSummarizer:
 {material}"""
 
     @staticmethod
+    def _context_brief(metadata: dict[str, Any]) -> str:
+        """把简介与热门评论压成一小块背景资料；两者都没有时返回空串。
+
+        字幕稿本身往往不点名「这是谁的课」，简介和评论区通常一眼可辨；术语与
+        专有名词的正确写法也常由评论区率先给出。只允许用于理解与校对。
+        """
+        description = str(metadata.get("description") or "").strip()
+        comments = [
+            str(comment).strip()
+            for comment in (metadata.get("hot_comments") or [])
+            if str(comment).strip()
+        ]
+        if not description and not comments:
+            return ""
+        lines = [
+            "视频背景资料（来自平台简介与热门评论，用于理解主题背景、识别这是哪门课程"
+            "或哪个系列、核对术语与专有名词写法；不要把其中内容当成视频内容写进笔记）："
+        ]
+        if description:
+            lines.append(f"简介：{description[:BRIEF_DESCRIPTION_CHARACTERS]}")
+        if comments:
+            lines.append("热门评论摘录：")
+            lines.extend(
+                f"- {comment[:BRIEF_COMMENT_CHARACTERS]}"
+                for comment in comments[:BRIEF_COMMENT_COUNT]
+            )
+        return "\n".join(lines)
+
+    @staticmethod
     def _note_prompt(
         title: str,
         source: str,
@@ -1553,6 +1606,8 @@ class LLMSummarizer:
             "时长或播放信息；缺失的信息省略，不要猜测，也不必为了满足格式强行补齐。"
             "应用会在标题下补充一行可验证的元信息，正文无需重复同一组信息。"
         )
+        brief = LLMSummarizer._context_brief(metadata)
+        brief_block = f"\n{brief}\n" if brief else ""
         return f"""{task}
 
 视频标题：{title}
@@ -1562,11 +1617,12 @@ class LLMSummarizer:
 播放：{view_count}
 点赞：{like_count}
 文字来源：{source_label}
-
+{brief_block}
 以准确理解语境和作者立场为先。{metadata_hint}时间点只能取自材料。{coverage_hint}{timestamp_hint}可在上下文支持时直接修正明显的口误、
 笔误或转写错误；只有歧义会影响结论且无法可靠判断时，才在正文采用最可能的解释，并在文末用
 Markdown 脚注集中说明。不要在正文反复插入“原文如此”或“疑为转写错误”。
-结构按内容自然组织，不必凑固定模板。标题使用：# 视频笔记：《{title}》
+结构按内容自然组织，不必凑固定模板。数学公式一律用 Markdown 公式书写：行内 $...$、独立
+公式块 $$...$$，不要用 \\(...\\) 或 \\[...\\] 包裹。标题使用：# 视频笔记：《{title}》
 
 材料：
 {source}"""
@@ -1581,6 +1637,25 @@ Markdown 脚注集中说明。不要在正文反复插入“原文如此”或�
 
 已有笔记：
 {draft}"""
+
+    @classmethod
+    def _normalize_math_delimiters(cls, text: str) -> str:
+        """把 \\(...\\) 与 \\[...\\] 统一成 Markdown 通用的 $...$ / $$...$$。
+
+        提示词已要求模型直接用 $ 系定界符，这里兜底收尾——提示词拦不住的漏网
+        之鱼如果留着，在多数渲染器里就是一堆裸反斜杠。代码块内是字面文本，跳过。
+        """
+        parts = text.split("```")
+        for index in range(0, len(parts), 2):
+            segment = parts[index]
+            segment = _MATH_DISPLAY_RE.sub(
+                lambda match: f"$$\n{match.group(1).strip()}\n$$", segment
+            )
+            segment = _MATH_INLINE_RE.sub(
+                lambda match: f"${match.group(1).strip()}$", segment
+            )
+            parts[index] = segment
+        return "```".join(parts)
 
     @staticmethod
     def _strip_code_fence(value: str) -> str:

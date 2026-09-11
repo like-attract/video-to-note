@@ -556,17 +556,18 @@ def _summarizer_with(fake_complete) -> tuple[LLMSummarizer, list]:
     return summarizer, calls
 
 
-def test_section_stage_effort_is_one_notch_below_the_draft() -> None:
+def test_section_stage_effort_disables_thinking_in_auto_mode() -> None:
     summarizer = object.__new__(LLMSummarizer)
     summarizer.model_type = "deepseek"
     summarizer.model = "deepseek-v4-flash"
     summarizer.base_url = "https://api.deepseek.com"
 
-    # max 档的思考链实测会吃光整段输出额度，逐段直写这种局部任务用 high
-    assert summarizer._stage_effort("auto", "faithful", "section") == "high"
+    # 逐段直写是局部任务：实测 high 档每段 1 万多字思考只换 1 千字正文，auto 下直接关思考
+    assert summarizer._stage_effort("auto", "faithful", "section") == "off"
     assert summarizer._stage_effort("auto", "faithful", "notes") == "max"
     # 用户显式选择仍然优先
     assert summarizer._stage_effort("max", "faithful", "section") == "max"
+    assert summarizer._stage_effort("off", "faithful", "section") == "off"
 
 
 @pytest.mark.asyncio
@@ -627,6 +628,54 @@ def test_section_prompt_asks_for_timestamped_headings() -> None:
     # 用户反馈：小标题带时间更好读（放在标题文字之后）；文档级标题仍统一由代码写在最前
     assert "「## 标题 [起点-终点]」" in prompt
     assert "不要输出 # 开头的文档标题" in prompt
+
+
+def test_section_prompt_includes_brief_and_math_delimiters() -> None:
+    prompt = LLMSummarizer._section_note_prompt(
+        "测试视频",
+        1,
+        4,
+        [TranscriptSegment(0, 60, "内容")],
+        "",
+        brief="视频背景资料（来自平台简介与热门评论）：\n简介：线性代数课程",
+    )
+    assert "线性代数课程" in prompt
+    # 多数 Markdown 渲染器只认 $ 系定界符，\( \) / \[ \] 会渲染成裸反斜杠
+    assert "不要用 \\(...\\) 或 \\[...\\]" in prompt
+
+    bare = LLMSummarizer._section_note_prompt(
+        "测试视频", 1, 4, [TranscriptSegment(0, 60, "内容")], ""
+    )
+    assert "视频背景资料" not in bare
+
+
+def test_context_brief_combines_description_and_comments() -> None:
+    brief = LLMSummarizer._context_brief(
+        {
+            "description": "宋浩老师的线性代数课程",
+            "hot_comments": ["讲得好 " + "很" * 90, "   ", "前排支持"],
+        }
+    )
+    assert "简介：宋浩老师的线性代数课程" in brief
+    assert "前排支持" in brief
+    # 评论按预算截断，不让评论区吃掉提示词
+    assert "很" * 81 not in brief
+    # 只有空白内容时不要输出空壳背景块
+    assert LLMSummarizer._context_brief({"description": "  ", "hot_comments": [""]}) == ""
+    assert LLMSummarizer._context_brief({}) == ""
+
+
+def test_math_delimiters_are_normalized_for_markdown_renderers() -> None:
+    raw = (
+        "行内 \\(a_{11}\\) 与显示公式：\n\n"
+        "\\[\n(\\lambda-1)(\\lambda+4)-2\\times 3=0\n\\]\n\n"
+        "```python\nliteral \\(x\\) stays\n```\n"
+    )
+    normalized = LLMSummarizer._normalize_math_delimiters(raw)
+    assert "$a_{11}$" in normalized
+    assert "$$\n(\\lambda-1)(\\lambda+4)-2\\times 3=0\n$$" in normalized
+    # 代码块内是字面文本，不能被改写
+    assert "literal \\(x\\) stays" in normalized
 
 
 def test_toc_heading_drops_the_trailing_timestamp() -> None:
@@ -1398,7 +1447,7 @@ def test_describe_effort_reports_effective_level() -> None:
     assert summarizer.describe_effort("max", "detailed") == "max"
     assert (
         summarizer.describe_effort("auto", "detailed")
-        == "auto（DeepSeek 通道按风格默认：max）"
+        == "auto（DeepSeek 通道按风格默认：max；长视频逐段直写关思考）"
     )
 
     summarizer.model_type = "openai"
