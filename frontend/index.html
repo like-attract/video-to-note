@@ -30,11 +30,14 @@
 
         <section class="config-section" aria-labelledby="modelTitle">
             <h2 id="modelTitle">总结模型</h2>
-            <label class="field">
+            <div class="field">
                 <span>模型档案</span>
-                <select id="llmProfile"></select>
+                <span class="profile-row">
+                    <select id="llmProfile"></select>
+                    <button id="renameProfileBtn" class="button ghost compact-button" type="button" hidden>重命名</button>
+                </span>
                 <small>每个档案各自记住模型与地址；自定义接口可保存多个。</small>
-            </label>
+            </div>
             <label class="field">
                 <span>模型</span>
                 <select id="llmModel"></select>

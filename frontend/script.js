@@ -206,6 +206,8 @@ function bindEvents() {
         });
     }
     bindListener('llmProfile', 'change', handleProfileChange);
+    bindListener('llmProfile', 'change', updateRenameVisibility);
+    bindListener('renameProfileBtn', 'click', handleProfileRenameClick);
     bindListener('llmModel', 'change', handleModelChange);
     bindListener('llmTestBtn', 'click', testLlmConnection);
     bindListener('saveKeyBtn', 'click', saveApiKey);
@@ -768,6 +770,7 @@ function renderProfileOptions() {
     // 档案被删除或旧版 HTML 缺少选项时退回可用项，但用户选过的档案仍留在偏好里。
     select.value = available.includes(wanted) ? wanted : available[0];
     if (select.value !== wanted) selectProfileByValue(select.value);
+    updateRenameVisibility();
     return select;
 }
 
@@ -945,6 +948,28 @@ function toggleCustomConfig() {
 }
 
 // ---- 自定义接口档案（可命名多份） ----
+
+// 档案下拉旁的「重命名」：只对已保存的自定义档案生效（内置 Provider 不可改名）。
+function updateRenameVisibility() {
+    const button = byId('renameProfileBtn');
+    if (!button) return;
+    const select = byId('llmProfile');
+    button.hidden = !String((select && select.value) || '').startsWith(CUSTOM_PROFILE_PREFIX);
+}
+
+function handleProfileRenameClick() {
+    const record = activeCustom();
+    if (!record) return;
+    const next = window.prompt('新的档案名称', record.label || '自定义接口');
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === record.label) return;
+    record.label = trimmed;
+    byId('customProfileLabel').value = trimmed;
+    renderProfileOptions();
+    persistPrefs();
+    showToast(`已改名为「${trimmed}」`, 'success');
+}
 
 function handleCustomProfileLabelInput() {
     const record = activeCustom();

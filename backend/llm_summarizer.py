@@ -188,6 +188,31 @@ def _looks_rate_limited(exc: BaseException) -> bool:
     return bool(_RATE_LIMIT_RE.search(f"{type(exc).__name__}: {exc}"))
 
 
+def _looks_disconnected(exc: BaseException) -> bool:
+    """这次失败是否像流被网络/网关中途掐断（决定要不要自动重投一次）。
+
+    实测昇腾免费通道会在十几分钟的长思考流上直接 peer closed；openai SDK 把
+    这类错误统一包成 APIConnectionError，不认时再按消息特征兜底。
+    """
+    try:
+        from openai import APIConnectionError
+    except ImportError:
+        return False
+    if isinstance(exc, APIConnectionError):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "peer closed",
+            "incomplete chunked read",
+            "connection reset",
+            "connection aborted",
+            "remotedisconnected",
+        )
+    )
+
+
 def _rejected_params_from_env() -> set[str]:
     """逃生口：`VIDEOTONOTES_REJECTED_LLM_PARAMS=thinking,reasoning_effort`。
 
@@ -1251,6 +1276,7 @@ class LLMSummarizer:
         should_abort: Callable[[], bool] | None = None,
         param_attempts: int = MAX_PARAM_RETRIES,
         budget: str = "auto",
+        connection_retries: int = 1,
     ) -> str:
         if should_abort is not None and should_abort():
             raise asyncio.CancelledError("任务已取消")
@@ -1313,6 +1339,37 @@ class LLMSummarizer:
                             stage, content_characters, reasoning_characters
                         ),
                     )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 长流中途被网关掐断（实测 peer closed connection ...）：正文一个字
+            # 都没拿到时自动重投一次。失败就是整条任务报废、已烧的思考全白费，
+            # 重投最坏也只是再花一次，不会更糟；已收到部分正文时不重投（没法续）。
+            if (
+                not parts
+                and connection_retries > 0
+                and _looks_disconnected(exc)
+            ):
+                warning = (
+                    f"{stage}：与模型接口的连接中断"
+                    f"（{type(exc).__name__}: {exc}），自动重试一次"
+                )
+                self.warnings.append(warning)
+                await self._report_progress(progress_callback, progress, warning)
+                return await self._complete(
+                    prompt,
+                    max_tokens,
+                    effort,
+                    retry_empty=retry_empty,
+                    progress_callback=progress_callback,
+                    progress=progress,
+                    stage=stage,
+                    should_abort=should_abort,
+                    param_attempts=param_attempts,
+                    budget=budget,
+                    connection_retries=connection_retries - 1,
+                )
+            raise
         finally:
             close = getattr(stream, "close", None)
             if close is not None:

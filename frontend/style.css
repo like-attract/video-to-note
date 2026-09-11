@@ -318,6 +318,7 @@ input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .profile-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .profile-row input { min-width: 0; }
+.profile-row select { min-width: 0; flex: 1; }
 .profile-row .button,
 .profile-actions .button { min-height: 32px; padding: 5px 12px; font-size: 12px; flex: none; }
 .profile-actions { display: flex; gap: 8px; margin-top: 8px; }

@@ -1595,3 +1595,70 @@ async def test_generate_summary_aborts_immediately_when_cancelled() -> None:
         await summarizer.generate_summary(
             "标题", segments, should_abort=lambda: True
         )
+
+
+@pytest.mark.asyncio
+async def test_dropped_stream_retries_once_when_nothing_received() -> None:
+    """长流被网关掐断且正文为 0 时自动重投一次；已收到部分正文时不重投。"""
+    attempts: list = []
+
+    async def create(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+
+            async def broken():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content=None, reasoning_content="思考中"),
+                            finish_reason=None,
+                        )
+                    ]
+                )
+                raise RuntimeError(
+                    "peer closed connection without sending complete message body "
+                    "(incomplete chunked read)"
+                )
+
+            return broken()
+        return _stream_response("重试成功")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "glm"
+    summarizer.model = "glm-4.5-flash"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 800, "high") == "重试成功"
+    assert len(attempts) == 2
+    assert any("连接中断" in warning and "自动重试一次" in warning for warning in summarizer.warnings)
+
+
+@pytest.mark.asyncio
+async def test_dropped_stream_with_partial_content_is_not_retried() -> None:
+    async def create(**kwargs):
+        async def half_then_broken():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="半截正文"), finish_reason=None
+                    )
+                ]
+            )
+            raise RuntimeError("peer closed connection")
+
+        return half_then_broken()
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "glm"
+    summarizer.model = "glm-4.5-flash"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(RuntimeError, match="peer closed"):
+        await summarizer._complete("测试", 800, "high")
+    assert summarizer.warnings == []
