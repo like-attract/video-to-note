@@ -108,7 +108,7 @@
             </label>
             <div class="manual-model-row">
                 <button id="manualModelBtn" class="button ghost compact-button" type="button">手动导入模型</button>
-                <small>大模型下载慢或反复失败？手动下载后放入指定文件夹即可</small>
+                <small>大模型下载慢或反复失败？点击【手动导入模型】按下载页保存文件并放入指定位置</small>
             </div>
             <label class="check-field">
                 <input type="checkbox" id="useGpu">
@@ -231,6 +231,20 @@
                     <span class="btn-text">开始生成</span>
                 </button>
             </div>
+            <div id="biliPagesPanel" class="bili-pages-panel" hidden>
+                <div class="bili-pages-head">
+                    <div class="bili-pages-titles">
+                        <strong id="biliPagesSummary"></strong>
+                        <small>只转写勾选的分 P，未勾选的会被跳过</small>
+                    </div>
+                    <div class="bili-pages-actions">
+                        <button id="biliPagesAllBtn" class="button ghost compact-button" type="button">全选</button>
+                        <button id="biliPagesNoneBtn" class="button ghost compact-button" type="button">全不选</button>
+                        <button id="biliPagesInvertBtn" class="button ghost compact-button" type="button">反选</button>
+                    </div>
+                </div>
+                <div id="biliPagesList" class="bili-pages-list" role="group" aria-label="勾选要转写的分 P"></div>
+            </div>
             <p id="outputModeHint" class="output-mode-hint" hidden></p>
             <div id="biliHint" class="bili-hint" hidden>
                 <div class="bili-hint-text">
@@ -347,6 +361,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260908-1"></script>
+<script src="script.js?v=20260911-1"></script>
 </body>
 </html>

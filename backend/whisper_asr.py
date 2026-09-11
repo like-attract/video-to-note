@@ -55,6 +55,13 @@ MODEL_REQUIRED_FILES = {
     "belle-turbo-zh": CT2_MODEL_FILES,
 }
 
+# 词表文件名不能按"官方仓 .txt / 社区仓 .json"区分：同一个 Systran 官方仓里
+# tiny/base/small/medium 是 vocabulary.txt，large-v3 却是 vocabulary.json
+# （按 .txt 去下 large-v3 会 404，用户照页面下载 .json 手动导入又被判不完整）。
+# CTranslate2 两个名字都认（缺词表会直接 "Cannot load the vocabulary" 加载失败），
+# 所以清单里写哪个都只表示"需要词表"：校验时任一存在即算齐备，下载时按顺序试到命中。
+VOCABULARY_NAMES = ("vocabulary.txt", "vocabulary.json")
+
 # CTranslate2 加载损坏模型时的典型报错特征（小写匹配）。
 CORRUPT_MODEL_ERROR_MARKERS = ("is incomplete", "failed to read a buffer")
 
@@ -316,6 +323,23 @@ class WhisperTranscriber:
     def _required_files(model_name: str) -> tuple[str, ...]:
         return MODEL_REQUIRED_FILES.get(model_name, DEFAULT_MODEL_FILES)
 
+    @staticmethod
+    def _slot_candidates(filename: str) -> tuple[str, ...]:
+        """清单里的词表项展开成两个可接受的文件名（清单写的优先），其余文件原样。"""
+        if filename not in VOCABULARY_NAMES:
+            return (filename,)
+        return (filename,) + tuple(name for name in VOCABULARY_NAMES if name != filename)
+
+    @classmethod
+    def manual_import_files(cls, model_name: str) -> list[str]:
+        """手动导入引导用的文件清单：词表两个名字都收，直接告诉用户任选其一即可。"""
+        return [
+            " 或 ".join(cls._slot_candidates(filename))
+            if filename in VOCABULARY_NAMES
+            else filename
+            for filename in cls._required_files(model_name)
+        ]
+
     def _download_model_files(
         self, model_name: str, cancel_event: threading.Event | None = None
     ) -> Path | None:
@@ -373,15 +397,26 @@ class WhisperTranscriber:
         snapshot.mkdir(parents=True, exist_ok=True)
         required_files = self._required_files(model_name)
         for filename in required_files:
-            if cancel_event is not None and cancel_event.is_set():
-                raise asyncio.CancelledError("任务已取消")
-            target = snapshot / filename
-            # 已有文件必须通过完整性下限校验；损坏/截断的遗留文件会被重新下载
-            if self._file_complete(target):
+            candidates = self._slot_candidates(filename)
+            # 槽位已有文件必须通过完整性下限校验；损坏/截断的遗留文件会被重新下载
+            if any(self._file_complete(snapshot / name) for name in candidates):
                 continue
-            if not self._download_one_file(
-                f"{base_url}/{filename}", target, headers, cancel_event
-            ):
+            downloaded = False
+            for name in candidates:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError("任务已取消")
+                downloaded = self._download_one_file(
+                    f"{base_url}/{name}", snapshot / name, headers, cancel_event
+                )
+                if downloaded:
+                    # 换名成功：别把上一个候选的 404 留下冒充真正的失败原因
+                    self._last_download_error = None
+                    break
+                # 404 说明这个仓库用的不是这个名字（large-v3 只有 vocabulary.json），
+                # 换候选重试才有意义；其他错误换个文件名也一样过不去。
+                if not self._is_missing_on_remote():
+                    break
+            if not downloaded:
                 if self._last_download_error:
                     raise self._last_download_error
                 return None
@@ -469,15 +504,20 @@ class WhisperTranscriber:
             return "cached"
         for snapshot in self._snapshot_dirs(model_name):
             if snapshot.is_dir() and any(
-                (snapshot / filename).is_file()
+                (snapshot / name).is_file()
                 for filename in self._required_files(model_name)
+                for name in self._slot_candidates(filename)
             ):
                 return "incomplete"
         return "missing"
 
     @classmethod
     def _snapshot_complete(cls, snapshot: Path, files: tuple[str, ...]) -> bool:
-        return all(cls._file_complete(snapshot / name) for name in files)
+        """槽位齐备：词表两个文件名都算数，其余文件名按清单原样要求。"""
+        return all(
+            any(cls._file_complete(snapshot / name) for name in cls._slot_candidates(filename))
+            for filename in files
+        )
 
     @staticmethod
     def _file_complete(path: Path) -> bool:
@@ -486,6 +526,11 @@ class WhisperTranscriber:
             return False
         minimum = MIN_MODEL_FILE_BYTES.get(path.name, 1)
         return path.stat().st_size >= minimum
+
+    def _is_missing_on_remote(self) -> bool:
+        """最近一次下载失败是否是"仓库里没有这个文件"（404，确定性结果）。"""
+        error = self._last_download_error
+        return isinstance(error, urllib.error.HTTPError) and error.code == 404
 
     @staticmethod
     def _looks_like_corrupt_model_error(error: Exception) -> bool:
@@ -512,17 +557,18 @@ class WhisperTranscriber:
         """删除损坏的模型文件（加载报错的 model.bin 及未完成分片、体积异常的小文件）。"""
         (snapshot / "model.bin").unlink(missing_ok=True)
         (snapshot / "model.bin.part").unlink(missing_ok=True)
-        for name in files:
-            path = snapshot / name
-            minimum = MIN_MODEL_FILE_BYTES.get(name, 1)
-            if path.is_file() and path.stat().st_size < minimum:
-                path.unlink(missing_ok=True)
+        for filename in files:
+            for name in self._slot_candidates(filename):
+                path = snapshot / name
+                minimum = MIN_MODEL_FILE_BYTES.get(name, 1)
+                if path.is_file() and path.stat().st_size < minimum:
+                    path.unlink(missing_ok=True)
 
     def _model_load_error(self, model_name: str, error: Exception) -> RuntimeError:
         message = str(error).strip() or error.__class__.__name__
         cache_hint = f"，缓存目录：{self.download_root}" if self.download_root else ""
         manual_hint = (
-            f"也可手动下载 4 个模型文件放入缓存目录的 manual/{model_name} 子文件夹"
+            f"也可手动下载所需模型文件放入缓存目录的 manual/{model_name} 子文件夹"
             "（界面「手动导入模型」按钮可直达）后重试。"
             if self.download_root
             else ""

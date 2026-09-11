@@ -220,6 +220,7 @@ function bindEvents() {
         videoUrl.addEventListener('input', () => {
             window.clearTimeout(biliHintDebounce);
             biliHintDebounce = window.setTimeout(() => updateBiliHint(), 300);
+            scheduleBiliPagesPreview();
         });
         videoUrl.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' && !event.isComposing) startSummary();
@@ -229,6 +230,9 @@ function bindEvents() {
     bindListener('biliHintManualBtn', 'click', revealBiliCredentials);
     bindListener('douyinLoginBtn', 'click', startDouyinLogin);
     bindListener('biliHintDismissBtn', 'click', dismissBiliHint);
+    bindListener('biliPagesAllBtn', 'click', () => setBiliPagesSelection('all'));
+    bindListener('biliPagesNoneBtn', 'click', () => setBiliPagesSelection('none'));
+    bindListener('biliPagesInvertBtn', 'click', () => setBiliPagesSelection('invert'));
     initBiliLogin();
     bindListener('includeScreenshots', 'change', toggleScreenshotSettings);
     bindListener('localFile', 'change', updateFileInfo);
@@ -1168,6 +1172,11 @@ function toggleSourceType() {
     byId('fileField').hidden = !isLocal;
     updateFileInfo();
     updateBiliHint();
+    if (isLocal) {
+        hideBiliPagesPanel();
+    } else {
+        scheduleBiliPagesPreview();
+    }
 }
 
 // ---- 输出类型：生成笔记 / 仅转录字幕 ----
@@ -1302,6 +1311,184 @@ function revealBiliCredentials() {
 function dismissBiliHint() {
     biliPromptDismissed = true;
     updateBiliHint();
+}
+
+// ---- B 站分 P 勾选面板 ----
+// 多分 P 链接在提交前显式决定转写范围：默认勾选与后端规则一致
+// （链接带 ?p=N 只勾该 P，否则全选），改动后随请求下发 bilibili_pages。
+// 预览是尽力而为：接口失败就藏面板，提交行为退回原来的 URL 规则。
+let biliPagesDebounce = null;
+let biliPagesToken = 0;
+let biliPagesCurrent = null; // { url, payload }
+const biliPagesCache = new Map();
+
+function scheduleBiliPagesPreview() {
+    window.clearTimeout(biliPagesDebounce);
+    biliPagesDebounce = window.setTimeout(loadBiliPagesPanel, 500);
+}
+
+async function loadBiliPagesPanel() {
+    const notLocal = byId('sourceType').value !== 'local';
+    const normalized = notLocal ? normalizeVideoInput(byId('videoUrl').value) : null;
+    if (!normalized || !isBilibiliUrl(normalized)) {
+        hideBiliPagesPanel();
+        return;
+    }
+    if (biliPagesCurrent && biliPagesCurrent.url === normalized) return;
+    if (!biliPagesCache.has(normalized)) {
+        const token = ++biliPagesToken;
+        const payload = await fetchBiliPages(normalized);
+        if (token !== biliPagesToken) return;
+        if (!payload) {
+            hideBiliPagesPanel();
+            return;
+        }
+        biliPagesCache.set(normalized, payload);
+    }
+    renderBiliPagesPanel(normalized, biliPagesCache.get(normalized));
+}
+
+async function fetchBiliPages(url) {
+    const body = { video_url: url };
+    const sessdata = byId('sessdata').value.trim();
+    if (sessdata) {
+        body.bilibili_cookie = {
+            sessdata,
+            bili_jct: byId('biliJct').value.trim(),
+            buvid3: byId('buvid3').value.trim()
+        };
+    }
+    try {
+        const response = await fetch(`${API_BASE}/bili-pages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (!response.ok) return null;
+        return await response.json();
+    } catch {
+        return null;
+    }
+}
+
+function renderBiliPagesPanel(url, payload) {
+    const panel = byId('biliPagesPanel');
+    const list = byId('biliPagesList');
+    if (!panel || !list) return;
+    if (!payload || !Array.isArray(payload.pages) || payload.pages.length <= 1) {
+        hideBiliPagesPanel();
+        return;
+    }
+    const pinned = urlPageParam(url);
+    list.innerHTML = '';
+    payload.pages.forEach((page) => {
+        const item = document.createElement('label');
+        item.className = 'bili-page-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = String(page.page);
+        checkbox.checked = pinned ? page.page === pinned : true;
+        checkbox.addEventListener('change', updateBiliPagesSummary);
+        const index = document.createElement('span');
+        index.className = 'bili-page-index';
+        index.textContent = `P${page.page}`;
+        const name = document.createElement('span');
+        name.className = 'bili-page-name';
+        name.textContent = page.part;
+        name.title = page.part;
+        item.append(checkbox, index, name);
+        const duration = formatPageDuration(page.duration);
+        if (duration) {
+            const time = document.createElement('span');
+            time.className = 'bili-page-duration';
+            time.textContent = duration;
+            item.append(time);
+        }
+        list.append(item);
+    });
+    biliPagesCurrent = { url, payload };
+    panel.hidden = false;
+    updateBiliPagesSummary();
+}
+
+function hideBiliPagesPanel() {
+    const panel = byId('biliPagesPanel');
+    if (panel) panel.hidden = true;
+    biliPagesCurrent = null;
+}
+
+function setBiliPagesSelection(mode) {
+    const boxes = byId('biliPagesList').querySelectorAll('input[type="checkbox"]');
+    boxes.forEach((box) => {
+        if (mode === 'invert') {
+            box.checked = !box.checked;
+        } else {
+            box.checked = mode === 'all';
+        }
+    });
+    updateBiliPagesSummary();
+}
+
+function updateBiliPagesSummary() {
+    const panel = byId('biliPagesPanel');
+    if (!panel || panel.hidden || !biliPagesCurrent) return;
+    const durations = new Map(
+        (biliPagesCurrent.payload.pages || []).map((page) => [
+            Number(page.page),
+            Number(page.duration) || 0,
+        ])
+    );
+    const rows = Array.from(byId('biliPagesList').querySelectorAll('.bili-page-item'));
+    let selected = 0;
+    let selectedSeconds = 0;
+    let totalSeconds = 0;
+    rows.forEach((row) => {
+        const box = row.querySelector('input[type="checkbox"]');
+        const seconds = durations.get(Number(box.value)) || 0;
+        totalSeconds += seconds;
+        row.classList.toggle('is-checked', box.checked);
+        if (box.checked) {
+            selected += 1;
+            selectedSeconds += seconds;
+        }
+    });
+    const scope = selected === 0
+        ? '未勾选任何分 P'
+        : selected === rows.length
+            ? `已全选，合计 ${formatPageDuration(totalSeconds) || '未知'}`
+            : `已选 ${selected}/${rows.length} 个，合计 ${formatPageDuration(selectedSeconds) || '未知'}`;
+    byId('biliPagesSummary').textContent = `共 ${rows.length} 个分 P · ${scope}`;
+}
+
+function biliPagesPanelVisible() {
+    const panel = byId('biliPagesPanel');
+    return Boolean(panel && !panel.hidden);
+}
+
+function checkedBiliPages() {
+    return Array.from(byId('biliPagesList').querySelectorAll('input[type="checkbox"]:checked'))
+        .map((box) => parseInt(box.value, 10))
+        .filter((value) => Number.isFinite(value));
+}
+
+function urlPageParam(url) {
+    try {
+        const value = parseInt(new URL(url).searchParams.get('p'), 10);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+    } catch {
+        return 0;
+    }
+}
+
+function formatPageDuration(seconds) {
+    const total = Math.round(Number(seconds) || 0);
+    if (total <= 0) return '';
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+        : `${m}:${String(s).padStart(2, '0')}`;
 }
 
 let biliLoginTimer = null;
@@ -1500,8 +1687,10 @@ function formatBytes(bytes) {
 }
 
 // ---- Whisper 模型手动导入（大模型下载慢/反复失败时的替代方案）----
-// 约定：把 4 个模型文件放入 workspace/_model_cache/manual/{model}/，
+// 约定：把该模型的权重文件放入 workspace/_model_cache/manual/{model}/，
 // 后端实时扫描该目录，放入后自动识别为「已缓存」。
+// 需要哪些文件、去哪个仓库下载由 /api/whisper-models/manual-folder 给出
+// （词表文件名各仓库不统一，vocabulary.txt / vocabulary.json 都算数）。
 const MANUAL_IMPORT_POLL_MS = 5000;
 const MANUAL_IMPORT_POLL_MAX_TICKS = 24; // 约 2 分钟后停止轮询
 let manualImportPollTimer = null;
@@ -1532,29 +1721,41 @@ function startManualImportPolling(modelId) {
     }, MANUAL_IMPORT_POLL_MS);
 }
 
+async function requestManualImportGuide(modelId, openFolder) {
+    const response = await fetch(`${API_BASE}/whisper-models/manual-folder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelId, open: openFolder })
+    });
+    return readResponse(response, '读取模型导入信息失败');
+}
+
 async function manualImportWhisperModel() {
     const option = byId('whisperModel').selectedOptions[0];
     if (!option) return;
     const modelId = option.value;
     const modelLabel = (option.dataset.baseLabel || option.textContent).split('（')[0];
+    let guide;
+    try {
+        // 文件清单与仓库地址以后端为准：词表文件名各仓库不统一，turbo 系也不在 Systran 仓
+        guide = await requestManualImportGuide(modelId, false);
+    } catch (error) {
+        showToast(error.message || '读取模型导入信息失败', 'error');
+        return;
+    }
     const confirmed = window.confirm(
         `将为模型「${modelLabel}」打开手动导入文件夹。\n\n`
         + '步骤：\n'
-        + '1. 用浏览器从镜像站下载该模型的 4 个文件：\n'
-        + `    config.json / model.bin / tokenizer.json / vocabulary.txt\n`
-        + `    下载页：https://hf-mirror.com/Systran/faster-whisper-${modelId}/tree/main\n`
-        + '2. 把 4 个文件放入即将打开的文件夹（不要改文件名）；\n'
+        + '1. 用浏览器从下载页保存这些文件（不要改文件名）：\n'
+        + `    ${guide.files.join(' / ')}\n`
+        + `    下载页：${guide.download_url}\n`
+        + `2. 把它们放入文件夹：\n    ${guide.path}\n`
         + '3. 文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
         + '现在打开文件夹吗？'
     );
     if (!confirmed) return;
     try {
-        const response = await fetch(`${API_BASE}/whisper-models/manual-folder`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: modelId })
-        });
-        const data = await readResponse(response, '打开模型文件夹失败');
+        const data = await requestManualImportGuide(modelId, true);
         if (data.opened) {
             showToast(`已打开导入文件夹：${data.path}`, 'success');
         } else {
@@ -1706,6 +1907,9 @@ function validateAndBuildRequestBase(resumeTaskId = null) {
     const videoUrl = normalizeVideoInput(byId('videoUrl').value);
     if (!videoUrl) return validationError('请输入有效链接，或包含 B 站链接 / BV 号的分享文本');
     byId('videoUrl').value = videoUrl;
+    if (biliPagesPanelVisible() && !checkedBiliPages().length) {
+        return validationError('请至少勾选一个分 P');
+    }
     return { sourceType, file: null, videoUrl, modelConfig, transcriptOnly };
 }
 
@@ -1745,6 +1949,11 @@ function buildSummarizeConfig(
         use_gpu: byId('useGpu').checked,
         processing_mode: forceRestart ? 'restart' : 'reuse'
     };
+    // 分 P 面板可见时显式下发勾选页码（全选也下发：显式指定优先于 URL ?p=N 规则）
+    if (videoUrl && biliPagesPanelVisible()) {
+        const pages = checkedBiliPages();
+        if (pages.length) config.bilibili_pages = pages;
+    }
 
     if (transcriptOnly) {
         // 这条路上根本没有大模型调用：llm_config 是后端模型的必填字段，给空对象即可，

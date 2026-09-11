@@ -54,7 +54,7 @@ class BiliSubtitleOutcome:
 
     reason: ok | partial | credentials_missing | no_track | error | empty
 
-    多分 P 视频按链接 `?p=N` 或全部 P 处理：
+    多分 P 视频按显式指定（only_pages）、链接 `?p=N` 或全部 P 的顺序决定范围：
     - total_pages：视频全部分 P 数
     - pages：本次选中的分 P（顺序），subtitle_by_page：有 AI 字幕的分 P
     - pages_to_transcribe：没有 AI 字幕、需要语音转写的分 P
@@ -68,6 +68,16 @@ class BiliSubtitleOutcome:
     pages: tuple[BiliPage, ...] = ()
     subtitle_by_page: tuple[tuple[int, SubtitleResult], ...] = ()
     pages_to_transcribe: tuple[BiliPage, ...] = ()
+
+
+@dataclass(frozen=True)
+class BiliVideoInfo:
+    """view 接口解析出的 B 站视频与分 P 清单（分 P 预览、AI 字幕通道共用）。"""
+
+    bvid: str | None
+    aid: int | None
+    title: str
+    pages: tuple[BiliPage, ...]
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -275,10 +285,43 @@ class VideoProcessor:
                 )
         return None
 
+    async def bilibili_video_pages(
+        self, url: str, cookie: dict[str, str] | None = None
+    ) -> BiliVideoInfo | None:
+        """解析 B 站视频的分 P 清单（分 P 预览接口与 AI 字幕通道共用）。
+
+        返回 None 表示链接解析不出 BV/av 号；接口异常或风控时 pages 为
+        空元组，由调用方决定如何呈现，这里不区分失败原因。
+        """
+        bvid, aid = await asyncio.to_thread(self._bilibili_ids, url)
+        if not bvid and not aid:
+            return None
+        payload = await asyncio.to_thread(
+            self._bilibili_get_json,
+            self.BILI_VIEW_API,
+            {"bvid": bvid} if bvid else {"aid": aid},
+            self._bili_headers(cookie),
+        )
+        data = payload.get("data") or {}
+        pages = tuple(
+            BiliPage(
+                page=int(item.get("page") or index),
+                part=str(item.get("part") or f"P{item.get('page')}"),
+                cid=int(item.get("cid") or 0),
+                duration=int(item.get("duration") or 0),
+            )
+            for index, item in enumerate(data.get("pages") or [], start=1)
+            if item.get("cid")
+        )
+        return BiliVideoInfo(
+            bvid=bvid, aid=aid, title=str(data.get("title") or ""), pages=pages
+        )
+
     async def fetch_bilibili_subtitles(
         self,
         url: str,
         cookie: dict[str, str] | None = None,
+        only_pages: Sequence[int] | None = None,
     ) -> BiliSubtitleOutcome:
         """B 站 AI 字幕专属通道（支持多分 P）。
 
@@ -286,42 +329,28 @@ class VideoProcessor:
         player API 获取字幕清单并下载。需要登录凭据（SESSDATA），下载
         字幕文件时需携带 Origin 头。
 
-        多分 P 视频：链接带 ?p=N 则只处理该分 P，否则处理全部分 P。返回
-        BiliSubtitleOutcome 而非裸 None：调用方需要区分「凭据缺失」、「视频
-        没有字幕」等不同原因，也能知道哪些分 P 需要语音转写补齐。
+        多分 P 视频的处理范围：only_pages 显式指定（界面勾选）优先，
+        其中的无效页码直接忽略；未指定时链接带 ?p=N 只处理该分 P，否则
+        处理全部分 P。返回 BiliSubtitleOutcome 而非裸 None：调用方需要
+        区分「凭据缺失」、「视频没有字幕」等不同原因，也能知道哪些分 P
+        需要语音转写补齐。
         """
-        match = _BV_RE.search(url) or _BV_RE.search(self._resolve_bili_short_url(url))
-        if not match:
+        video = await self.bilibili_video_pages(url, cookie)
+        if video is None:
             return BiliSubtitleOutcome(None, "no_track", "未解析到视频 BV 号")
-        bvid = match.group(0)
-        headers = self._bili_headers(cookie)
-        view = await asyncio.to_thread(
-            self._bilibili_get_json,
-            self.BILI_VIEW_API,
-            {"bvid": bvid},
-            headers,
-        )
-        view_data = view.get("data") or {}
-        pages = [
-            BiliPage(
-                page=int(item.get("page") or 0),
-                part=str(item.get("part") or f"P{item.get('page')}"),
-                cid=int(item.get("cid") or 0),
-                duration=int(item.get("duration") or 0),
-            )
-            for item in (view_data.get("pages") or [])
-            if item.get("cid")
-        ]
-        if not pages:
+        if not video.pages:
             return BiliSubtitleOutcome(
                 None, "no_track", "接口未返回分 P 信息（网络或风控异常）"
             )
-        title = str(view_data.get("title") or "")
-        p_param = _page_requested(url)
-        if p_param > 0:
+        pages = video.pages
+        title = video.title
+        selected: list[BiliPage] = []
+        if only_pages:
+            wanted = {int(page) for page in only_pages}
+            selected = [page for page in pages if page.page in wanted]
+        if not selected:
+            p_param = _page_requested(url)
             selected = [page for page in pages if page.page == p_param] or list(pages)
-        else:
-            selected = list(pages)
         if not self._cookie_header(cookie):
             return BiliSubtitleOutcome(
                 None,
@@ -337,7 +366,7 @@ class VideoProcessor:
         saw_track_without_segments = False
         for page in selected:
             track = await asyncio.to_thread(
-                self._bilibili_subtitle_track, bvid, page.cid, cookie
+                self._bilibili_subtitle_track, video.bvid, video.aid, page.cid, cookie
             )
             if not track:
                 pages_to_transcribe.append(page)
@@ -421,13 +450,18 @@ class VideoProcessor:
 
     @classmethod
     def _bilibili_subtitle_track(
-        cls, bvid: str, cid: int, cookie: dict[str, str] | None
+        cls,
+        bvid: str | None,
+        aid: int | None,
+        cid: int,
+        cookie: dict[str, str] | None,
     ) -> dict[str, Any] | None:
         """拉取某个分 P（cid）的字幕清单，返回首个可用 AI 字幕轨。"""
         headers = cls._bili_headers(cookie)
+        params = {"bvid": bvid, "cid": cid} if bvid else {"aid": aid, "cid": cid}
         player = cls._bilibili_get_json(
             "https://api.bilibili.com/x/player/wbi/v2",
-            {"bvid": bvid, "cid": cid},
+            params,
             headers,
         )
         tracks = ((player.get("data") or {}).get("subtitle") or {}).get("subtitles") or []

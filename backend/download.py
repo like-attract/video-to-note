@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -67,5 +68,8 @@ def download_to_file(
             return True, None
         except Exception as exc:
             last_error = exc
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
+                # 仓库里没有这个文件：重试只会白等，立刻返回让调用方换名或换源
+                return False, exc
             time.sleep(1.5 * (attempt + 1))
     return False, last_error

@@ -1,5 +1,6 @@
 import sys
 import types
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,36 @@ def test_manual_model_dir_is_detected(tmp_path: Path, monkeypatch: pytest.Monkey
     assert transcriber._cached_model_path("small") == alias_dir.resolve()
 
 
+def test_manual_model_dir_accepts_either_vocabulary_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """用户照下载页存下 vocabulary.json 也算导入完成：large-v3 官方仓根本没有 .txt。"""
+    monkeypatch.setattr(whisper_asr, "MIN_MODEL_FILE_BYTES", tiny_min_sizes())
+    transcriber = WhisperTranscriber(tmp_path)
+    manual_dir = tmp_path / "manual" / "large-v3"
+    make_snapshot_files(manual_dir)
+    (manual_dir / "vocabulary.txt").rename(manual_dir / "vocabulary.json")
+
+    assert transcriber._cached_model_path("large-v3") == manual_dir.resolve()
+    assert transcriber._model_cache_status("large-v3") == "cached"
+
+    # 两个名字都没有才是 incomplete：CTranslate2 缺词表会直接加载失败，不能放行
+    (manual_dir / "vocabulary.json").unlink()
+    assert transcriber._cached_model_path("large-v3") is None
+    assert transcriber._model_cache_status("large-v3") == "incomplete"
+
+
+def test_manual_import_file_list_offers_both_vocabulary_names() -> None:
+    """导入引导清单：词表槽位列出两个可接受的名字，本仓库实际用的那个排前面。"""
+    assert WhisperTranscriber.manual_import_files("large-v3") == [
+        "config.json",
+        "model.bin",
+        "tokenizer.json",
+        "vocabulary.txt 或 vocabulary.json",
+    ]
+    assert WhisperTranscriber.manual_import_files("turbo")[3].startswith("vocabulary.json")
+
+
 def test_turbo_and_belle_repos_map_to_ct2_layouts() -> None:
     """turbo 的官方 CT2 不存在（Systran 仓 404），映射社区仓；CT2 转换仓用 vocabulary.json。"""
     assert whisper_asr.WHISPER_MODEL_REPOS["turbo"] == "deepdml/faster-whisper-large-v3-turbo-ct2"
@@ -231,6 +262,60 @@ def test_download_replaces_undersized_existing_file(
         "medium", "https://hf-mirror.com"
     ) == snapshot.resolve()
     assert "model.bin" in downloaded
+
+
+def test_download_falls_back_to_other_vocabulary_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """仓库用的词表名和清单不一致时（large-v3 只有 .json）：404 后换名重试，不能整单失败。"""
+    transcriber = WhisperTranscriber(tmp_path)
+    attempted: list[str] = []
+
+    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None) -> bool:
+        attempted.append(target.name)
+        if target.name == "vocabulary.txt":
+            transcriber._last_download_error = urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return False
+        target.write_bytes(b"0" * 64)
+        return True
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        return FakeResponse(headers={"X-Repo-Commit": "revision"})
+
+    monkeypatch.setattr(transcriber, "_download_one_file", fake_download_one)
+    monkeypatch.setattr("backend.whisper_asr.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(whisper_asr, "MIN_MODEL_FILE_BYTES", tiny_min_sizes())
+
+    snapshot = transcriber._download_model_files_from_endpoint(
+        "large-v3", "https://hf-mirror.com"
+    )
+
+    assert snapshot is not None
+    assert attempted[-2:] == ["vocabulary.txt", "vocabulary.json"]
+    # 换名成功后不能留下那个 404，否则下次失败会拿它冒充原因
+    assert transcriber._last_download_error is None
+
+
+def test_download_one_file_gives_up_immediately_on_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """404 是确定性结果：重试只会白等，一次就返回让调用方换名或换 endpoint。"""
+    requests: list[str] = []
+    slept: list[float] = []
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        requests.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("backend.download.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backend.download.time.sleep", slept.append)
+    transcriber = WhisperTranscriber(tmp_path)
+
+    assert transcriber._download_one_file(
+        "https://example.com/vocabulary.txt", tmp_path / "vocabulary.txt", {}
+    ) is False
+    assert len(requests) == 1
+    assert slept == []
 
 
 def test_download_one_file_rejects_truncated_body(

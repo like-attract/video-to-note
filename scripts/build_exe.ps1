@@ -43,6 +43,7 @@ Set-Location -LiteralPath $projectRoot
     --add-data "sources/icon.png;sources" `
     --add-data "sources/icon.ico;sources" `
     --collect-data faster_whisper `
+    --collect-all sherpa_onnx `
     --collect-submodules mcp.server `
     --collect-data mcp `
     --version-file "scripts\version_info.txt" `

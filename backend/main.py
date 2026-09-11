@@ -5,6 +5,7 @@ import importlib.util
 import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,7 @@ class NoCacheStaticFiles(StaticFiles):
 from pydantic import BaseModel, Field, SecretStr
 
 from . import secret_box
-from .config_store import LLM_KEYS_FILE, ConfigStore
+from .config_store import BiliCredentialsUnavailable, LLM_KEYS_FILE, ConfigStore
 from .llm_summarizer import (
     LONG_TRANSCRIPT_CHARACTERS,
     LLMSummarizer,
@@ -105,6 +106,8 @@ DOUYIN_HINT = (
     "抖音链接解析失败。可以先点击“打开抖音浏览器”，在本机窗口完成登录/验证后重试；"
     "也可能是媒体地址已过期，请重新提交链接。"
 )
+NOTE_STEP_NAME = "生成笔记"
+API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
 
 app = FastAPI(title="VideoToNo API", version="1.4.0")
 
@@ -285,6 +288,8 @@ class SummarizeRequest(BaseModel):
     screenshot_interval: int = Field(default=30, ge=5, le=300)
     whisper_model: str = "base"
     use_gpu: bool = False
+    # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
+    bilibili_pages: list[int] | None = None
     bilibili_cookie: BilibiliCookie | None = None
     douyin_cookie: DouyinCookie | None = None
     llm_config: LLMConfig
@@ -300,8 +305,17 @@ class TranscribeRequest(BaseModel):
     prefer_subtitles: bool = True
     whisper_model: str = "base"
     use_gpu: bool = False
+    # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
+    bilibili_pages: list[int] | None = None
     bilibili_cookie: BilibiliCookie | None = None
     douyin_cookie: DouyinCookie | None = None
+
+
+class BiliPagesRequest(BaseModel):
+    """`POST /api/bili-pages` 的请求体：提交前预览 B 站分 P 清单。"""
+
+    video_url: str
+    bilibili_cookie: BilibiliCookie | None = None
 
 
 def new_task(status: str = "pending", task_id: str | None = None) -> dict[str, Any]:
@@ -822,6 +836,7 @@ async def whisper_models_status() -> dict[str, Any]:
 
 class WhisperManualFolderPayload(BaseModel):
     model: str
+    open: bool = True
 
 
 def _open_in_file_manager(path: Path) -> bool:
@@ -840,15 +855,18 @@ def _open_in_file_manager(path: Path) -> bool:
 
 @app.post("/api/whisper-models/manual-folder")
 async def open_whisper_manual_folder(payload: WhisperManualFolderPayload) -> dict[str, Any]:
-    """创建并打开手动导入模型的目标文件夹（大模型网络下载失败时的替代方案）。"""
+    """创建并打开手动导入模型的目标文件夹（大模型网络下载失败时的替代方案）。
+
+    open=false 只建目录并返回引导信息，供前端先展示步骤、用户确认后再开文件夹。
+    """
     if payload.model not in WHISPER_MODELS:
         raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
     manual_dir = WHISPER_CACHE_DIR / "manual" / payload.model
     manual_dir.mkdir(parents=True, exist_ok=True)
     return {
         "path": str(manual_dir),
-        "opened": _open_in_file_manager(manual_dir),
-        "files": list(transcriber._required_files(payload.model)),
+        "opened": _open_in_file_manager(manual_dir) if payload.open else False,
+        "files": transcriber.manual_import_files(payload.model),
         "download_url": f"https://hf-mirror.com/{transcriber._model_repo(payload.model)}/tree/main",
     }
 
@@ -1050,6 +1068,49 @@ async def save_bili_credentials(payload: BiliCredentialsPayload) -> dict[str, An
 async def clear_bili_credentials() -> dict[str, bool]:
     config_store.clear_bili_credentials()
     return {"saved": False}
+
+
+@app.post("/api/bili-pages")
+async def preview_bilibili_pages(request: BiliPagesRequest) -> dict[str, Any]:
+    """提交任务前预览 B 站分 P 清单，让用户显式勾选要转写的分 P。
+
+    只读 view 接口，不触发下载；凭据可选（公开接口一般无需登录，
+    携带凭据可降低风控概率）。front 端拿 url 的 ?p= 自行决定默认勾选。
+    """
+    url = normalize_video_input(request.video_url) or request.video_url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="请先粘贴 B 站视频链接")
+    try:
+        source = video_processor.detect_source(url)
+    except ValueError:
+        source = None
+    if source != VideoSource.BILIBILI:
+        raise HTTPException(status_code=400, detail="分 P 预览仅支持 B 站视频链接")
+    if request.bilibili_cookie:
+        cookie: dict[str, str] | None = request.bilibili_cookie.model_dump()
+    else:
+        try:
+            cookie = config_store.load_bili_credentials()
+        except BiliCredentialsUnavailable:
+            cookie = None
+    video = await video_processor.bilibili_video_pages(url, cookie)
+    if video is None:
+        raise HTTPException(
+            status_code=400, detail="未能从链接解析出 B 站视频（BV/av 号）"
+        )
+    if not video.pages:
+        raise HTTPException(
+            status_code=502,
+            detail="B 站接口未返回分 P 信息（网络或风控异常），可稍后重试或填写凭据",
+        )
+    return {
+        "title": video.title,
+        "total_pages": len(video.pages),
+        "pages": [
+            {"page": page.page, "part": page.part, "duration": page.duration}
+            for page in video.pages
+        ],
+    }
 
 
 @app.get("/api/health")
@@ -1318,6 +1379,8 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     title = request.video_url or "上传的视频"
     # B 站视频页被风控时（Issue #1）处理链会回退到开放接口直连，回退说明经这里进任务日志
     fallback_notes: list[str] = []
+    # except 分支靠它决定能不能套用平台文案，而 detect_source 自己就可能抛错（非 http 链接）
+    source_kind = VideoSource.LOCAL
 
     def note_api_fallback() -> None:
         for note in fallback_notes:
@@ -1393,7 +1456,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     == VideoSource.BILIBILI
                 )
                 subtitle_outcome = (
-                    await video_processor.fetch_bilibili_subtitles(source_url or "", cookie)
+                    await video_processor.fetch_bilibili_subtitles(
+                        source_url or "", cookie, only_pages=request.bilibili_pages or None
+                    )
                     if is_bilibili
                     else None
                 )
@@ -1765,9 +1830,15 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         persist_task_runtime(task_id)
     except Exception as exc:
         finish_task_timing(task)
-        message = friendly_task_error(str(exc))
+        raw = str(exc)
+        message = friendly_task_error(
+            raw, source=source_kind, step_name=task.get("step_name", "")
+        )
         task.update(status="failed", error=message)
         task["logs"].append(f"处理失败：{message}")
+        if message != raw:
+            # 文案一旦被替换掉，真实的返回码就没人能看到了——这次误诊就是这么来的
+            task["logs"].append(f"底层错误：{scrub_technical_error(raw)}")
         notify_task("任务失败", f"{title}\n{message}")
         persist_task_runtime(task_id)
 
@@ -1805,8 +1876,18 @@ async def _write_atomically(path: Path, chunks: tuple[str, ...]) -> None:
     os.replace(temporary, path)
 
 
-def friendly_task_error(message: str) -> str:
-    """把已知的平台限制错误转成对用户友好的提示。"""
+def friendly_task_error(
+    message: str,
+    *,
+    source: VideoSource | None = None,
+    step_name: str = "",
+) -> str:
+    """把已知的平台限制错误转成对用户友好的提示。
+
+    平台文案只在对应平台的任务里出现，模型通道的错误不套平台说法：v1.4.0 之前
+    任何含 403 的异常都说成「抖音媒体地址已过期」，而实际触发它的是 B 站任务里
+    模型接口返回的 403，用户据此重投了三次没问题的链接。
+    """
     lowered = message.lower()
     if "certificate_verify_failed" in lowered or "certificate verify failed" in lowered:
         return (
@@ -1814,13 +1895,59 @@ def friendly_task_error(message: str) -> str:
             "如果仍失败，请检查系统时间、网络代理或企业根证书，"
             "并通过 HF_ENDPOINT 指定能正常验证证书的镜像后重试。"
         )
-    if "fresh cookies" in lowered or "challenge" in lowered or "验证码" in message:
-        return "抖音要求浏览器验证。点击输入区下方的“打开抖音浏览器”，完成登录/验证后重新提交。"
-    if "403" in lowered or "forbidden" in lowered:
-        return "抖音媒体地址已过期或被拒绝，请重新提交链接；如果仍失败，先用本机抖音浏览器完成验证。"
-    if "douyin" in lowered or "iesdouyin" in lowered or "抖音" in message:
-        return DOUYIN_HINT
+    if step_name == NOTE_STEP_NAME:
+        return friendly_llm_error(lowered, message)
+    if source == VideoSource.DOUYIN:
+        if "fresh cookies" in lowered or "challenge" in lowered or "验证码" in message:
+            return "抖音要求浏览器验证。点击输入区下方的“打开抖音浏览器”，完成登录/验证后重新提交。"
+        if "403" in lowered or "forbidden" in lowered:
+            return "抖音媒体地址已过期或被拒绝，请重新提交链接；如果仍失败，先用本机抖音浏览器完成验证。"
+        if "douyin" in lowered or "iesdouyin" in lowered or "抖音" in message:
+            return DOUYIN_HINT
+    if source == VideoSource.BILIBILI and any(
+        marker in lowered for marker in ("403", "412", "forbidden", "precondition")
+    ):
+        return (
+            "B 站拒绝了本次请求（风控或访问凭据失效）。请在「B 站访问凭据」里重新扫码导入 "
+            "SESSDATA 后重投链接；也可以稍等几分钟再试。"
+        )
     return message
+
+
+def friendly_llm_error(lowered: str, message: str) -> str:
+    """生成笔记阶段的失败来自模型通道，重投视频链接不会有任何改变。"""
+    if "insufficient_quota" in lowered or "quota" in lowered or "余额" in message:
+        return (
+            "模型通道的额度或余额不足，笔记生成中断。"
+            "请在「模型配置」里换一个通道（Base URL 与 Key），或给当前通道续额后重投。"
+        )
+    if "429" in lowered or "rate limit" in lowered or "too many requests" in lowered:
+        return (
+            "模型通道限流。可以稍后重投，或改用付费通道；"
+            "长视频换用「精简摘要」能明显减少请求数。"
+        )
+    if "401" in lowered or "invalid_api_key" in lowered or "incorrect api key" in lowered:
+        return (
+            "模型接口拒绝了本机保存的 Key（401）。"
+            "请在「模型配置」里重新填写该 Base URL 对应的 Key 后重投。"
+        )
+    if "403" in lowered or "permission" in lowered or "forbidden" in lowered:
+        return (
+            "模型接口拒绝了本次请求（403）：本机保存的 Key 可能没有该模型的权限，"
+            "或 Base URL 与模型名不匹配。请核对「模型配置」后重投，"
+            "任务日志里「调用模型」一行就是本次实际使用的通道。"
+        )
+    if "404" in lowered or "not found" in lowered or "does not exist" in lowered:
+        return "模型接口找不到该模型（404）。请检查「模型配置」里的模型名与 Base URL。"
+    if "timeout" in lowered or "timed out" in lowered or "connection" in lowered:
+        return "与模型接口的连接中断，多为网络抖动或通道限流。可以直接重投任务，或换一个通道。"
+    return message
+
+
+def scrub_technical_error(raw: str) -> str:
+    """异常文本进日志前的脱敏与截断：通道报错可能整段回显 JSON。"""
+    text = API_KEY_PATTERN.sub("sk-****", " ".join(raw.split()))
+    return text[:400]
 
 
 def format_duration(seconds: float) -> str:

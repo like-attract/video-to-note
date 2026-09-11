@@ -271,7 +271,7 @@ async def test_fetch_bilibili_subtitles_reports_no_track_when_logged_in(
     _monkeypatch_view(monkeypatch, _FAKE_VIEW)
     monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
     monkeypatch.setattr(
-        processor, "_bilibili_subtitle_track", lambda bvid, cid, cookie: None
+        processor, "_bilibili_subtitle_track", lambda bvid, aid, cid, cookie: None
     )
     outcome = await processor.fetch_bilibili_subtitles(
         "https://www.bilibili.com/video/BV1xM4y1z7Kt", cookie={"sessdata": "abc"}
@@ -291,7 +291,7 @@ async def test_fetch_bilibili_subtitles_reports_download_error(
     monkeypatch.setattr(
         processor,
         "_bilibili_subtitle_track",
-        lambda bvid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
+        lambda bvid, aid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
     )
 
     def raise_error(*args, **kwargs):
@@ -317,7 +317,7 @@ async def test_fetch_bilibili_subtitles_merges_all_pages(
     monkeypatch.setattr(
         processor,
         "_bilibili_subtitle_track",
-        lambda bvid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
+        lambda bvid, aid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
     )
     monkeypatch.setattr(
         processor, "_download_text", lambda *args, **kwargs: _SUBTITLE_JSON
@@ -345,7 +345,7 @@ async def test_fetch_bilibili_subtitles_respects_p_param(
     _monkeypatch_view(monkeypatch, _FAKE_VIEW)
     monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
 
-    def fake_track(bvid, cid, cookie):
+    def fake_track(bvid, aid, cid, cookie):
         return {"language": "ai-zh", "url": "https://example.com/sub.json"}
 
     monkeypatch.setattr(processor, "_bilibili_subtitle_track", fake_track)
@@ -360,6 +360,80 @@ async def test_fetch_bilibili_subtitles_respects_p_param(
     assert [p.page for p in outcome.pages] == [2]
     assert outcome.result is not None
     assert len(outcome.result.segments) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_only_pages_filters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
+    monkeypatch.setattr(
+        processor,
+        "_bilibili_subtitle_track",
+        lambda bvid, aid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
+    )
+    monkeypatch.setattr(
+        processor, "_download_text", lambda *args, **kwargs: _SUBTITLE_JSON
+    )
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt",
+        cookie={"sessdata": "abc"},
+        only_pages=[2],
+    )
+    # 显式指定优先于「缺省全部」：只转 P2，时间轴也不累计 P1 时长
+    assert outcome.total_pages == 2
+    assert [p.page for p in outcome.pages] == [2]
+    assert outcome.result is not None
+    assert outcome.result.segments[0].start == 0.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_bilibili_subtitles_only_pages_invalid_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    _monkeypatch_view(monkeypatch, _FAKE_VIEW)
+    monkeypatch.setattr(processor, "_cookie_header", lambda cookie: "SESSDATA=abc;")
+    monkeypatch.setattr(
+        processor,
+        "_bilibili_subtitle_track",
+        lambda bvid, aid, cid, cookie: {"language": "ai-zh", "url": "https://example.com/sub.json"},
+    )
+    monkeypatch.setattr(
+        processor, "_download_text", lambda *args, **kwargs: _SUBTITLE_JSON
+    )
+    outcome = await processor.fetch_bilibili_subtitles(
+        "https://www.bilibili.com/video/BV1xM4y1z7Kt?p=2",
+        cookie={"sessdata": "abc"},
+        only_pages=[99],
+    )
+    # 指定页码全部无效时回退 URL 规则（?p=2 → 仅 P2）
+    assert [p.page for p in outcome.pages] == [2]
+
+
+@pytest.mark.asyncio
+async def test_bilibili_video_pages_resolves_av_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processor = VideoProcessor(tmp_path)
+    captured: list[dict] = []
+
+    def fake_json(url, params, headers):
+        captured.append(params)
+        return _FAKE_VIEW
+
+    monkeypatch.setattr(VideoProcessor, "_bilibili_get_json", staticmethod(fake_json))
+    info = await processor.bilibili_video_pages(
+        "https://www.bilibili.com/video/av170001"
+    )
+    assert info is not None
+    assert info.bvid is None
+    assert info.aid == 170001
+    assert info.title == "分P测试视频"
+    assert [p.page for p in info.pages] == [1, 2]
+    assert captured and "aid" in captured[0]
 
 
 def test_bilibili_page_url_keeps_query_and_sets_p() -> None:

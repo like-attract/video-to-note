@@ -13,6 +13,7 @@ from backend.transcript import TranscriptSegment
 from backend.video_processor import (
     BiliPage,
     BiliSubtitleOutcome,
+    BiliVideoInfo,
     SubtitleResult,
     VideoProcessor,
 )
@@ -190,20 +191,41 @@ def test_frontend_whisper_confirm_dedup_logic() -> None:
 def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """手动导入模型：创建并返回导入目录，模型 ID 校验，状态接口带 manual_dir。"""
     monkeypatch.setattr(main, "WHISPER_CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(main, "_open_in_file_manager", lambda _path: False)
+    opened: list[Path] = []
+
+    def fake_open(path: Path) -> bool:
+        opened.append(path)
+        return True
+
+    monkeypatch.setattr(main, "_open_in_file_manager", fake_open)
     client = TestClient(main.app)
 
-    response = client.post("/api/whisper-models/manual-folder", json={"model": "base"})
+    response = client.post(
+        "/api/whisper-models/manual-folder", json={"model": "base", "open": False}
+    )
     assert response.status_code == 200
     data = response.json()
     expected_dir = tmp_path / "cache" / "manual" / "base"
     assert data == {
         "path": str(expected_dir),
         "opened": False,
-        "files": ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"],
+        # 词表文件名各仓库不统一（large-v3 用的是 .json），引导里两个都列出来
+        "files": [
+            "config.json",
+            "model.bin",
+            "tokenizer.json",
+            "vocabulary.txt 或 vocabulary.json",
+        ],
         "download_url": "https://hf-mirror.com/Systran/faster-whisper-base/tree/main",
     }
     assert expected_dir.is_dir()
+    # open=false 只取引导信息，不能先把用户的文件管理器窗口弹出来
+    assert opened == []
+
+    assert client.post(
+        "/api/whisper-models/manual-folder", json={"model": "base"}
+    ).json()["opened"] is True
+    assert opened == [expected_dir]
 
     status = client.get("/api/whisper-models")
     assert status.status_code == 200
@@ -284,6 +306,40 @@ def test_recent_tasks_are_compact_and_do_not_include_markdown(monkeypatch) -> No
 )
 def test_loopback_client_detection(host: str, allowed: bool) -> None:
     assert main.is_loopback_client(host) is allowed
+
+
+def test_llm_stage_error_never_becomes_platform_text() -> None:
+    """回归：B 站任务在生成笔记阶段被通道回 403，曾被说成「抖音媒体地址已过期，
+    请重新提交链接」，用户照着提示重投了三次本来没问题的链接。"""
+    message = main.friendly_task_error(
+        "Error code: 403 - {'error': 'no permission'}",
+        source=main.VideoSource.BILIBILI,
+        step_name=main.NOTE_STEP_NAME,
+    )
+    assert "抖音" not in message
+    assert "模型接口" in message
+
+
+def test_platform_403_maps_to_the_platform_of_the_task() -> None:
+    raw = "ERROR: Unable to download webpage: HTTP Error 403: Forbidden"
+    assert "抖音" in main.friendly_task_error(
+        raw, source=main.VideoSource.DOUYIN, step_name="下载媒体"
+    )
+    bilibili = main.friendly_task_error(
+        raw, source=main.VideoSource.BILIBILI, step_name="下载媒体"
+    )
+    assert "B 站" in bilibili and "抖音" not in bilibili
+    assert (
+        main.friendly_task_error(raw, source=main.VideoSource.LOCAL, step_name="下载媒体")
+        == raw
+    )
+
+
+def test_scrubbed_error_hides_keys_but_keeps_the_status() -> None:
+    assert (
+        main.scrub_technical_error("Error code: 403 with key sk-abcdef12345\n second line")
+        == "Error code: 403 with key sk-**** second line"
+    )
 
 
 def test_summarize_rejects_local_path_in_url_field() -> None:
@@ -987,6 +1043,106 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
     assert captured_segments[0].text.startswith("【P1 第一部分】 P1字幕")
     assert captured_segments[1].text.startswith("【P2 第二部分】 P2语音内容")
     assert captured_segments[1].start == 60.0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_passes_bilibili_pages_to_subtitle_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """请求里的 bilibili_pages 要原样传给字幕抓取（显式选择覆盖 URL ?p=N）。"""
+    processor = VideoProcessor(tmp_path)
+
+    async def fake_info(*args, **kwargs):
+        return {"title": "分P测试视频", "source": "bilibili", "duration": 0, "owner": "作者"}
+
+    async def fake_subtitles(*args, **kwargs):
+        return None
+
+    captured: dict = {}
+
+    async def fake_bili_subtitles(url, cookie=None, only_pages=None):
+        captured["only_pages"] = only_pages
+        pages = (
+            BiliPage(page=1, part="第一部分", cid=101, duration=60),
+            BiliPage(page=2, part="第二部分", cid=102, duration=90),
+        )
+        sub = SubtitleResult(
+            [TranscriptSegment(0, 5, "P1字幕")], "zh-CN", "bilibili_ai_subtitle"
+        )
+        merged, _ = main.merge_bilibili_pages(pages, {1: sub}, {})
+        return BiliSubtitleOutcome(
+            SubtitleResult(merged, "zh-CN", "bilibili_ai_subtitle"),
+            "ok",
+            title="分P测试视频",
+            total_pages=2,
+            pages=pages,
+            subtitle_by_page=((1, sub),),
+        )
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 测试笔记"
+
+    monkeypatch.setattr(processor, "get_video_info", fake_info)
+    monkeypatch.setattr(processor, "fetch_subtitles", fake_subtitles)
+    monkeypatch.setattr(processor, "fetch_bilibili_subtitles", fake_bili_subtitles)
+    monkeypatch.setattr(main, "video_processor", processor)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+
+    task_id = "multi-p-pages-param"
+    (tmp_path / task_id).mkdir()
+    main.tasks[task_id] = main.new_task()
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx?p=2",
+        bilibili_pages=[1, 2],
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    assert captured["only_pages"] == [1, 2]
+
+
+def test_bili_pages_endpoint_returns_page_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_pages(url, cookie=None):
+        return BiliVideoInfo(
+            bvid="BV1xx",
+            aid=None,
+            title="多P视频",
+            pages=(
+                BiliPage(page=1, part="第一课", cid=101, duration=600),
+                BiliPage(page=2, part="第二课", cid=102, duration=900),
+            ),
+        )
+
+    monkeypatch.setattr(main.video_processor, "bilibili_video_pages", fake_pages)
+    monkeypatch.setattr(main.config_store, "load_bili_credentials", lambda: None)
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/bili-pages", json={"video_url": "https://www.bilibili.com/video/BV1xx"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "多P视频"
+    assert data["total_pages"] == 2
+    assert [page["page"] for page in data["pages"]] == [1, 2]
+    assert data["pages"][0]["part"] == "第一课"
+    assert data["pages"][1]["duration"] == 900
+
+
+def test_bili_pages_endpoint_rejects_non_bilibili(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main.config_store, "load_bili_credentials", lambda: None)
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/bili-pages", json={"video_url": "https://www.youtube.com/watch?v=abc"}
+    )
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio

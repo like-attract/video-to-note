@@ -60,6 +60,7 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
    curl -s -X POST http://127.0.0.1:8000/api/transcribe \
      -H "Content-Type: application/json" \
      -d '{"video_url": "https://www.bilibili.com/video/BVxxxx", "whisper_model": "base"}'
+   # B 站多 P 视频可加 "bilibili_pages": [2, 3] 只转写指定分 P（缺省跟随链接 ?p=，没有则全部）
 
    # 笔记路线
    curl -s -X POST http://127.0.0.1:8000/api/summarize \

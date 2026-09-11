@@ -260,9 +260,9 @@ The app disables Hugging Face's Xet download backend by default and uses regular
 
 Large models are big (medium ≈ 1.5 GB) and prone to interruptions on unstable networks. Besides retrying (resume supported), you can import a model manually:
 
-1. Pick the model under the transcription settings and click "**手动导入模型**" (Import model manually). The app opens the import folder (`workspace/_model_cache/manual/<model>/`);
-2. Download the model's 4 files in a browser: `config.json`, `model.bin`, `tokenizer.json`, `vocabulary.txt` from `https://hf-mirror.com/Systran/faster-whisper-<model>/tree/main`;
-3. Drop the 4 files into that folder unchanged. The app detects them within seconds and marks the model as cached.
+1. Pick the model under the transcription settings and click "**手动导入模型**" (Import model manually). A dialog lists exactly which files that model needs and where to download them; confirm and the app opens the import folder (`workspace/_model_cache/manual/<model>/`);
+2. Save those files in a browser: `config.json`, `model.bin`, `tokenizer.json`, plus the vocabulary file — `vocabulary.txt` or `vocabulary.json` depending on the repository (`large-v3` only ships `.json`). Use whichever one the download page offers;
+3. Drop the files into that folder unchanged. The app detects them within seconds and marks the model as cached.
 
 Downloads and cached files are verified for integrity; corrupt leftovers from interrupted downloads are cleaned up and re-downloaded automatically.
 
