@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.3.5</h1>
+<h1 align="center">VideoToNo v1.4.0</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -18,19 +18,22 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.3.0 → v1.3.5)
+## 🆕 What's New (v1.3.5 → v1.4.0)
 
-- **Transcripts without an API key**: the interface has a new output type, **Transcript only**. Note style and reasoning settings collapse, the task reads platform captions or runs local Whisper, and **no LLM is called anywhere — so this machine needs no key at all**. The timestamped transcript is kept in *Recent tasks* (tagged *Transcript*) so you can reopen, copy, or download it later, and you can still switch that task to the note route without re-running the transcription
-- **Once an agent is connected, the organising is up to you**: the same transcript exit is open to agents (MCP `transcribe_video` + `get_transcript`, Skill `--transcript-only`). After it has the timestamped text, loose follow-up instructions all work — "go deep on section X", "merge the repetition and fill the gaps", "add background the video skipped" — the structure is never dictated by this app
-- **Transcripts of past tasks can be taken directly**: availability is decided by the transcript file, not by task status — **tasks whose note generation failed still yield their transcript**, with no re-download and no re-transcription
-- **Local videos no longer fail on first run**: the page used to submit the backend's own `input.mp4` path as if it were a link, which was rejected as an unrecognised URL, so the first attempt always failed and only "retry" worked (present since v1.2.1, not a regression from this batch). Submissions now carry the upload task id; no duplicate `input` task is created, and history and note titles use your original file name
-- **The 2 GB upload limit is really in place**: the backend allowed 2048 MB while the page still checked 500 MB; the limit now comes from `/api/health`, so the picker and the copy follow the server and `MAX_UPLOAD_MB` in `.env` moves both
-- **GPU transcription falls back to CPU instead of failing**: on machines with a working driver but missing cuBLAS/cuDNN (`Library cublas64_12.dll is not found`), transcription no longer dies at stage 4 — it continues on CPU and records the reason plus how to fix it in the run log, and later tasks in the same process skip the doomed GPU init
-- **"Pending" tasks can finally be deleted**: tasks uploaded but never started had no delete control and came back after a restart, permanently crowding the 20 most recent tasks
+- **Long videos no longer lose content**: videos over ~80 minutes (24k characters) are now written as a **complete, chronological section-by-section record** — the old pipeline's "condense → merge → single draft" funnel had material and output caps independent of video length, so a 3-hour lecture lost about 2 hours. Each section now continues automatically until it reaches its own time range; anything still unfinished gets its raw transcript appended with a reason, so content no longer vanishes. Notes gain a content overview plus a table of contents with time ranges, and headings carry `[start-end]` stamps (short videos too). Under 80 minutes the old path is unchanged
+- **Note drafting an order of magnitude faster**: the "Auto" reasoning level fully disables deep thinking on DeepSeek-compatible channels. Measured: a 3-hour, 62k-character exam-prep lecture drafted into 48k characters in **8 min 22 s** (119/120 ninety-second blocks covered, all 15 exam conclusions present); a 28-minute video end-to-end in 24 minutes; an 8-minute video in 95 seconds. Pick "High/Max" explicitly if you want deep thinking. Two guardrails: the thinking budget is raised 5x to prevent "20k characters of thinking, zero answer", and a stream cut off mid-read by the gateway is retried once automatically
+- **Formulas now render**: the in-app preview ships KaTeX (bundled locally, no network), and formulas are normalized to Markdown's `$...$ / $$...$$` — rendered in the preview and equally readable in Typora/Obsidian; legacy `\( \)` `\[ \]` output is converted automatically
+- **Faster, more visible local transcription**: new **paraformer-zh** (Chinese-only, ~4 minutes for an 80-minute video, ~9.6x faster than the old default, auto-segmented and punctuated) and **belle-turbo-zh** (a Chinese-tuned whisper-turbo, better than large-v3 on Chinese, punctuated); CPU decoding tuned for ~2.3x; transcription reports "reached mm:ss / total" every 30 seconds instead of looking stuck; the never-working turbo auto-download is fixed and the manual-import links now point at the right repository per model
+- **Context before writing**: the video description is fed to the model to recognize the course/series and spell terminology correctly; **hot comments are deliberately not collected** — today they are mostly memes, more misleading than informative
+- **Smoother Bilibili multi-part (P) handling**: pick the parts to process before submitting (defaults to none selected — a misclicked 42-part course would mean tens of hours of transcription); **re-submitting the same video now preselects the parts you chose last time**
+- **Rename model profiles in place**: a "Rename" button next to the profile dropdown — no more a screen of "New custom endpoint"
+- **Errors no longer point at the wrong platform**: when note generation is rejected by the model on a Bilibili/local task, the message no longer claims "Douyin media link expired" — it points at the key / base URL / model to check, with a sanitized underlying error in the log; "Off" thinking no longer 400s on gateways that only accept effort values
+- **Misc**: recent tasks show elapsed/total time; the analysis stage retries once on rate limits instead of killing a 96%-complete task; dev scripts: `start.ps1` opens the page automatically, `stop.ps1 -All` sweeps orphaned instances
 
 <details>
-<summary>Previous releases (v1.3.0 and earlier)</summary>
+<summary>Previous releases (v1.3.5 and earlier)</summary>
 
+- **v1.3.5**: new "Transcript only" output (no LLM, no key; transcripts can switch to the note route later); the transcript exit opened to MCP / Skill (`transcribe_video` + `get_transcript`); transcripts of failed tasks remain fetchable; local videos work on first upload (no fail-then-retry) with the 2 GB limit truly in place; GPU falls back to CPU when CUDA runtime libraries are missing; pending tasks can be deleted.
 - **v1.3.0**: API keys and Bilibili credentials can be **saved to this machine per endpoint address** (DPAPI-encrypted on Windows, reused only when the target address matches, with a key-state chip beside the input); model profiles each remember their own model and custom endpoints become named profiles with autosave; cancellation now reaches *Cancelled* instantly in every stage (measured 18.6s → 0.02s); fixed model IDs bleeding across profiles and early failures leaving tasks in `processing`; MCP gained `list_llm_keys`, `save_llm_config` labels, and `endpoints` / `key_storage` in `get_saved_config`.
 - **v1.2.3**: Bilibili notes survive risk control (automatic fallback to `api.bilibili.com` open endpoints for metadata, audio and preview streams across multi-part videos, Issue #1), three guardrails against the "Faithful" style hanging in generation, generation progress heartbeat, reasoning effort adapting to the note style, and automatic degradation when a channel rejects a thinking parameter
 - **v1.2.2**: Agent Skill integration (`skills/video-to-note/`, one-sentence note generation), Windows tray notifications for task results, rewritten repo and docs positioning
@@ -61,7 +64,7 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.3.5-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.4.0-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
