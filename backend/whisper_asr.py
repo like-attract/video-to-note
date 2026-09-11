@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .download import download_to_file
 from .transcript import TranscriptSegment
@@ -70,6 +70,10 @@ GPU_UNAVAILABLE_NOTE = (
     "要用 GPU 请补装 CUDA 12 运行库（cuBLAS/cuDNN）后重启程序。"
 )
 
+# 转写心跳间隔，与生成笔记的 LLM 心跳同节奏。belle/whisper 在 CPU 上转写
+# 8 分钟音频要约 3 分钟，期间没有任何反馈时「语音转写」阶段看起来像卡死。
+TRANSCRIBE_HEARTBEAT_SECONDS = 30.0
+
 
 class TranscriptionCancelledError(Exception):
     """转写过程中检测到用户取消请求（协作式中止信号）。
@@ -101,12 +105,17 @@ class WhisperTranscriber:
         use_gpu: bool = False,
         initial_prompt: str | None = None,
         cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[float, float], None] | None = None,
     ) -> dict:
         """转写音视频文件。
 
         cancel_event：每任务取消事件；转写过程中在段与段之间检查，检测到
         已设置时抛 TranscriptionCancelledError 并转为 asyncio.CancelledError。
         传入 None（如冒烟脚本）时不检查取消。
+
+        progress_callback(已转写到的秒数, 音频总秒数)：转写线程每
+        TRANSCRIBE_HEARTBEAT_SECONDS 调一次，供任务层回报进度心跳；
+        回调在工作线程执行，任务层自行保证线程安全。
         """
         try:
             return await asyncio.to_thread(
@@ -116,6 +125,7 @@ class WhisperTranscriber:
                 use_gpu,
                 initial_prompt,
                 cancel_event,
+                progress_callback,
             )
         except TranscriptionCancelledError as exc:
             raise asyncio.CancelledError("转写已被用户取消") from exc
@@ -127,6 +137,7 @@ class WhisperTranscriber:
         use_gpu: bool,
         initial_prompt: str | None,
         cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[float, float], None] | None = None,
     ) -> dict:
         # Hugging Face 直连在国内网络常超时，默认走 hf-mirror.com 镜像；
         # 可通过环境变量 HF_ENDPOINT 覆盖（切回官方源或自建镜像）。
@@ -184,9 +195,16 @@ class WhisperTranscriber:
         # 惰性生成器逐段消费：每取一段前检查取消事件，用户取消时在段与段
         # 之间停下，而不是等整段音频转写完。单段 C 层解码中途无法打断。
         segments: list[TranscriptSegment] = []
+        last_beat = time.monotonic()
         for item in raw_segments:
             if cancel_event is not None and cancel_event.is_set():
                 raise TranscriptionCancelledError()
+            if (
+                progress_callback is not None
+                and time.monotonic() - last_beat >= TRANSCRIBE_HEARTBEAT_SECONDS
+            ):
+                last_beat = time.monotonic()
+                progress_callback(float(item.end), float(info.duration or 0))
             if item.text.strip():
                 segments.append(
                     TranscriptSegment(

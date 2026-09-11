@@ -204,15 +204,51 @@ async def run_transcription(
     use_gpu: bool,
     title: str | None,
     cancel_event: Any,
+    progress_callback: Any = None,
 ) -> dict:
-    """按所选模型路由转写引擎：paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。"""
+    """按所选模型路由转写引擎：paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。
+
+    progress_callback(已转写秒数, 总秒数) 仅 whisper 路径支持（paraformer
+    一次性出结果，且 RTF ≈ 0.05 本来就不需要心跳）。
+    """
     if model_name == "paraformer-zh":
         return await paraformer_transcriber.transcribe(
             media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
         )
     return await transcriber.transcribe(
-        media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
+        media_path,
+        model_name,
+        use_gpu,
+        initial_prompt=title,
+        cancel_event=cancel_event,
+        progress_callback=progress_callback,
     )
+
+
+def transcribe_progress_reporter(
+    task: dict[str, Any], model_name: str, page_label: str = ""
+) -> Any:
+    """转写心跳回调：工作线程里只经 call_soon_threadsafe 回主循环改任务状态。
+
+    set_progress 会写任务字典并落盘运行时状态，不能在转写线程里直接调。
+    """
+    loop = asyncio.get_running_loop()
+
+    def _clock(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+    def report(position: float, duration: float) -> None:
+        total = _clock(duration) if duration > 0 else "未知时长"
+        message = (
+            f"正在转写{page_label}音频（{model_name}）："
+            f"已推进到 {_clock(position)} / {total}"
+        )
+        loop.call_soon_threadsafe(set_progress, task, 4, "语音转写", 38, message)
+
+    return report
+
+
 bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
 douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
@@ -607,6 +643,8 @@ def write_task_manifest(
         "summary_style": request.summary_style,
         "reasoning_effort": request.reasoning_effort,
         "reused_task_id": reused_task_id,
+        # 分 P 勾选随任务落盘：同一视频重新处理时，/bili-pages 用它预勾上次的范围
+        "bilibili_pages": getattr(request, "bilibili_pages", None),
     }
     (task_directory(task_id) / "task.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1075,6 +1113,32 @@ async def clear_bili_credentials() -> dict[str, bool]:
     return {"saved": False}
 
 
+def previous_bili_pages(normalized_url: str) -> list[int] | None:
+    """该视频最近一次任务显式勾选的分 P（新任务在前扫描，没有则 None）。
+
+    重新处理多分 P 视频时，面板默认沿用上次的范围，不用重新勾一遍；
+    只认显式下发过的 bilibili_pages（None 表示当时的「全部」，不预勾）。
+    """
+    for candidate in sorted(
+        (path for path in WORKSPACE_DIR.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ):
+        manifest_path = candidate / "task.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if manifest.get("normalized_source_url") != normalized_url:
+            continue
+        pages = manifest.get("bilibili_pages")
+        if isinstance(pages, list) and pages:
+            return [int(page) for page in pages]
+    return None
+
+
 @app.post("/api/bili-pages")
 async def preview_bilibili_pages(request: BiliPagesRequest) -> dict[str, Any]:
     """提交任务前预览 B 站分 P 清单，让用户显式勾选要转写的分 P。
@@ -1115,6 +1179,8 @@ async def preview_bilibili_pages(request: BiliPagesRequest) -> dict[str, Any]:
             {"page": page.page, "part": page.part, "duration": page.duration}
             for page in video.pages
         ],
+        # 该视频上次任务显式勾选的分 P；前端拿它做默认勾选（优先于 ?p=N）
+        "previous_pages": previous_bili_pages(normalize_source_url(url)),
     }
 
 
@@ -1556,6 +1622,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         request.use_gpu,
                         title,
                         task.get("_cancel_event"),
+                        progress_callback=transcribe_progress_reporter(
+                            task, request.whisper_model, f"分 P {page.page} "
+                        ),
                     )
                     raise_if_cancel_requested(task)
                     whisper_by_page[page.page] = whisper_result
@@ -1631,6 +1700,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     request.use_gpu,
                     title,
                     task.get("_cancel_event"),
+                    progress_callback=transcribe_progress_reporter(
+                        task, request.whisper_model
+                    ),
                 )
                 raise_if_cancel_requested(task)
                 transcript_result = {

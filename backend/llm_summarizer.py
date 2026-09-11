@@ -76,9 +76,12 @@ DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
 # 仍由各阶段的 max_tokens 把住。
 MAX_EFFORT_BUDGET_MULTIPLIER = 5
 # auto 档在 DeepSeek 兼容通道按笔记风格解析出的默认推理档位。
-# 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量，
-# 因此默认拉高换内容完整性；非 DeepSeek 通道保持模型默认不注入参数。
-STYLE_DEFAULT_EFFORT = {"detailed": "max", "faithful": "max", "concise": "high"}
+# 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量。
+# 曾默认 detailed/faithful → max，两次实测都撑不住：max 的思考链要么涨到输出额度
+# 上限把正文挤没了（28 分钟视频，思考 2.2 万字后正文为 0），要么单纯思考太久
+# （8 分钟视频、2200 字字幕稿，思考 2.2 万字 20 分钟才开始输出正文）。
+# 成稿的输入多是已压缩材料或短片，high 足够；max 仅在用户显式选择时使用。
+STYLE_DEFAULT_EFFORT = {"detailed": "high", "faithful": "high", "concise": "high"}
 # 逐段直写（长视频）在 auto 下的档位：直接关思考。这一步是“照着几千字原文整理成稿”
 # 的局部任务，思考链帮不上忙——实测 high 档每段 1 万多字思考只换 1 千字正文，
 # 28 分钟的视频总共跑了 44 分钟；关掉后输出额度全部留给正文。
@@ -99,7 +102,8 @@ TAIL_PATCH_MAX_INPUT_CHARACTERS = 4_000
 # 补写请求的整体耗时上限：超时则保留原笔记，绝不让任务停在补写阶段不放。
 TAIL_PATCH_TIMEOUT_SECONDS = 240.0
 # 流式读取心跳间隔：把"模型仍在输出"反映到任务进度上，避免长时间同一句话看起来像死锁。
-LLM_HEARTBEAT_SECONDS = 20.0
+# 与转写心跳同节奏（30s）：20s 时日志滚动太快，反而看不清进度。
+LLM_HEARTBEAT_SECONDS = 30.0
 # 转录净字数超过该值时改走“逐段直写成稿”管线（见 ``_write_long_transcript_notes``）。
 # 根因：``_reduce_chunks`` 把成稿可见材料压到恒 ≤ ``MERGE_INPUT_CHARACTERS`` 字、成稿输出
 # 恒 ≤ 4_600 token，两个上限都与视频时长无关。3 小时课（6.2 万字）因此丢约 2 小时内容，
@@ -1587,9 +1591,9 @@ class LLMSummarizer:
                 "核心观点及其依据，并在有帮助时加入关键时间点。不要加入外部知识或评价。"
             )
             timestamp_hint = (
-                "时间点写在段落开头，写成 [MM:SS] 或 [起点-终点]；"
-                "仅在有助于定位时使用，不必每段都加；但结尾一小节必须带一个接近材料末尾的时间点，"
-                "以便核对是否写到视频最后。"
+                "每个 ## 或 ### 小标题都写成「## 标题 [起点-终点]」，区间取该话题在材料里的"
+                "首尾时间点；标题之外的段落仅在有助于定位时另加 [MM:SS]，不必每段都加；"
+                "最后一个小节的区间终点必须接近材料末尾，以便核对是否写到视频最后。"
             )
             coverage_hint = (
                 f"材料内容一直推进到时间点 {coverage_end}；笔记必须覆盖到该时间点，"

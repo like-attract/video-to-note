@@ -1420,6 +1420,12 @@ function renderBiliPagesPanel(url, payload) {
         hideBiliPagesPanel();
         return;
     }
+    // 默认勾选优先级：上次任务显式勾选的分 P > 链接 ?p=N > 不勾。
+    // 重新处理同一视频时沿用上次范围，不用重新勾一遍（后端按链接匹配返回）。
+    const previousPages = Array.isArray(payload.previous_pages)
+        ? payload.previous_pages.map(Number).filter(Number.isInteger)
+        : [];
+    const previousSet = new Set(previousPages);
     const pinned = urlPageParam(url);
     list.innerHTML = '';
     payload.pages.forEach((page) => {
@@ -1428,7 +1434,9 @@ function renderBiliPagesPanel(url, payload) {
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.value = String(page.page);
-        checkbox.checked = page.page === pinned;
+        checkbox.checked = previousSet.size
+            ? previousSet.has(page.page)
+            : page.page === pinned;
         checkbox.addEventListener('change', updateBiliPagesSummary);
         const index = document.createElement('span');
         index.className = 'bili-page-index';

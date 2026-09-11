@@ -840,7 +840,12 @@ async def test_local_task_title_uses_uploaded_filename(
     class FakeTranscriber:
         @staticmethod
         async def transcribe(
-            media_path, model, use_gpu, initial_prompt=None, cancel_event=None
+            media_path,
+            model,
+            use_gpu,
+            initial_prompt=None,
+            cancel_event=None,
+            progress_callback=None,
         ):
             return {
                 "segments": [
@@ -988,7 +993,7 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
     class FakeTranscriber:
         async def transcribe(
             self, media_path, model_name="base", use_gpu=False,
-            initial_prompt=None, cancel_event=None,
+            initial_prompt=None, cancel_event=None, progress_callback=None,
         ):
             return {
                 "segments": [TranscriptSegment(0, 3, "P2语音内容")],
@@ -1884,3 +1889,64 @@ def test_restore_keeps_transcript_task_completed_and_hidden(monkeypatch, tmp_pat
     assert restored["output"] == "transcript"
     assert restored["result"]["segment_count"] == 1
     assert TestClient(main.app).get("/api/tasks").json()["tasks"] == []
+
+
+def test_previous_bili_pages_returns_latest_explicit_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重新处理多分 P 视频时默认沿用上次勾选：按链接匹配、取最近一次显式勾选。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    old = tmp_path / "task_old"
+    new = tmp_path / "task_new"
+    other = tmp_path / "task_other"
+    for path in (old, new, other):
+        path.mkdir()
+        (path / "task.json").write_text("{}", encoding="utf-8")
+    (old / "task.json").write_text(
+        json.dumps(
+            {
+                "normalized_source_url": "https://www.bilibili.com/video/BV1ab",
+                "bilibili_pages": [1, 2],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (new / "task.json").write_text(
+        json.dumps(
+            {
+                "normalized_source_url": "https://www.bilibili.com/video/BV1ab",
+                "bilibili_pages": [3],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (other / "task.json").write_text(
+        json.dumps(
+            {
+                "normalized_source_url": "https://www.bilibili.com/video/BVxxxx",
+                "bilibili_pages": [9],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # 目录扫描按 mtime 排序，显式固定先后避免同秒创建的抖动
+    import os
+
+    os.utime(old, (1_000, 1_000))
+    os.utime(new, (2_000, 2_000))
+
+    assert main.previous_bili_pages("https://www.bilibili.com/video/BV1ab") == [3]
+    assert main.previous_bili_pages("https://www.bilibili.com/video/BVzzzz") is None
+
+    # 上次是「全部」（没有显式勾选记录）时不预勾，维持默认全不勾的保护
+    (old / "task.json").unlink()
+    (new / "task.json").write_text(
+        json.dumps(
+            {
+                "normalized_source_url": "https://www.bilibili.com/video/BV1ab",
+                "bilibili_pages": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main.previous_bili_pages("https://www.bilibili.com/video/BV1ab") is None
