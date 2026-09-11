@@ -2462,7 +2462,50 @@ function replaceImagePaths(markdown) {
     );
 }
 
-function renderMarkdown(markdown) {
+// 数学片段（$...$ / $$...$$）先摘成纯字母数字占位符，marked + DOMPurify 之后再
+// 回填 KaTeX 本地渲染结果：KaTeX 产物依赖 inline style 与 <math> 标签，过不了
+// 下面的 sanitize 白名单，也不该过——它是本机从数学源码生成的可信输出。
+// 行内公式的内容不允许以空白开头/结尾且不跨行，避免把两个独立的 $ 符号误认成一对。
+const MATH_SEGMENT_RE = /\$\$([\s\S]+?)\$\$|\$([^\s$](?:[^$\n]*[^\s$])?)\$/g;
+const MATH_PLACEHOLDER_RE = /MATHSEGZ(\d+)ZEND/g;
+
+function extractMathSegments(markdown) {
+    const segments = [];
+    // 代码块（``` 围栏）内是字面文本：与后端公式归一化同一套约定，只处理偶数段
+    const parts = markdown.split('```').map((part, index) => {
+        if (index % 2 === 1) return part;
+        return part.replace(MATH_SEGMENT_RE, (match, display, inline) => {
+            segments.push({
+                source: (display ?? inline ?? '').trim(),
+                displayMode: display !== undefined,
+            });
+            return `MATHSEGZ${segments.length - 1}ZEND`;
+        });
+    });
+    return { markdown: parts.join('```'), segments };
+}
+
+function restoreMathSegments(html, segments) {
+    if (!segments.length) return html;
+    return html.replace(MATH_PLACEHOLDER_RE, (match, indexText) => {
+        const segment = segments[Number(indexText)];
+        if (!segment) return match;
+        const fallback = escapeHtml(
+            segment.displayMode ? `$$${segment.source}$$` : `$${segment.source}$`
+        );
+        if (typeof katex === 'undefined') return fallback;
+        try {
+            return katex.renderToString(segment.source, {
+                displayMode: segment.displayMode,
+                throwOnError: false,
+            });
+        } catch {
+            return fallback;
+        }
+    });
+}
+
+function renderMarkdownBase(markdown) {
     if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
         return `<pre>${escapeHtml(markdown)}</pre>`;
     }
@@ -2474,6 +2517,11 @@ function renderMarkdown(markdown) {
         ],
         FORBID_ATTR: ['style']
     });
+}
+
+function renderMarkdown(markdown) {
+    const { markdown: protectedMarkdown, segments } = extractMathSegments(markdown);
+    return restoreMathSegments(renderMarkdownBase(protectedMarkdown), segments);
 }
 
 async function downloadSummary() {
@@ -2675,7 +2723,8 @@ function triggerBlobDownload(blob, extension) {
 }
 
 function convertToHtml(markdown) {
-    const body = renderMarkdown(markdown);
+    // 导出的单文件 html 不带 KaTeX 样式，公式保持 $ 原文（Typora/Obsidian 等可渲染）
+    const body = renderMarkdownBase(markdown);
     return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频笔记</title></head><body><main>${body}</main></body></html>`;
 }
 

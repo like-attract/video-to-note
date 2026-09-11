@@ -172,7 +172,7 @@ def test_frontend_sanitizes_generated_markdown() -> None:
     script = (main.FRONTEND_DIR / "script.js").read_text(encoding="utf-8")
     assert "DOMPurify.sanitize" in script
     assert "content.innerHTML = marked.parse" not in script
-    assert "const body = renderMarkdown(markdown);" in script
+    assert "const body = renderMarkdownBase(markdown);" in script
     assert "const body = typeof marked" not in script
     assert "persistApiKeyIfRequested" not in script
 
