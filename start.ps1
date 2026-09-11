@@ -1,6 +1,7 @@
 param(
     [switch]$Foreground,
     [switch]$Restart,
+    [switch]$NoBrowser,
     [string]$BindHost = "",
     [Nullable[int]]$Port = $null
 )
@@ -12,6 +13,12 @@ $runtimeDir = Join-Path $projectRoot ".runtime"
 $statePath = Join-Path $runtimeDir "server.json"
 $stdoutPath = Join-Path $runtimeDir "server.stdout.log"
 $stderrPath = Join-Path $runtimeDir "server.stderr.log"
+
+# 打包版启动后会自动开页，开发脚本此前只打印 URL，两边行为不一致
+function Open-VideoToNoPage([string]$url) {
+    if ($NoBrowser) { return }
+    Start-Process $url
+}
 
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Virtual environment not found. Create .venv and install backend/requirements.txt first."
@@ -48,6 +55,7 @@ if (Test-Path -LiteralPath $statePath) {
         $existing = Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue
         if ($existing) {
             Write-Host "VideoToNo is already running (PID $($state.pid)): $($state.url)" -ForegroundColor Green
+            Open-VideoToNoPage $state.url
             exit 0
         }
     } catch {
@@ -134,3 +142,4 @@ $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
 Write-Host "VideoToNo started (PID $listenerPid): $url" -ForegroundColor Green
 Write-Host "Stop it with .\stop.ps1; logs are in .runtime\." -ForegroundColor DarkGray
+Open-VideoToNoPage $url

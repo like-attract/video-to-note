@@ -272,6 +272,43 @@ const TASK_STATUS_LABELS = {
 // 已结束 + 尚未开始处理的任务可以直接删；运行中的任务（queued/processing）只能先取消
 const DELETABLE_TASK_STATUSES = ['failed', 'cancelled', 'uploaded', 'pending'];
 
+// 后端给的 elapsed_seconds 从提交起算（含排队），未结束的任务本地继续按秒推进，
+// 不必为此多打一轮 /api/tasks
+const LIVE_TASK_STATUSES = ['pending', 'queued', 'processing', 'cancelling'];
+// 上传后一直没提交的任务：elapsed 同样从创建起算，显示出来只是个虚构的数字，不如不提
+const NO_ELAPSED_TASK_STATUSES = ['uploaded'];
+let recentTaskRows = new Map();
+let recentTasksSyncedAt = 0;
+let recentTasksElapsedTimer = null;
+
+function recentTaskMetaText(task, nowSeconds) {
+    const created = formatTaskDate(task.created_at);
+    if (NO_ELAPSED_TASK_STATUSES.includes(task.status)) return created;
+    const live = LIVE_TASK_STATUSES.includes(task.status);
+    const base = Number(task.elapsed_seconds) || 0;
+    const elapsed = formatElapsedCompact(live ? base + Math.max(0, nowSeconds - recentTasksSyncedAt) : base);
+    if (!elapsed) return created;
+    return [created, `${live ? '已用时' : '共耗时'} ${elapsed}`].filter(Boolean).join(' · ');
+}
+
+function armRecentTasksElapsedTicker() {
+    const hasLive = Array.from(recentTaskRows.values()).some(
+        (row) => LIVE_TASK_STATUSES.includes(row.task.status)
+    );
+    if (!hasLive) {
+        if (recentTasksElapsedTimer !== null) window.clearInterval(recentTasksElapsedTimer);
+        recentTasksElapsedTimer = null;
+        return;
+    }
+    if (recentTasksElapsedTimer !== null) return;
+    recentTasksElapsedTimer = window.setInterval(() => {
+        const now = Date.now() / 1000;
+        recentTaskRows.forEach((row) => {
+            row.meta.textContent = recentTaskMetaText(row.task, now);
+        });
+    }, 1000);
+}
+
 async function loadRecentTasks(silent = false) {
     const refreshButton = byId('refreshRecentTasksBtn');
     refreshButton.disabled = true;
@@ -291,6 +328,8 @@ function renderRecentTasks(tasks) {
     const list = byId('recentTaskList');
     list.replaceChildren();
     panel.hidden = tasks.length === 0;
+    recentTasksSyncedAt = Date.now() / 1000;
+    recentTaskRows = new Map();
     tasks.forEach((task) => {
         const row = document.createElement('div');
         row.className = 'recent-task-row';
@@ -309,9 +348,8 @@ function renderRecentTasks(tasks) {
         }
         title.append(task.title || '未命名任务');
         const meta = document.createElement('span');
-        const elapsed = formatElapsedCompact(task.elapsed_seconds);
-        const created = formatTaskDate(task.created_at);
-        meta.textContent = [created, elapsed].filter(Boolean).join(' · ');
+        meta.textContent = recentTaskMetaText(task, recentTasksSyncedAt);
+        recentTaskRows.set(task.task_id, { meta, task });
         const status = document.createElement('em');
         status.className = `recent-task-status ${task.status || ''}`;
         status.textContent = TASK_STATUS_LABELS[task.status] || task.step_name || '未知';
@@ -336,6 +374,7 @@ function renderRecentTasks(tasks) {
         }
         list.append(row);
     });
+    armRecentTasksElapsedTicker();
 }
 
 async function deleteStoppedTask(taskId) {
