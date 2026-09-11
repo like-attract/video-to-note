@@ -1035,7 +1035,7 @@ async def test_custom_deepseek_uses_standard_param_with_safe_output_budget() -> 
 
     captured.clear()
     assert await summarizer._complete("测试", 4_600, "max") == "摘要"
-    assert captured["max_tokens"] == 13_800
+    assert captured["max_tokens"] == 23_000
 
 
 def test_is_official_deepseek_only_matches_deepseek_endpoints() -> None:
@@ -1326,7 +1326,7 @@ async def test_unsupported_max_tokens_degrades_budget(
 
     assert await summarizer._complete("测试", 4_600, "max") == "摘要"
     assert len(attempts) == 2
-    assert attempts[0]["max_tokens"] == 13_800  # max 档抬高后的预算
+    assert attempts[0]["max_tokens"] == 23_000  # max 档 ×5 抬高后的预算
     assert attempts[1]["max_tokens"] == 4_600  # 退回调用方额度
     # 思考参数不受影响，仍然带着
     assert attempts[1]["reasoning_effort"] == "max"
@@ -1518,12 +1518,12 @@ async def test_empty_thinking_response_retries_with_thinking_disabled() -> None:
     )
     assert requests[0]["extra_body"]["thinking"]["type"] == "enabled"
     assert requests[1]["extra_body"]["thinking"]["type"] == "disabled"
-    assert progress == [
-        (93, "正在补充点评与分析：模型首次未返回正文，已关闭深度思考并重试")
-    ]
-    assert summarizer.warnings == [
-        "正在补充点评与分析：模型首次未返回正文，已关闭深度思考并重试"
-    ]
+    expected_warning = (
+        "正在补充点评与分析：模型未返回正文（finish_reason=length，"
+        "多为思考链吃满输出额度后流被截断），已关闭深度思考并重试"
+    )
+    assert progress == [(93, expected_warning)]
+    assert summarizer.warnings == [expected_warning]
 
 
 @pytest.mark.asyncio

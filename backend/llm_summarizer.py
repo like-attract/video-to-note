@@ -69,6 +69,12 @@ MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300
 LLM_MAX_RETRIES = 0
 DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
+# max 档的输出额度按正文需求的倍数抬高：思考链与正文共用一个池子，额度只是油箱
+# 容量而不是油门——正常调用想停就停、用不满，抬高不影响成本；但太低会让长思考
+# 吃满后整条流被截断、正文为 0（实测 max 档思考 2.2 万字撞 1.38 万 token 上限，
+# 正文一个字没拿到，靠关思考重试才救回）。×5 给思考留出收尾余地，正常产出规模
+# 仍由各阶段的 max_tokens 把住。
+MAX_EFFORT_BUDGET_MULTIPLIER = 5
 # auto 档在 DeepSeek 兼容通道按笔记风格解析出的默认推理档位。
 # 档位不影响 token 单价（思考链按输出 token 计费），只影响思考量，
 # 因此默认拉高换内容完整性；非 DeepSeek 通道保持模型默认不注入参数。
@@ -1218,7 +1224,7 @@ class LLMSummarizer:
             else "max_tokens"
         )
         thinking_budget = (
-            max(max_tokens * 3, DEEPSEEK_HIGH_TOKEN_BUDGET)
+            max(max_tokens * MAX_EFFORT_BUDGET_MULTIPLIER, DEEPSEEK_HIGH_TOKEN_BUDGET)
             if self._uses_deepseek_compatibility() and effort == "max"
             else DEEPSEEK_HIGH_TOKEN_BUDGET
             if self._uses_deepseek_compatibility() and effort != "off"
@@ -1313,7 +1319,10 @@ class LLMSummarizer:
         content = "".join(parts)
         if not content:
             if retry_empty and effort != "off" and self._can_disable_thinking():
-                warning = f"{stage}：模型首次未返回正文，已关闭深度思考并重试"
+                warning = (
+                    f"{stage}：模型未返回正文（finish_reason={finish_reason}，"
+                    "多为思考链吃满输出额度后流被截断），已关闭深度思考并重试"
+                )
                 self.warnings.append(warning)
                 await self._report_progress(progress_callback, progress, warning)
                 return await self._complete(
