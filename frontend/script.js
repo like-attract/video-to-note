@@ -1819,23 +1819,29 @@ async function manualImportWhisperModel() {
         showToast(error.message || '读取模型导入信息失败', 'error');
         return;
     }
+    const guideSteps = guide.folders
+        .map(
+            (folder, index) =>
+                `${index + 1}. ${folder.label}\n`
+                + `    下载这些文件（不要改文件名）：${folder.files.join(' / ')}\n`
+                + `    下载页：${folder.download_url}\n`
+                + `    放入：${folder.path}`
+        )
+        .join('\n');
     const confirmed = window.confirm(
         `将为模型「${modelLabel}」打开手动导入文件夹。\n\n`
-        + '步骤：\n'
-        + '1. 用浏览器从下载页保存这些文件（不要改文件名）：\n'
-        + `    ${guide.files.join(' / ')}\n`
-        + `    下载页：${guide.download_url}\n`
-        + `2. 把它们放入文件夹：\n    ${guide.path}\n`
-        + '3. 文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
+        + (guide.folders.length > 1 ? '这个模型由几个组件组成，逐个放好：\n' : '步骤：\n')
+        + `${guideSteps}\n\n`
+        + '文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
         + '现在打开文件夹吗？'
     );
     if (!confirmed) return;
     try {
         const data = await requestManualImportGuide(modelId, true);
         if (data.opened) {
-            showToast(`已打开导入文件夹：${data.path}`, 'success');
+            showToast(`已打开导入文件夹：${data.open_path}`, 'success');
         } else {
-            window.prompt('未能自动打开文件夹，请手动前往以下路径放入模型文件：', data.path);
+            window.prompt('未能自动打开文件夹，请手动前往以下路径放入模型文件：', data.open_path);
         }
         startManualImportPolling(modelId);
     } catch (error) {

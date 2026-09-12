@@ -193,6 +193,9 @@ def test_frontend_whisper_confirm_dedup_logic() -> None:
 def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """手动导入模型：创建并返回导入目录，模型 ID 校验，状态接口带 manual_dir。"""
     monkeypatch.setattr(main, "WHISPER_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(
+        main.paraformer_transcriber, "download_root", tmp_path / "cache" / "sherpa"
+    )
     opened: list[Path] = []
 
     def fake_open(path: Path) -> bool:
@@ -209,16 +212,22 @@ def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.Monk
     data = response.json()
     expected_dir = tmp_path / "cache" / "manual" / "base"
     assert data == {
-        "path": str(expected_dir),
-        "opened": False,
-        # 词表文件名各仓库不统一（large-v3 用的是 .json），引导里两个都列出来
-        "files": [
-            "config.json",
-            "model.bin",
-            "tokenizer.json",
-            "vocabulary.txt 或 vocabulary.json",
+        "folders": [
+            {
+                "label": "模型文件",
+                "path": str(expected_dir),
+                # 词表文件名各仓库不统一（large-v3 用的是 .json），引导里两个都列出来
+                "files": [
+                    "config.json",
+                    "model.bin",
+                    "tokenizer.json",
+                    "vocabulary.txt 或 vocabulary.json",
+                ],
+                "download_url": "https://hf-mirror.com/Systran/faster-whisper-base/tree/main",
+            }
         ],
-        "download_url": "https://hf-mirror.com/Systran/faster-whisper-base/tree/main",
+        "open_path": str(expected_dir),
+        "opened": False,
     }
     assert expected_dir.is_dir()
     # open=false 只取引导信息，不能先把用户的文件管理器窗口弹出来
@@ -235,6 +244,29 @@ def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.Monk
 
     invalid = client.post("/api/whisper-models/manual-folder", json={"model": "nope"})
     assert invalid.status_code == 422
+
+
+def test_manual_folder_for_paraformer_lists_sherpa_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """paraformer-zh 是三份组件、且压根不读 manual/：照旧提示会让用户把文件放到程序不看的地方。"""
+    sherpa = tmp_path / "cache" / "sherpa"
+    monkeypatch.setattr(main.paraformer_transcriber, "download_root", sherpa)
+    opened: list[Path] = []
+    monkeypatch.setattr(main, "_open_in_file_manager", lambda path: opened.append(path) or True)
+
+    data = TestClient(main.app).post(
+        "/api/whisper-models/manual-folder", json={"model": "paraformer-zh", "open": False}
+    ).json()
+
+    assert [Path(folder["path"]).name for folder in data["folders"]] == ["asr", "punc", "vad"]
+    assert data["folders"][0]["files"] == ["model.int8.onnx", "tokens.txt"]
+    assert "csukuangfj/sherpa-onnx-paraformer-zh" in data["folders"][0]["download_url"]
+    assert "标点模型" in data["folders"][1]["label"]
+    # 三个目录都建好，但只开一个窗口（sherpa 根目录），不弹三次文件管理器
+    assert all(Path(folder["path"]).is_dir() for folder in data["folders"])
+    assert data["open_path"] == str(sherpa)
+    assert opened == []
 
 
 def test_note_metadata_and_footer_are_deterministic() -> None:

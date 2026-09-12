@@ -43,7 +43,7 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 from pydantic import BaseModel, Field, SecretStr
 
-from . import secret_box
+from . import paraformer_asr, secret_box
 from .config_store import BiliCredentialsUnavailable, LLM_KEYS_FILE, ConfigStore
 from .llm_summarizer import (
     LONG_TRANSCRIPT_CHARACTERS,
@@ -904,21 +904,55 @@ def _open_in_file_manager(path: Path) -> bool:
         return False
 
 
+PARAFORMER_IMPORT_LABELS = {
+    "asr": "转写主模型",
+    "punc": "标点模型（可以不放：缺了会自动降级为无标点转写）",
+    "vad": "语音活动检测",
+}
+
+
 @app.post("/api/whisper-models/manual-folder")
 async def open_whisper_manual_folder(payload: WhisperManualFolderPayload) -> dict[str, Any]:
-    """创建并打开手动导入模型的目标文件夹（大模型网络下载失败时的替代方案）。
+    """创建并返回手动导入模型的引导（大模型网络下载失败时的替代方案）。
 
-    open=false 只建目录并返回引导信息，供前端先展示步骤、用户确认后再开文件夹。
+    open=false 只给引导信息，供前端先展示步骤、用户确认后再开文件夹。
+    一条模型可能由多个组件目录组成（paraformer-zh 是 asr / punc / vad 三份，
+    而且和 faster-whisper 系根本不是一个缓存目录），所以引导统一返回 folders 列表。
     """
-    if payload.model not in WHISPER_MODELS:
-        raise HTTPException(status_code=422, detail="不支持的 Whisper 模型")
-    manual_dir = WHISPER_CACHE_DIR / "manual" / payload.model
-    manual_dir.mkdir(parents=True, exist_ok=True)
+    if payload.model not in ASR_MODELS:
+        raise HTTPException(status_code=422, detail="不支持的转写模型")
+
+    if payload.model == "paraformer-zh":
+        folders = []
+        for component, spec in paraformer_asr.MODEL_SPECS.items():
+            directory = paraformer_transcriber._component_dir(component)
+            directory.mkdir(parents=True, exist_ok=True)
+            folders.append(
+                {
+                    "label": PARAFORMER_IMPORT_LABELS[component],
+                    "path": str(directory),
+                    "files": list(spec["files"]),
+                    "download_url": f"https://hf-mirror.com/{spec['repo']}/tree/main",
+                }
+            )
+        open_path = paraformer_transcriber.download_root
+    else:
+        manual_dir = WHISPER_CACHE_DIR / "manual" / payload.model
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        folders = [
+            {
+                "label": "模型文件",
+                "path": str(manual_dir),
+                "files": transcriber.manual_import_files(payload.model),
+                "download_url": f"https://hf-mirror.com/{transcriber._model_repo(payload.model)}/tree/main",
+            }
+        ]
+        open_path = manual_dir
+
     return {
-        "path": str(manual_dir),
-        "opened": _open_in_file_manager(manual_dir) if payload.open else False,
-        "files": transcriber.manual_import_files(payload.model),
-        "download_url": f"https://hf-mirror.com/{transcriber._model_repo(payload.model)}/tree/main",
+        "folders": folders,
+        "open_path": str(open_path),
+        "opened": _open_in_file_manager(open_path) if payload.open else False,
     }
 
 
