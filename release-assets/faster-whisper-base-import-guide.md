@@ -26,6 +26,46 @@
 3. 把 **4 个文件**（不是整个文件夹）复制到程序的手动导入目录（见下文【放到哪里】）；
 4. 回到界面，几秒内下拉框会从「未缓存」变成「**已缓存**」，即可正常提交任务。
 
+## 先别急着下大模型：中文视频建议用 belle-turbo-zh / paraformer-zh
+
+如果你的视频是**中文**（B 站课程、口播、直播回放），**不建议**下载 `medium`（约 1.5GB）/ `large-v3`（约 3.1GB）/ `turbo`（约 1.6GB）来"提高精度"——下拉框里这三档已标注「不推荐下载」。它们在中文上都不如下面两个，只有**非中文或多语言**视频才值得装（多语言要高精度选 `large-v3`，要多语言提速选 `turbo`；`turbo` 的中文反而比 large-v3 差）。
+
+| 推荐档 | 体积 | 适合 | 说明 |
+|---|---|---|---|
+| `paraformer-zh` | 约 0.5GB | **中文首选** | 只支持中文。本机实测比 `small` 快约 9.6 倍（80 分钟视频从约 41 分钟降到约 4 分钟），中文专名识别与标点明显更好 |
+| `belle-turbo-zh` | 约 0.8GB | 中文要 whisper 系最高精度 | whisper-turbo 的中文微调版，精度优于 `large-v3` 而体积只有它四分之一；时间戳分段偏粗（约 30 秒一段），逐句对齐场景仍建议 `small` 或 `paraformer-zh` |
+
+**为什么这两个不放在 Release 附件里**：随 Release 分发的 `faster-whisper-base.zip` 已经 127MB，0.8GB / 0.5GB 的模型不适合当附件；请到镜像站自取，方法和下面完全一样。
+
+### belle-turbo-zh 手动导入（5 个文件）
+
+它是社区转换的 CT2 int8 仓库，**不在 Systran 官方仓**，词表文件名是 `vocabulary.json`：
+
+| 文件 | 下载链接 |
+|---|---|
+| config.json | https://hf-mirror.com/wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8/resolve/main/config.json |
+| model.bin | https://hf-mirror.com/wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8/resolve/main/model.bin |
+| tokenizer.json | https://hf-mirror.com/wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8/resolve/main/tokenizer.json |
+| vocabulary.json | https://hf-mirror.com/wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8/resolve/main/vocabulary.json |
+| preprocessor_config.json | https://hf-mirror.com/wolfofbackstreet/faster-whisper-belle-whisper-large-v3-turbo-zh-ct2-int8/resolve/main/preprocessor_config.json |
+
+下拉框选中 `belle-turbo-zh` → 点「手动导入模型」→ 把 5 个文件放进打开的 `manual\belle-turbo-zh\`。
+
+> `preprocessor_config.json` **必须带**：程序靠它决定用 128 维特征，缺了会直接报 shape 不匹配。
+> `turbo` 这一档同理不在 Systran 仓（官方从未发布 turbo 的 CT2 版），要手动下就用 `https://hf-mirror.com/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/<文件名>`，词表也是 `vocabulary.json`。
+
+### paraformer-zh 要手动下怎么办
+
+`paraformer-zh` 是另一套引擎（sherpa-onnx），**「手动导入模型」按钮只管 faster-whisper 系**，选它时请按正常流程让程序自动下载（约 0.5GB，走 hf-mirror，通常几分钟）。下载失败先重试或换网络。
+
+高级用户确实要手工铺文件，程序读的是 `<程序目录>\workspace\_model_cache\sherpa\` 下这三个子目录（标点缺失会自动降级为无标点转写，不影响出稿）：
+
+| 子目录 | 需要的文件 | 来源仓库 |
+|---|---|---|
+| `sherpa\asr\` | `model.int8.onnx`、`tokens.txt` | https://hf-mirror.com/csukuangfj/sherpa-onnx-paraformer-zh-2023-09-14/tree/main |
+| `sherpa\punc\` | `model.onnx` | https://hf-mirror.com/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/tree/main |
+| `sherpa\vad\` | `silero_vad.onnx` | https://hf-mirror.com/csukuangfj/vad/tree/main |
+
 ## 方式二：自行从镜像站下载（附件/群文件过期时用）
 
 用浏览器（或 IDM、迅雷等下载工具）逐个下载这 4 个直链（hf-mirror 国内镜像，无需科学上网）：
