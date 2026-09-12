@@ -1,6 +1,8 @@
 import asyncio
+import io
 import json
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -120,7 +122,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.4.0"
+    assert health.json()["version"] == "1.4.1"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -495,6 +497,149 @@ def test_download_returns_markdown_file(
     assert ".md" in response.headers["content-disposition"]
     assert not (task_dir / "video-notes.zip").exists()
     main.tasks.pop(task_id, None)
+
+
+def test_download_bundles_note_images_with_the_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正文带截图时不能只发一个 .md：相对路径在解压前无处解析，用户看到的就是「导出丢图」。"""
+    task_id = "bundle-task"
+    task_dir = tmp_path / task_id
+    (task_dir / "frames").mkdir(parents=True)
+    (task_dir / "frames" / "frame_0000_30s.jpg").write_bytes(b"\xff\xd8jpeg")
+    (task_dir / "notes.md").write_text(
+        "# 带图笔记\n\n## 视频截图\n\n![截图 1](./frames/frame_0000_30s.jpg)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id].update(status="completed", result={"title": "带图笔记"})
+
+    response = TestClient(main.app).get(f"/api/download/{task_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert ".zip" in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "带图笔记.md",
+            "frames/frame_0000_30s.jpg",
+        }
+        assert archive.read("frames/frame_0000_30s.jpg") == b"\xff\xd8jpeg"
+        assert "./frames/frame_0000_30s.jpg" in archive.read("带图笔记.md").decode("utf-8")
+    main.tasks.pop(task_id, None)
+
+
+def test_download_bundle_rewrites_legacy_image_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1.4.1 之前的笔记写的是 ./images/，历史任务重新导出时同样要拿到图。"""
+    task_id = "legacy-task"
+    task_dir = tmp_path / task_id
+    (task_dir / "frames").mkdir(parents=True)
+    (task_dir / "frames" / "frame_0001_60s.jpg").write_bytes(b"\xff\xd8old")
+    (task_dir / "notes.md").write_text(
+        "![截图 1](./images/frame_0001_60s.jpg)", encoding="utf-8"
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id].update(status="completed", result={"title": "旧任务"})
+
+    response = TestClient(main.app).get(f"/api/download/{task_id}")
+
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        note = archive.read("旧任务.md").decode("utf-8")
+        assert archive.read("frames/frame_0001_60s.jpg") == b"\xff\xd8old"
+    assert "./frames/frame_0001_60s.jpg" in note
+    assert "./images/" not in note
+    main.tasks.pop(task_id, None)
+
+
+def test_archive_note_points_refs_at_the_task_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """归档与任务目录同在 workspace/ 下，引用指过去就能就地看图，不必复制几百张 JPEG。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+
+    archived = main.archive_note(
+        "某个视频", "![截图 1](./images/frame_0000_30s.jpg)", "abc123"
+    )
+
+    assert archived.read_text(encoding="utf-8") == (
+        "![截图 1](../abc123/frames/frame_0000_30s.jpg)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_writes_frame_refs_that_exist_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务目录里的 notes.md 与 frames/ 同级，引用对不上就是坏链——导出丢图的根因在这。"""
+    task_id = "shot-task"
+    old_task_id = "old-shot-task"
+    old_dir = tmp_path / old_task_id
+    old_dir.mkdir()
+    (tmp_path / task_id).mkdir()
+    (old_dir / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段带有反讽的原始内容"}]}',
+        encoding="utf-8",
+    )
+
+    async def fake_preview(*args, **kwargs):
+        return tmp_path / task_id / "preview.mp4"
+
+    async def fake_extract_frames(video_path, target_task_id, interval, should_abort=None):
+        frames_dir = tmp_path / target_task_id / "frames"
+        frames_dir.mkdir(exist_ok=True)
+        paths = []
+        for index, timestamp in enumerate((0, interval)):
+            path = frames_dir / f"frame_{index:04d}_{timestamp}s.jpg"
+            path.write_bytes(b"\xff\xd8tiny")
+            paths.append(path)
+        return paths
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        download_preview_video = fake_preview
+        extract_frames = staticmethod(fake_extract_frames)
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 带图笔记"
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        include_screenshots=True,
+        screenshot_interval=30,
+        llm_config=main.LLMConfig(model_type="glm", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    assert task["result"]["screenshot_count"] == 2
+    note = (tmp_path / task_id / "notes.md").read_text(encoding="utf-8")
+    assert "./frames/frame_0000_0s.jpg" in note
+    assert "./images/" not in note
+    archived = Path(task["result"]["archived_path"]).read_text(encoding="utf-8")
+    assert f"../{task_id}/frames/frame_0001_30s.jpg" in archived
 
 
 @pytest.mark.asyncio

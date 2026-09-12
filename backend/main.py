@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import io
 import ipaddress
 import json
 import os
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -21,7 +23,7 @@ import aiofiles
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
@@ -58,6 +60,7 @@ from .transcript import (
     transcript_quality,
 )
 from .video_processor import (
+    FRAMES_DIR_NAME,
     VideoProcessor,
     VideoSource,
     bilibili_page_url,
@@ -108,8 +111,13 @@ DOUYIN_HINT = (
 )
 NOTE_STEP_NAME = "生成笔记"
 API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
+# 1.4.1 之前笔记里写的是 ./images/，而磁盘上一直是 frames/；两种都要认，
+# 否则历史任务的笔记重新导出时仍然带不回截图。
+NOTE_IMAGE_REF_RE = re.compile(
+    rf"(!\[[^\]]*\]\()\./(?:{FRAMES_DIR_NAME}|images)/([^)]+)\)"
+)
 
-app = FastAPI(title="VideoToNo API", version="1.4.0")
+app = FastAPI(title="VideoToNo API", version="1.4.1")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -1321,7 +1329,7 @@ async def get_image(task_id: str, filename: str) -> FileResponse:
     task_dir = (WORKSPACE_DIR / task_id).resolve()
     if task_dir.parent != WORKSPACE_DIR:
         raise HTTPException(status_code=400, detail="非法任务 ID")
-    expected_parent = (task_dir / "frames").resolve()
+    expected_parent = (task_dir / FRAMES_DIR_NAME).resolve()
     image_path = (expected_parent / filename).resolve()
     if image_path.parent != expected_parent or not image_path.is_file():
         raise HTTPException(status_code=404, detail="图片不存在")
@@ -1329,7 +1337,7 @@ async def get_image(task_id: str, filename: str) -> FileResponse:
 
 
 @app.get("/api/download/{task_id}")
-async def download_summary_markdown(task_id: str) -> FileResponse:
+async def download_summary_markdown(task_id: str) -> Response:
     task = tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -1345,14 +1353,50 @@ async def download_summary_markdown(task_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Markdown 笔记不存在")
 
     title = (task.get("result") or {}).get("title", "video-notes")
-    safe_name = _safe_filename(title)
+    safe_name = _safe_filename(title) or "video-notes"
+    try:
+        note_text = output_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"读取笔记失败：{exc}")
+
+    bundle = await asyncio.to_thread(
+        build_note_bundle, note_text, task_dir, f"{safe_name}.md"
+    )
+    if bundle is not None:
+        encoded_name = quote(f"{safe_name}.zip")
+        return Response(
+            content=bundle,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+        )
+
     encoded_name = quote(f"{safe_name}.md")
     return FileResponse(
         output_path,
         media_type="text/markdown; charset=utf-8",
-        filename=f"{safe_name or 'video-notes'}.md",
+        filename=f"{safe_name}.md",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
     )
+
+
+def build_note_bundle(note_text: str, task_dir: Path, note_filename: str) -> bytes | None:
+    """把笔记和它引用的截图打成一个包；正文里没有可解析的截图时返回 None。"""
+    frames_dir = task_dir / FRAMES_DIR_NAME
+    names: list[str] = []
+    for match in NOTE_IMAGE_REF_RE.finditer(note_text):
+        name = Path(match.group(2)).name
+        if name not in names and (frames_dir / name).is_file():
+            names.append(name)
+    if not names:
+        return None
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(note_filename, rewrite_note_image_refs(note_text, "./"))
+        for name in names:
+            archive.writestr(
+                f"{FRAMES_DIR_NAME}/{name}", (frames_dir / name).read_bytes()
+            )
+    return buffer.getvalue()
 
 
 @app.post("/api/task/{task_id}/cancel")
@@ -1863,7 +1907,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         summary = add_note_header_metadata(summary, title, info)
         if screenshots:
             summary += "\n\n## 视频截图\n\n" + "\n\n".join(
-                f"![截图 {index}](./images/{path.name})"
+                f"![截图 {index}](./{FRAMES_DIR_NAME}/{path.name})"
                 for index, path in enumerate(screenshots, start=1)
             )
         summary = append_note_footer(
@@ -1876,7 +1920,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         task_dir = WORKSPACE_DIR / task_id
         (task_dir / "notes.md").write_text(summary, encoding="utf-8")
-        archived_path = archive_note(title, summary)
+        archived_path = archive_note(title, summary, task_id)
         if archived_path:
             task["logs"].append(f"笔记已归档：{archived_path}")
         elapsed = finish_task_timing(task)
@@ -2160,12 +2204,24 @@ def _safe_filename(value: str) -> str:
     return (cleaned.strip() or "video-notes")[:80]
 
 
-def archive_note(title: str, content: str) -> Path | None:
+def rewrite_note_image_refs(content: str, prefix: str) -> str:
+    return NOTE_IMAGE_REF_RE.sub(
+        lambda match: f"{match.group(1)}{prefix}{FRAMES_DIR_NAME}/{match.group(2)})",
+        content,
+    )
+
+
+def archive_note(title: str, content: str, task_id: str | None = None) -> Path | None:
     """把笔记归档到 workspace/notes/ 下（按标题命名，重名自动加序号），便于集中回顾。
+
+    截图不复制：归档在 notes/ 下，与任务目录同在 workspace/ 里，引用改写成
+    ../<task_id>/frames/ 就能就地看图，代价是删掉任务后归档里的图失效。
 
     返回归档路径；写入失败时返回 None（不影响任务本身）。
     """
     notes_root = WORKSPACE_DIR / "notes"
+    if task_id:
+        content = rewrite_note_image_refs(content, f"../{task_id}/")
     try:
         notes_root.mkdir(parents=True, exist_ok=True)
         safe = _safe_filename(title)

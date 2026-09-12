@@ -43,6 +43,19 @@ def test_script_tag_carries_a_cache_version() -> None:
     assert SCRIPT_TAG.search(PAGE), "script.js 必须带 ?v=YYYYMMDD-N（DEVELOPMENT.md 前端约定）"
 
 
+def test_note_images_are_resolved_on_every_output_path() -> None:
+    """截图只在预览里改路径、导出全是坏链，就是 1.4.1 修的那个问题。"""
+    assert "(?:frames|images)" in SCRIPT, "预览要同时认 frames 与历史笔记里的 images"
+
+    download_summary = SCRIPT.split("async function downloadSummary(", 1)[1].split("\n}\n", 1)[0]
+    assert "inlineServedImages(" in download_summary, "HTML 导出必须内联截图"
+
+    markdown_download = SCRIPT.split(
+        "async function downloadMarkdownFile(", 1
+    )[1].split("\n}\n", 1)[0]
+    assert "serverFilename(" in markdown_download, "带截图时后端发的是 zip，后缀不能写死"
+
+
 def test_every_bound_element_id_exists_in_the_page() -> None:
     missing = sorted(set(BOUND_ID.findall(SCRIPT)) - set(DECLARED_ID.findall(PAGE)))
     assert not missing, f"script.js 绑定了页面里不存在的元素：{missing}"

@@ -2489,10 +2489,18 @@ function renderTranscript(content, text) {
     content.replaceChildren(...rows);
 }
 
+// 1.4.1 之前笔记里写的是 ./images/，磁盘上一直是 frames/；两种都要认，
+// 否则历史任务重新打开时截图照样显示不出来。
+const NOTE_IMAGE_RE = /!\[([^\]]*)\]\(\.\/(?:frames|images)\/([^)]+)\)/g;
+const SERVED_IMAGE_RE = new RegExp(
+    `!\\[([^\\]]*)\\]\\((${API_BASE}/image/[^)]+)\\)`,
+    'g'
+);
+
 function replaceImagePaths(markdown) {
     if (!currentTaskId) return markdown;
     return markdown.replace(
-        /!\[([^\]]*)\]\(\.\/images\/([^)]+)\)/g,
+        NOTE_IMAGE_RE,
         `![$1](${API_BASE}/image/${encodeURIComponent(currentTaskId)}/$2)`
     );
 }
@@ -2571,8 +2579,19 @@ async function downloadSummary() {
         return;
     }
 
+    let htmlSource = currentHtml || currentMarkdown;
+    if (format === 'html' && htmlSource.includes(`${API_BASE}/image/`)) {
+        setDownloading(true);
+        showToast('正在把截图嵌入 HTML，请稍候', 'info');
+        try {
+            htmlSource = await inlineServedImages(htmlSource);
+        } finally {
+            setDownloading(false);
+        }
+    }
+
     const formats = {
-        html: { content: convertToHtml(currentHtml || currentMarkdown), extension: '.html', mime: 'text/html' },
+        html: { content: convertToHtml(htmlSource), extension: '.html', mime: 'text/html' },
         json: { content: convertToJson(currentMarkdown), extension: '.json', mime: 'application/json' },
         txt: { content: stripMarkdown(currentMarkdown), extension: '.txt', mime: 'text/plain' }
     };
@@ -2729,12 +2748,57 @@ async function downloadMarkdownFile() {
     try {
         const response = await fetch(`${API_BASE}/download/${encodeURIComponent(currentTaskId)}`);
         if (!response.ok) throw new Error(await extractErrorMessage(response, '下载失败'));
-        triggerBlobDownload(await response.blob(), '.md');
-        showToast('下载已开始', 'success');
+        const filename = serverFilename(response);
+        triggerBlobDownload(await response.blob(), '.md', filename);
+        showToast(
+            /\.zip$/i.test(filename) ? '笔记与截图已打包下载，解压后 .md 里才显示截图' : '下载已开始',
+            'success'
+        );
     } catch (error) {
         showToast(`下载失败：${error.message}`, 'error');
     } finally {
         setDownloading(false);
+    }
+}
+
+// 单文件 HTML 里的 /api/image 引用只在服务运行时解析得到，离开本机就是坏图，
+// 所以导出前把截图逐张取回成 data URI。取不到的（任务已删）保留原引用，不整单失败。
+async function inlineServedImages(markdown) {
+    const urls = [...new Set(Array.from(markdown.matchAll(SERVED_IMAGE_RE), (match) => match[2]))];
+    if (!urls.length) return markdown;
+    const inlined = await Promise.all(urls.map(imageDataUri));
+    const byUrl = new Map(urls.map((url, index) => [url, inlined[index]]));
+    return markdown.replace(
+        SERVED_IMAGE_RE,
+        (match, alt, url) => (byUrl.get(url) ? `![${alt}](${byUrl.get(url)})` : match)
+    );
+}
+
+async function imageDataUri(url) {
+    try {
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) return '';
+        const blob = await response.blob();
+        return await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(blob);
+        });
+    } catch {
+        return '';
+    }
+}
+
+function serverFilename(response) {
+    const header = response.headers.get('content-disposition') || '';
+    const raw = header.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+        ?? header.match(/filename="?([^";]+)"?/i)?.[1];
+    if (!raw) return '';
+    try {
+        return decodeURIComponent(raw);
+    } catch {
+        return raw;
     }
 }
 
@@ -2746,11 +2810,11 @@ function setDownloading(active) {
     button.querySelector('.btn-text').textContent = active ? '准备下载' : '下载';
 }
 
-function triggerBlobDownload(blob, extension) {
+function triggerBlobDownload(blob, extension, filename) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `video_summary_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}${extension}`;
+    link.download = filename || `video_summary_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}${extension}`;
     document.body.appendChild(link);
     link.click();
     link.remove();
