@@ -1242,6 +1242,8 @@ async def health_check() -> dict[str, Any]:
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
             "openai": importlib.util.find_spec("openai") is not None,
+            # MCP 的 SSE 端点是否真的挂上了（缺 mcp 依赖时前端要说"不通"而不是给个死地址）
+            "mcp_sse": MCP_SSE_ENABLED,
         },
     }
 
@@ -2368,11 +2370,13 @@ restore_tasks_from_workspace()
 
 
 # MCP 端点：SSE 传输（/mcp/sse，供 Cherry Studio 等 MCP 客户端接入）
+MCP_SSE_ENABLED = False
 try:
     from .mcp_server import use_in_process_backend, mcp as mcp_app
     # 同进程调用端点函数：HTTP 自调会被 SSE 长连接阻塞（自调死锁）
     use_in_process_backend()
     app.mount("/mcp", mcp_app.sse_app())
+    MCP_SSE_ENABLED = True
 except ImportError:
     # mcp 依赖未安装时跳过，不影响主服务
     pass

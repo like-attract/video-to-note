@@ -147,7 +147,7 @@ button, select { cursor: pointer; }
     border-bottom: 1px solid var(--border);
 }
 
-.config-section h2, .credentials-section summary {
+.config-section h2, .collapsible-section summary {
     margin-bottom: 14px;
     color: var(--text-soft);
     font-size: 12px;
@@ -156,9 +156,16 @@ button, select { cursor: pointer; }
     letter-spacing: 0;
 }
 
-.credentials-section summary { list-style-position: outside; }
-.credentials-section[open] summary { margin-bottom: 8px; }
+.collapsible-section summary { list-style-position: outside; }
+.collapsible-section[open] summary { margin-bottom: 8px; }
 .section-note { margin-bottom: 14px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+
+.mcp-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; }
+.mcp-row .compact-button { flex-shrink: 0; }
+.mcp-row code { min-width: 0; overflow-wrap: anywhere; color: var(--green); font-size: 12px; }
+.mcp-row small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.mcp-note { margin-top: 11px; color: var(--text-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.mcp-note code { padding: 1px 4px; border-radius: 3px; background: var(--code-bg); color: var(--code-text); font-size: 11px; }
 
 .llm-test-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .llm-test-row .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }

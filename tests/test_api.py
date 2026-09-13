@@ -126,9 +126,14 @@ def test_health_and_frontend_are_served() -> None:
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
+    # 前端 MCP 卡片靠这个字段决定"给地址"还是"说本机没装依赖"
+    assert health.json()["dependencies"]["mcp_sse"] is True
     page = client.get("/")
     assert page.status_code == 200
     assert "VideoToNo" in page.text
+    assert 'id="mcpSseUrl"' in page.text
+    assert 'id="copyMcpConfigBtn"' in page.text
+    assert 'id="mcpUnavailable" class="mcp-note" hidden' in page.text
     assert "cdn.jsdelivr.net" not in page.text
     assert "vendor/marked-18.0.9.umd.js" in page.text
     assert "vendor/dompurify-3.4.13.min.js" in page.text

@@ -141,6 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
     safeStep(initPreferences, '读取偏好设置');
     safeStep(bindEvents, '绑定页面事件');
     safeStep(toggleSourceType, '初始化来源切换');
+    safeStep(applyMcpAccess, '初始化 MCP 接入信息');
     loadAppVersion();
     loadRecentTasks(true);
     window.__videoToNoReady = true;
@@ -160,9 +161,46 @@ async function loadAppVersion() {
         const data = await readResponse(response, '读取版本失败');
         if (data.version) byId('appVersion').textContent = `v${data.version}`;
         applyUploadLimit(data.max_upload_mb);
+        applyMcpAccess(data.dependencies?.mcp_sse);
     } catch {
         // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
         applyUploadLimit(null);
+    }
+}
+
+function mcpSseUrl() {
+    return `${location.origin}/mcp/sse`;
+}
+
+function mcpJsonConfig() {
+    return JSON.stringify(
+        { mcpServers: { "video-to-note": { type: "sse", url: mcpSseUrl() } } },
+        null,
+        2
+    );
+}
+
+// 只有后端明确说 mcp 没挂上才提示"连不通"；老后端没这个字段时按可用显示。
+function applyMcpAccess(mcpSse) {
+    byId('mcpSseUrl').textContent = mcpSseUrl();
+    byId('mcpUnavailable').hidden = mcpSse !== false;
+}
+
+async function copyTextToClipboard(text, successLabel) {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            copyTextFallback(text);
+        }
+        showToast(successLabel, 'success');
+    } catch {
+        try {
+            copyTextFallback(text);
+            showToast(successLabel, 'success');
+        } catch (error) {
+            showToast(`复制失败：${error.message}`, 'error');
+        }
     }
 }
 
@@ -215,6 +253,9 @@ function bindEvents() {
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
     bindListener('customProfileDeleteBtn', 'click', deleteCustomProfile);
     bindListener('manualModelBtn', 'click', manualImportWhisperModel);
+    bindListener('copyMcpUrlBtn', 'click', () => copyTextToClipboard(mcpSseUrl(), 'MCP 地址已复制'));
+    bindListener('copyMcpConfigBtn', 'click', () =>
+        copyTextToClipboard(mcpJsonConfig(), 'MCP 配置已复制，到客户端粘贴导入即可'));
     bindListener('sourceType', 'change', toggleSourceType);
     bindPreferenceAutoSave();
     const videoUrl = byId('videoUrl');
@@ -2612,21 +2653,7 @@ function toggleImageLayout() {
 
 async function copyFullNote() {
     if (!currentMarkdown) return validationError('没有可复制的笔记');
-    try {
-        if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(currentMarkdown);
-        } else {
-            copyTextFallback(currentMarkdown);
-        }
-        showToast('完整笔记已复制', 'success');
-    } catch {
-        try {
-            copyTextFallback(currentMarkdown);
-            showToast('完整笔记已复制', 'success');
-        } catch (error) {
-            showToast(`复制失败：${error.message}`, 'error');
-        }
-    }
+    await copyTextToClipboard(currentMarkdown, '完整笔记已复制');
 }
 
 function copyTextFallback(value) {

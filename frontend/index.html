@@ -132,7 +132,7 @@
             </label>
         </section>
 
-        <details id="credentialsSection" class="config-section credentials-section">
+        <details id="credentialsSection" class="config-section collapsible-section">
             <summary>B 站访问凭据（可选）</summary>
             <p class="section-note">仅在公开访问受限时填写。凭据只保留到页面关闭。</p>
             <div class="bili-login-row">
@@ -152,6 +152,23 @@
                 <span>buvid3</span>
                 <input type="password" id="buvid3" autocomplete="off">
             </label>
+        </details>
+
+        <details id="mcpSection" class="config-section mcp-section collapsible-section">
+            <summary>让 agent 接入（MCP）</summary>
+            <p class="section-note">本程序内置 MCP 服务器：在 Cherry Studio、Codex 这类客户端里填下面的地址，就能让你的 agent 直接把视频转成字幕稿或笔记。任务仍在这台机器上跑，请先让本程序开着。</p>
+            <div class="mcp-row">
+                <code id="mcpSseUrl">http://127.0.0.1:8000/mcp/sse</code>
+                <button id="copyMcpUrlBtn" class="button ghost compact-button" type="button">复制地址</button>
+            </div>
+            <div class="mcp-row">
+                <button id="copyMcpConfigBtn" class="button ghost compact-button" type="button">复制 JSON 配置</button>
+                <small>Cherry Studio：设置 → MCP 服务器 → 添加 → 从 JSON 导入。</small>
+            </div>
+            <p class="mcp-note">可以跟 agent 说「先把这个视频转成带时间轴的文字稿」——它走 <code>transcribe_video</code> + <code>get_transcript</code>，<strong>本机不需要配 API Key</strong>，整理成什么样由客户端的模型决定；要一份现成成品笔记才用 <code>summarize_video</code>（需要 Key）。</p>
+            <p class="mcp-note">只支持 stdio 的客户端可以跑 <code>python -m backend.mcp_server</code>，它会自动找 8000–8019 上已经开着的本服务。</p>
+            <p class="mcp-note">服务只监听 <code>127.0.0.1</code>，局域网连不进来；Key 和 B 站凭据只留在本机（Windows 用系统 DPAPI 加密）。</p>
+            <p id="mcpUnavailable" class="mcp-note" hidden>这台机器没装 <code>mcp</code> 依赖，上面的地址暂时连不通（网页端和任务本身不受影响）。装齐 <code>backend/requirements.txt</code> 里的依赖后重启即可。</p>
         </details>
 
         <div class="sidebar-actions">
@@ -369,6 +386,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260912-2"></script>
+<script src="script.js?v=20260912-3"></script>
 </body>
 </html>
