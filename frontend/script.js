@@ -182,8 +182,10 @@ function mcpJsonConfig() {
 
 // 只有后端明确说 mcp 没挂上才提示"连不通"；老后端没这个字段时按可用显示。
 function applyMcpAccess(mcpSse) {
-    byId('mcpSseUrl').textContent = mcpSseUrl();
-    byId('mcpUnavailable').hidden = mcpSse !== false;
+    const url = byId('mcpSseUrl');
+    if (url) url.textContent = mcpSseUrl();
+    const unavailable = byId('mcpUnavailable');
+    if (unavailable) unavailable.hidden = mcpSse !== false;
 }
 
 async function copyTextToClipboard(text, successLabel) {
