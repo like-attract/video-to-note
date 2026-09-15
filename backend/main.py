@@ -111,6 +111,13 @@ DOUYIN_HINT = (
 )
 NOTE_STEP_NAME = "生成笔记"
 API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
+# 网关报错常把整个请求头或 JSON 回显出来；只认 sk- 前缀会漏掉 Bearer 与非 sk- 格式的凭据。
+# 字段名用 \b 框住，否则 "tokenizer.json" 会被当成 "token" + 值咬掉。
+SECRET_ECHO_PATTERN = re.compile(
+    r"\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|sessdata|bili_jct)"
+    r"\b([\"'’：:=\s]{1,4})([A-Za-z0-9_\-\.]{8,})",
+    re.IGNORECASE,
+)
 # 1.4.1 之前笔记里写的是 ./images/，而磁盘上一直是 frames/；两种都要认，
 # 否则历史任务的笔记重新导出时仍然带不回截图。
 NOTE_IMAGE_REF_RE = re.compile(
@@ -1532,6 +1539,9 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     fallback_notes: list[str] = []
     # except 分支靠它决定能不能套用平台文案，而 detect_source 自己就可能抛错（非 http 链接）
     source_kind = VideoSource.LOCAL
+    # 通道报错里可能整段回显本次用的明文 Key，落盘前要换成掩码；
+    # 放在 try 之外初始化，因为早期失败根本没走到 resolve_llm_credentials
+    used_api_key = ""
 
     def note_api_fallback() -> None:
         for note in fallback_notes:
@@ -1900,6 +1910,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             base_url=base_url,
             api_key=config.api_key.get_secret_value(),
         )
+        used_api_key = api_key
         summarizer = LLMSummarizer(
             model_type=config.model_type,
             api_key=api_key,
@@ -1938,8 +1949,10 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         )
         raise_if_cancel_requested(task)
         for warning in getattr(summarizer, "warnings", []):
-            if warning not in task["logs"]:
-                task["logs"].append(warning)
+            # 告警会把网关异常原文嵌进来，落盘前必须过一遍脱敏
+            cleaned = redact_secrets(warning, api_key)
+            if cleaned not in task["logs"]:
+                task["logs"].append(cleaned)
         summary = add_note_header_metadata(summary, title, info)
         if screenshots:
             summary += "\n\n## 视频截图\n\n" + "\n\n".join(
@@ -1989,14 +2002,19 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     except Exception as exc:
         finish_task_timing(task)
         raw = str(exc)
-        message = friendly_task_error(
-            raw, source=source_kind, step_name=task.get("step_name", "")
+        # 失败文案有三条出口（error 字段、任务日志、系统通知），未知异常时
+        # friendly_* 会原样返回底层文本，网关回显的明文 Key 就会跟着落进 task.json
+        message = redact_secrets(
+            friendly_task_error(
+                raw, source=source_kind, step_name=task.get("step_name", "")
+            ),
+            used_api_key,
         )
         task.update(status="failed", error=message)
         task["logs"].append(f"处理失败：{message}")
         if message != raw:
             # 文案一旦被替换掉，真实的返回码就没人能看到了——这次误诊就是这么来的
-            task["logs"].append(f"底层错误：{scrub_technical_error(raw)}")
+            task["logs"].append(f"底层错误：{scrub_technical_error(raw, used_api_key)}")
         notify_task("任务失败", f"{title}\n{message}")
         persist_task_runtime(task_id)
 
@@ -2102,10 +2120,24 @@ def friendly_llm_error(lowered: str, message: str) -> str:
     return message
 
 
-def scrub_technical_error(raw: str) -> str:
+def redact_secrets(text: str, secret: str = "") -> str:
+    """把文本里的凭据换成掩码。
+
+    比正则更可靠的一层是 `secret`：调用方手里就有本次用的明文 Key，
+    整串替换不依赖网关把回显写成什么格式。
+    """
+    cleaned = API_KEY_PATTERN.sub("sk-****", text)
+    cleaned = SECRET_ECHO_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}****", cleaned
+    )
+    if secret and len(secret) >= 8:
+        cleaned = cleaned.replace(secret, secret_box.mask_secret(secret))
+    return cleaned
+
+
+def scrub_technical_error(raw: str, secret: str = "") -> str:
     """异常文本进日志前的脱敏与截断：通道报错可能整段回显 JSON。"""
-    text = API_KEY_PATTERN.sub("sk-****", " ".join(raw.split()))
-    return text[:400]
+    return redact_secrets(" ".join(raw.split()), secret)[:400]
 
 
 def format_duration(seconds: float) -> str:

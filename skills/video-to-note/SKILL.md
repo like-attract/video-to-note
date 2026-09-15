@@ -47,7 +47,16 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
 
 ## 需要用户提供的信息
 
-- **API Key**：**只有笔记路线需要**。本机为某个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`）时可不传；只存过一个地址时脚本会自动沿用该通道，存了多个则不会猜。任务失败提示"未提供 API Key"时会点名具体接口地址，此时向用户询问供应商（deepseek/openai/qwen/glm/moonshot/custom）和 Key，用 `--provider` / `--api-key`（custom 另加 `--base-url` / `--custom-model`）重新提交。已保存的 Key 只在目标地址一致时复用，不会被发给别的网关。用户不想另配 Key 时，改走转录路线。
+- **API Key**：**只有笔记路线需要**，而且大概率不用你拿。本机为某个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`）时直接省略即可；只存过一个地址时脚本会自动沿用该通道，存了多个则不会猜。任务失败点名"该接口地址没有可复用的 Key"时，**先问用户能不能改走 `--transcript-only`**（全程不调用大模型、不需要 Key，整理成稿由你这边完成）。用户坚持要成品笔记再问供应商（deepseek/openai/qwen/glm/moonshot/custom）与 Key，并按下面这种形式传，custom 另加 `--base-url` / `--custom-model`：
+
+  ```bash
+  # 推荐：Key 从标准输入进来，不落 shell 历史也不进进程命令行
+  printf '%s\n' "<用户给的 Key>" | python scripts/video_note.py "<链接>" --provider deepseek --api-key -
+  # 或者用环境变量（同一条命令里赋值同样会留在历史里，长期会话请设为环境变量）
+  VIDEOTONOTES_LLM_API_KEY=... python scripts/video_note.py "<链接>" --provider deepseek
+  ```
+
+  **不要把 Key 写成 `--api-key sk-xxx`**：命令行参数会留在 shell 历史、进程列表和 agent 的工具调用日志里，同用户的任何进程都能读到。脚本已把"看到的凭据一律换成掩码"作为兜底（自己发的告警、服务端回显的 4xx 详情都会洗），但兜底不等于源头干净。已保存的 Key 只在目标地址一致时复用，不会被发给别的网关。
 - 本地文件上传上限 2GB；大视频（默认 ≥300MB）未要求截图时服务端会自动只保留音频。
 
 ## 手动走 API（需要自定义流程时）
@@ -72,6 +81,8 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
      }'
    # 都返回 {"task_id": "..."}；本地文件改为先 POST /api/upload 拿 upload_task_id
    ```
+
+   > 上面的 `"api_key": "sk-..."` 只是字段示意。真发请求时这条 curl 命令同样会留在 shell 历史里：**能省略就省略**（后端按 Base URL 复用本机已保存的 Key），必须带时用 `-d "{...\"api_key\": \"$VIDEOTONOTES_LLM_API_KEY\"...}"` 这类形式，别把 Key 写成字面量。
 
 3. 轮询：`GET /api/task/{task_id}`，直到 `status` 变为 `completed` / `failed` / `cancelled`（`logs` 数组是实时运行日志）。转录任务的 `result` 里没有 `markdown`，`result.output` 是 `"transcript"`
 4. 取结果：

@@ -381,6 +381,17 @@ def test_scrubbed_error_hides_keys_but_keeps_the_status() -> None:
         main.scrub_technical_error("Error code: 403 with key sk-abcdef12345\n second line")
         == "Error code: 403 with key sk-**** second line"
     )
+    echoed = main.scrub_technical_error(
+        'gateway said {"api_key": "tok_live_abcdefgh123", "authorization": Bearer '
+        'Zm9vYmFyMTIzNDU2, "tokenizer": "tokenizer.json"}'
+    )
+    assert "tok_live_abcdefgh123" not in echoed
+    assert "Zm9vYmFyMTIzNDU2" not in echoed
+    # 字段名脱敏不能把正常词咬掉（tokenizer.json 是模型必需文件）
+    assert "tokenizer.json" in echoed
+    known = main.scrub_technical_error("upstream echoed the credential we sent", "abcdefg12345")
+    assert "abcdefg12345" not in known
+    assert known.startswith("upstream echoed")
 
 
 def test_summarize_rejects_local_path_in_url_field() -> None:
@@ -609,6 +620,129 @@ def test_archive_note_points_refs_at_the_task_dir(
         "![截图 1](../abc123/frames/frame_0000_30s.jpg)"
     )
 
+
+@pytest.mark.asyncio
+async def test_failure_never_persists_the_plaintext_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """网关常把整段请求回显进 4xx；这条路径上 Key 不能跟着 error 与日志落盘。"""
+    secret = "Zx9QWertyuio1234ABCD"  # 不带 sk- 前缀：只有"整串替换"这一层能救
+    task_id = "leak-task"
+    old_task_id = "old-leak"
+    (tmp_path / old_task_id).mkdir()
+    (tmp_path / old_task_id / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段带有反讽的原始内容"}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / task_id).mkdir()
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("复用转录的路径不该碰平台与转写")
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        get_video_info = forbidden
+        fetch_subtitles = forbidden
+        download_audio = forbidden
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            self.warnings = [f"该通道不支持关闭思考，已降级。回显凭据 {secret}"]
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            raise RuntimeError(
+                'Error code: 401 upstream echoed {"api_key": "'
+                + secret
+                + '", "authorization": Bearer Q29uZ3JldGVzczEyMzQ1Ng}"'
+            )
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1leak",
+        llm_config=main.LLMConfig(model_type="glm", api_key=secret),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "failed"
+    live = json.dumps({"error": task["error"], "logs": task["logs"]}, ensure_ascii=False)
+    persisted = (tmp_path / task_id / "task.json").read_text(encoding="utf-8")
+    assert secret not in live and secret not in persisted
+    assert "Q29uZ3JldGVzczEyMzQ1Ng" not in live  # 字段名回显那一层也要洗掉
+    # 确实是脱敏而不是整行被丢掉：底层错误那行仍然可读，只是凭据成了掩码
+    assert "底层错误：" in live and "****" in live
+
+
+@pytest.mark.asyncio
+async def test_summarizer_warnings_are_scrubbed_before_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """成功任务也会带告警，而告警里嵌的是通道原文——这条路径以前完全没脱敏。"""
+    secret = "Vh7NqzL0mBxc8dke"
+    task_id = "warn-task"
+    old_task_id = "old-warn"
+    (tmp_path / old_task_id).mkdir()
+    (tmp_path / old_task_id / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段带有反讽的原始内容"}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / task_id).mkdir()
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("复用转录的路径不该碰平台与转写")
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        get_video_info = forbidden
+        fetch_subtitles = forbidden
+        download_audio = forbidden
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            # 没有字段名前缀，只有"整串替换"这一层能洗掉
+            self.warnings = [f"该通道不支持关闭深度思考，已改用默认值（{secret}）"]
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 正常笔记"
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1warn",
+        llm_config=main.LLMConfig(model_type="glm", api_key=secret),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    live = json.dumps(task["logs"], ensure_ascii=False)
+    persisted = (tmp_path / task_id / "task.json").read_text(encoding="utf-8")
+    assert secret not in live and secret not in persisted
+    assert any("该通道不支持关闭深度思考" in line for line in task["logs"])
+    assert secret[:4] + "****" in live
 
 @pytest.mark.asyncio
 async def test_pipeline_writes_frame_refs_that_exist_on_disk(
