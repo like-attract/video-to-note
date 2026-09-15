@@ -132,6 +132,8 @@ def test_health_and_frontend_are_served() -> None:
     assert page.status_code == 200
     assert "VideoToNo" in page.text
     assert 'id="mcpSseUrl"' in page.text
+    assert 'id="mcpStatusChip" class="mcp-chip" type="button" hidden' in page.text
+    assert 'id="mcpHint" class="hint-bar info" hidden' in page.text
     assert 'id="copyMcpConfigBtn"' in page.text
     assert 'id="mcpUnavailable" class="mcp-note" hidden' in page.text
     assert "cdn.jsdelivr.net" not in page.text

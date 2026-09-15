@@ -186,6 +186,28 @@ function applyMcpAccess(mcpSse) {
     if (url) url.textContent = mcpSseUrl();
     const unavailable = byId('mcpUnavailable');
     if (unavailable) unavailable.hidden = mcpSse !== false;
+    // 芯片和提示条都要等后端确认 MCP 真挂上了才出现，否则等于承诺一个连不通的地址
+    const chip = byId('mcpStatusChip');
+    if (chip) chip.hidden = mcpSse !== true;
+    const hint = byId('mcpHint');
+    if (hint) hint.hidden = !(mcpSse === true && !prefs.ui.mcp_hint_seen);
+}
+
+function revealMcpAccess() {
+    const card = byId('mcpSection');
+    if (!card) return;
+    card.open = true;
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const copyButton = byId('copyMcpUrlBtn');
+    if (copyButton) copyButton.focus();
+    dismissMcpHint();
+}
+
+function dismissMcpHint() {
+    prefs.ui.mcp_hint_seen = true;
+    persistPrefs();
+    const hint = byId('mcpHint');
+    if (hint) hint.hidden = true;
 }
 
 async function copyTextToClipboard(text, successLabel) {
@@ -258,6 +280,9 @@ function bindEvents() {
     bindListener('copyMcpUrlBtn', 'click', () => copyTextToClipboard(mcpSseUrl(), 'MCP 地址已复制'));
     bindListener('copyMcpConfigBtn', 'click', () =>
         copyTextToClipboard(mcpJsonConfig(), 'MCP 配置已复制，到客户端粘贴导入即可'));
+    bindListener('mcpStatusChip', 'click', revealMcpAccess);
+    bindListener('mcpHintGoBtn', 'click', revealMcpAccess);
+    bindListener('mcpHintDismissBtn', 'click', dismissMcpHint);
     bindListener('sourceType', 'change', toggleSourceType);
     bindPreferenceAutoSave();
     const videoUrl = byId('videoUrl');
@@ -553,7 +578,7 @@ function defaultPrefs() {
             processing_mode: 'restart',
             output_mode: 'note'
         },
-        ui: { theme: 'system' }
+        ui: { theme: 'system', mcp_hint_seen: false }
     };
 }
 
@@ -726,6 +751,7 @@ function mergePrefs(stored) {
         }
     }
     if (stored.ui && typeof stored.ui.theme === 'string') next.ui.theme = stored.ui.theme;
+    if (stored.ui && stored.ui.mcp_hint_seen === true) next.ui.mcp_hint_seen = true;
     return next;
 }
 

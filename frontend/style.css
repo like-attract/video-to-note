@@ -142,6 +142,24 @@ button, select { cursor: pointer; }
 .app-version { color: var(--text-muted); font-size: 11px; font-weight: 600; }
 .brand p { margin-top: 3px; color: var(--text-muted); font-size: 12px; }
 
+/* 品牌区下方常驻的「服务在跑 + 可以接 agent」芯片：只做可发现性，点开才展开细节 */
+.mcp-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 12px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-raised);
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: left;
+}
+.mcp-chip:hover { border-color: var(--text-muted); color: var(--text); }
+.mcp-chip-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--success, #3fb950); }
+
 .config-section {
     padding: 20px 4px;
     border-bottom: 1px solid var(--border);
@@ -178,7 +196,7 @@ button, select { cursor: pointer; }
 .bili-login-row .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
 .bili-login-status { min-width: 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
 
-.bili-hint {
+.hint-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -189,12 +207,14 @@ button, select { cursor: pointer; }
     border-radius: var(--radius);
     background: var(--amber-soft);
 }
-.bili-hint-text { display: grid; gap: 3px; }
-.bili-hint-text strong { font-size: 13px; }
-.bili-hint-text span { color: var(--text-muted); font-size: 12px; }
-.bili-hint-actions { display: flex; gap: 8px; flex: none; }
-.bili-hint-actions .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
-.bili-hint-dismiss {
+/* 引导类提示（如 MCP 接入）不该用"要处理一下"的告警色 */
+.hint-bar.info { border-color: var(--border); background: var(--surface-soft); }
+.hint-text { display: grid; gap: 3px; }
+.hint-text strong { font-size: 13px; }
+.hint-text span { color: var(--text-muted); font-size: 12px; }
+.hint-actions { display: flex; gap: 8px; flex: none; }
+.hint-actions .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
+.hint-dismiss {
     min-width: 28px;
     min-height: 28px;
     display: grid;
@@ -205,10 +225,10 @@ button, select { cursor: pointer; }
     color: var(--text-muted);
     font-size: 12px;
 }
-.bili-hint-dismiss:hover { background: var(--surface-soft); color: var(--text); }
+.hint-dismiss:hover { background: var(--surface-raised); color: var(--text); }
 @media (max-width: 680px) {
-    .bili-hint { flex-direction: column; align-items: stretch; }
-    .bili-hint-actions { justify-content: flex-end; }
+    .hint-bar { flex-direction: column; align-items: stretch; }
+    .hint-actions { justify-content: flex-end; }
 }
 
 .bili-pages-panel {

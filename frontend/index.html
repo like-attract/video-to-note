@@ -28,6 +28,11 @@
             </div>
         </div>
 
+        <button id="mcpStatusChip" class="mcp-chip" type="button" hidden title="查看接入地址">
+            <span class="mcp-chip-dot" aria-hidden="true"></span>
+            <span>本机服务在跑 · 可让 AI 客户端直接用</span>
+        </button>
+
         <section class="config-section" aria-labelledby="modelTitle">
             <h2 id="modelTitle">总结模型</h2>
             <div class="field">
@@ -271,17 +276,27 @@
                 <div id="biliPagesList" class="bili-pages-list" role="group" aria-label="勾选要转写的分 P"></div>
             </div>
             <p id="outputModeHint" class="output-mode-hint" hidden></p>
-            <div id="biliHint" class="bili-hint" hidden>
-                <div class="bili-hint-text">
+            <div id="biliHint" class="hint-bar" hidden>
+                <div class="hint-text">
                     <strong id="biliHintTitle">检测到 B 站链接</strong>
                     <span id="biliHintDesc">填写访问凭据可优先使用 AI 字幕，无需等待本地转写。</span>
                 </div>
-                <div class="bili-hint-actions" id="biliHintActions">
+                <div class="hint-actions" id="biliHintActions">
                     <button id="biliHintScanBtn" class="button secondary" type="button">扫码登录导入</button>
                     <button id="biliHintManualBtn" class="button ghost" type="button">去填写</button>
                     <button id="douyinLoginBtn" class="button secondary" type="button" hidden>打开抖音浏览器</button>
                     <span id="douyinLoginStatus" class="bili-login-status"></span>
-                    <button id="biliHintDismissBtn" class="bili-hint-dismiss" type="button" title="忽略，本次会话不再提醒">✕</button>
+                    <button id="biliHintDismissBtn" class="hint-dismiss" type="button" title="忽略，本次会话不再提醒">✕</button>
+                </div>
+            </div>
+            <div id="mcpHint" class="hint-bar info" hidden>
+                <div class="hint-text">
+                    <strong>想让 AI 客户端直接帮你转视频？</strong>
+                    <span>左侧「让 agent 接入（MCP）」里就是本机地址，点一下即可复制，Cherry Studio / Codex 粘贴就能用。</span>
+                </div>
+                <div class="hint-actions">
+                    <button id="mcpHintGoBtn" class="button ghost" type="button">看地址</button>
+                    <button id="mcpHintDismissBtn" class="hint-dismiss" type="button" title="不再提醒">✕</button>
                 </div>
             </div>
             <div class="source-meta">
@@ -386,6 +401,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260912-4"></script>
+<script src="script.js?v=20260916-1"></script>
 </body>
 </html>
