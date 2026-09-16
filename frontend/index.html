@@ -23,10 +23,15 @@
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
-                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.0</span></h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.1</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
+
+        <button id="mcpStatusChip" class="mcp-chip" type="button" hidden title="查看接入地址">
+            <span class="mcp-chip-dot" aria-hidden="true"></span>
+            <span>本机服务在跑 · 可让 AI 客户端直接用</span>
+        </button>
 
         <section class="config-section" aria-labelledby="modelTitle">
             <h2 id="modelTitle">总结模型</h2>
@@ -107,11 +112,11 @@
                     <option value="tiny">tiny（最快）</option>
                     <option value="base" selected>base（默认，下载较小）</option>
                     <option value="small">small（中文更准确）</option>
-                    <option value="medium">medium（准确，较慢）</option>
-                    <option value="large-v3">large-v3（高精度，较慢）</option>
-                    <option value="turbo">turbo（高精度，需更多内存）</option>
-                    <option value="belle-turbo-zh">belle-turbo-zh（中文增强，约0.8GB）</option>
-                    <option value="paraformer-zh">paraformer-zh（仅中文·更快，约0.5GB）</option>
+                    <option value="medium">medium（不推荐 · 中文不如下面两档）</option>
+                    <option value="large-v3">large-v3（不推荐 · 只有多语言视频才需要）</option>
+                    <option value="turbo">turbo（不推荐 · 中文有退化，只适合多语言提速）</option>
+                    <option value="belle-turbo-zh">belle-turbo-zh（中文推荐 · 精度最好）</option>
+                    <option value="paraformer-zh">paraformer-zh（中文推荐 · 最快最准，只支持中文）</option>
                 </select>
             </label>
             <div class="manual-model-row">
@@ -132,7 +137,7 @@
             </label>
         </section>
 
-        <details id="credentialsSection" class="config-section credentials-section">
+        <details id="credentialsSection" class="config-section collapsible-section">
             <summary>B 站访问凭据（可选）</summary>
             <p class="section-note">仅在公开访问受限时填写。凭据只保留到页面关闭。</p>
             <div class="bili-login-row">
@@ -152,6 +157,23 @@
                 <span>buvid3</span>
                 <input type="password" id="buvid3" autocomplete="off">
             </label>
+        </details>
+
+        <details id="mcpSection" class="config-section mcp-section collapsible-section">
+            <summary>让 agent 接入（MCP）</summary>
+            <p class="section-note">本程序内置 MCP 服务器：在 Cherry Studio、Codex 这类客户端里填下面的地址，就能让你的 agent 直接把视频转成字幕稿或笔记。任务仍在这台机器上跑，请先让本程序开着。</p>
+            <div class="mcp-row">
+                <code id="mcpSseUrl">http://127.0.0.1:8000/mcp/sse</code>
+                <button id="copyMcpUrlBtn" class="button ghost compact-button" type="button">复制地址</button>
+            </div>
+            <div class="mcp-row">
+                <button id="copyMcpConfigBtn" class="button ghost compact-button" type="button">复制 JSON 配置</button>
+                <small>Cherry Studio：设置 → MCP 服务器 → 添加 → 从 JSON 导入。</small>
+            </div>
+            <p class="mcp-note">可以跟 agent 说「先把这个视频转成带时间轴的文字稿」——它走 <code>transcribe_video</code> + <code>get_transcript</code>，<strong>本机不需要配 API Key</strong>，整理成什么样由客户端的模型决定；要一份现成成品笔记才用 <code>summarize_video</code>（需要 Key）。</p>
+            <p class="mcp-note">只支持 stdio 的客户端可以跑 <code>python -m backend.mcp_server</code>，它会自动找 8000–8019 上已经开着的本服务。</p>
+            <p class="mcp-note">服务只监听 <code>127.0.0.1</code>，局域网连不进来；Key 和 B 站凭据只留在本机（Windows 用系统 DPAPI 加密）。</p>
+            <p id="mcpUnavailable" class="mcp-note" hidden>这台机器没装 <code>mcp</code> 依赖，上面的地址暂时连不通（网页端和任务本身不受影响）。装齐 <code>backend/requirements.txt</code> 里的依赖后重启即可。</p>
         </details>
 
         <div class="sidebar-actions">
@@ -254,17 +276,27 @@
                 <div id="biliPagesList" class="bili-pages-list" role="group" aria-label="勾选要转写的分 P"></div>
             </div>
             <p id="outputModeHint" class="output-mode-hint" hidden></p>
-            <div id="biliHint" class="bili-hint" hidden>
-                <div class="bili-hint-text">
+            <div id="biliHint" class="hint-bar" hidden>
+                <div class="hint-text">
                     <strong id="biliHintTitle">检测到 B 站链接</strong>
                     <span id="biliHintDesc">填写访问凭据可优先使用 AI 字幕，无需等待本地转写。</span>
                 </div>
-                <div class="bili-hint-actions" id="biliHintActions">
+                <div class="hint-actions" id="biliHintActions">
                     <button id="biliHintScanBtn" class="button secondary" type="button">扫码登录导入</button>
                     <button id="biliHintManualBtn" class="button ghost" type="button">去填写</button>
                     <button id="douyinLoginBtn" class="button secondary" type="button" hidden>打开抖音浏览器</button>
                     <span id="douyinLoginStatus" class="bili-login-status"></span>
-                    <button id="biliHintDismissBtn" class="bili-hint-dismiss" type="button" title="忽略，本次会话不再提醒">✕</button>
+                    <button id="biliHintDismissBtn" class="hint-dismiss" type="button" title="忽略，本次会话不再提醒">✕</button>
+                </div>
+            </div>
+            <div id="mcpHint" class="hint-bar info" hidden>
+                <div class="hint-text">
+                    <strong>想让 AI 客户端直接帮你转视频？</strong>
+                    <span>左侧「让 agent 接入（MCP）」里就是本机地址，点一下即可复制，Cherry Studio / Codex 粘贴就能用。</span>
+                </div>
+                <div class="hint-actions">
+                    <button id="mcpHintGoBtn" class="button ghost" type="button">看地址</button>
+                    <button id="mcpHintDismissBtn" class="hint-dismiss" type="button" title="不再提醒">✕</button>
                 </div>
             </div>
             <div class="source-meta">
@@ -369,6 +401,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20260911-4"></script>
+<script src="script.js?v=20260916-1"></script>
 </body>
 </html>

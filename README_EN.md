@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.4.0</h1>
+<h1 align="center">VideoToNo v1.4.1</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -14,22 +14,22 @@
 
 <p align="center">🎬 Promo video (Bilibili): <a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ group: <code>739200648</code></p>
 
-VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: give it a Bilibili, Douyin, YouTube link or a local video; it prefers platform captions including Bilibili AI captions, falls back to local faster-whisper transcription when none exist, then has your chosen LLM write timestamped Markdown notes. 
+VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: give it a Bilibili, Douyin, YouTube link or a local video; it prefers platform captions including Bilibili AI captions, falls back to on-device transcription when none exist (paraformer is the fast default for Chinese, the Whisper family stays available), then has your chosen LLM write timestamped Markdown notes. 
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.3.5 → v1.4.0)
+## 🆕 What's New (v1.4.0 → v1.4.1)
 
-- **Long-video notes are complete again**: hour-long lectures are now written as a full chronological record instead of losing the second half. Notes come with an overview and a table of contents with time ranges, and headings carry [start–end] stamps so you can jump straight to any part
-- **Much faster drafts**: a 3-hour lecture takes about 10 minutes to a complete note, a 28-minute video about 24 minutes end-to-end, an 8-minute clip around 90 seconds; brief network hiccups retry automatically. Want the model to think longer? Pick High/Max reasoning
-- **Formulas render properly**: math is rendered directly in the preview, and exported Markdown keeps working in Typora or Obsidian
-- **Faster, visible local transcription**: two faster Chinese engines — paraformer (an 80-minute video transcribes in about 4 minutes, auto-segmented and punctuated) and belle (a Chinese-tuned Whisper-Turbo with better accuracy); progress is reported every 30 seconds instead of looking stuck
-- **Easier Bilibili multi-part**: choose the parts to process before submitting (nothing selected by default, to avoid accidental mass transcription); re-submitting the same video reuses your previous selection
-- **Also**: model profiles can be renamed right from the dropdown
+- **Notes with screenshots keep their pictures on export**: the Markdown download now ships the screenshots alongside it, and the HTML export carries them inside the single file; old tasks just need re-exporting
+- **Which transcription model to pick**: the dropdown is now labeled from on-device benchmarks — "best for Chinese" vs "not recommended", with nothing removed
+- **Fixed manual import for `paraformer-zh`**: it no longer points you at an empty folder, and the checklist no longer asks for files that engine never reads
+- **Easier to find the MCP entry**: a new "Let an agent connect (MCP)" section in the sidebar copies your local address or a ready-to-paste client config
+- **Privacy**: an API key no longer appears in plain text in model errors, run logs or notifications; the Agent Skill can take the key via stdin or an environment variable
 
 <details>
-<summary>Previous releases (v1.3.5 and earlier)</summary>
+<summary>Previous releases (v1.4.0 and earlier)</summary>
 
+- **v1.4.0**: hour-plus lectures are now transcribed into a complete chronological note instead of losing the back half (3-hour courses no longer drop roughly 2 hours), with an overview plus a table of contents carrying time ranges; drafting is an order of magnitude faster (a 3-hour course in about 10 minutes); note formulas render in the preview and in exported Markdown; two faster Chinese engines (paraformer-zh, belle-turbo-zh) plus CPU decode tuning; transcription reports progress every 30 seconds; Bilibili multi-part selection before submitting, remembered per video; model profiles renameable from the dropdown; failure messages now name the platform and stage that actually need checking.
 - **v1.3.5**: new "Transcript only" output (no LLM, no key; transcripts can switch to the note route later); the transcript exit opened to MCP / Skill (`transcribe_video` + `get_transcript`); transcripts of failed tasks remain fetchable; local videos work on first upload (no fail-then-retry) with the 2 GB limit truly in place; GPU falls back to CPU when CUDA runtime libraries are missing; pending tasks can be deleted.
 - **v1.3.0**: API keys and Bilibili credentials can be **saved to this machine per endpoint address** (DPAPI-encrypted on Windows, reused only when the target address matches, with a key-state chip beside the input); model profiles each remember their own model and custom endpoints become named profiles with autosave; cancellation now reaches *Cancelled* instantly in every stage (measured 18.6s → 0.02s); fixed model IDs bleeding across profiles and early failures leaving tasks in `processing`; MCP gained `list_llm_keys`, `save_llm_config` labels, and `endpoints` / `key_storage` in `get_saved_config`.
 - **v1.2.3**: Bilibili notes survive risk control (automatic fallback to `api.bilibili.com` open endpoints for metadata, audio and preview streams across multi-part videos, Issue #1), three guardrails against the "Faithful" style hanging in generation, generation progress heartbeat, reasoning effort adapting to the note style, and automatic degradation when a channel rejects a thinking parameter
@@ -61,7 +61,7 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.4.0-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.4.1-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;

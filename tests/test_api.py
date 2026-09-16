@@ -1,6 +1,8 @@
 import asyncio
+import io
 import json
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -120,13 +122,20 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.4.0"
+    assert health.json()["version"] == "1.4.1"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
+    # 前端 MCP 卡片靠这个字段决定"给地址"还是"说本机没装依赖"
+    assert health.json()["dependencies"]["mcp_sse"] is True
     page = client.get("/")
     assert page.status_code == 200
     assert "VideoToNo" in page.text
+    assert 'id="mcpSseUrl"' in page.text
+    assert 'id="mcpStatusChip" class="mcp-chip" type="button" hidden' in page.text
+    assert 'id="mcpHint" class="hint-bar info" hidden' in page.text
+    assert 'id="copyMcpConfigBtn"' in page.text
+    assert 'id="mcpUnavailable" class="mcp-note" hidden' in page.text
     assert "cdn.jsdelivr.net" not in page.text
     assert "vendor/marked-18.0.9.umd.js" in page.text
     assert "vendor/dompurify-3.4.13.min.js" in page.text
@@ -191,6 +200,9 @@ def test_frontend_whisper_confirm_dedup_logic() -> None:
 def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """手动导入模型：创建并返回导入目录，模型 ID 校验，状态接口带 manual_dir。"""
     monkeypatch.setattr(main, "WHISPER_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(
+        main.paraformer_transcriber, "download_root", tmp_path / "cache" / "sherpa"
+    )
     opened: list[Path] = []
 
     def fake_open(path: Path) -> bool:
@@ -207,16 +219,22 @@ def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.Monk
     data = response.json()
     expected_dir = tmp_path / "cache" / "manual" / "base"
     assert data == {
-        "path": str(expected_dir),
-        "opened": False,
-        # 词表文件名各仓库不统一（large-v3 用的是 .json），引导里两个都列出来
-        "files": [
-            "config.json",
-            "model.bin",
-            "tokenizer.json",
-            "vocabulary.txt 或 vocabulary.json",
+        "folders": [
+            {
+                "label": "模型文件",
+                "path": str(expected_dir),
+                # 词表文件名各仓库不统一（large-v3 用的是 .json），引导里两个都列出来
+                "files": [
+                    "config.json",
+                    "model.bin",
+                    "tokenizer.json",
+                    "vocabulary.txt 或 vocabulary.json",
+                ],
+                "download_url": "https://hf-mirror.com/Systran/faster-whisper-base/tree/main",
+            }
         ],
-        "download_url": "https://hf-mirror.com/Systran/faster-whisper-base/tree/main",
+        "open_path": str(expected_dir),
+        "opened": False,
     }
     assert expected_dir.is_dir()
     # open=false 只取引导信息，不能先把用户的文件管理器窗口弹出来
@@ -233,6 +251,29 @@ def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.Monk
 
     invalid = client.post("/api/whisper-models/manual-folder", json={"model": "nope"})
     assert invalid.status_code == 422
+
+
+def test_manual_folder_for_paraformer_lists_sherpa_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """paraformer-zh 是三份组件、且压根不读 manual/：照旧提示会让用户把文件放到程序不看的地方。"""
+    sherpa = tmp_path / "cache" / "sherpa"
+    monkeypatch.setattr(main.paraformer_transcriber, "download_root", sherpa)
+    opened: list[Path] = []
+    monkeypatch.setattr(main, "_open_in_file_manager", lambda path: opened.append(path) or True)
+
+    data = TestClient(main.app).post(
+        "/api/whisper-models/manual-folder", json={"model": "paraformer-zh", "open": False}
+    ).json()
+
+    assert [Path(folder["path"]).name for folder in data["folders"]] == ["asr", "punc", "vad"]
+    assert data["folders"][0]["files"] == ["model.int8.onnx", "tokens.txt"]
+    assert "csukuangfj/sherpa-onnx-paraformer-zh" in data["folders"][0]["download_url"]
+    assert "标点模型" in data["folders"][1]["label"]
+    # 三个目录都建好，但只开一个窗口（sherpa 根目录），不弹三次文件管理器
+    assert all(Path(folder["path"]).is_dir() for folder in data["folders"])
+    assert data["open_path"] == str(sherpa)
+    assert opened == []
 
 
 def test_note_metadata_and_footer_are_deterministic() -> None:
@@ -340,6 +381,17 @@ def test_scrubbed_error_hides_keys_but_keeps_the_status() -> None:
         main.scrub_technical_error("Error code: 403 with key sk-abcdef12345\n second line")
         == "Error code: 403 with key sk-**** second line"
     )
+    echoed = main.scrub_technical_error(
+        'gateway said {"api_key": "tok_live_abcdefgh123", "authorization": Bearer '
+        'Zm9vYmFyMTIzNDU2, "tokenizer": "tokenizer.json"}'
+    )
+    assert "tok_live_abcdefgh123" not in echoed
+    assert "Zm9vYmFyMTIzNDU2" not in echoed
+    # 字段名脱敏不能把正常词咬掉（tokenizer.json 是模型必需文件）
+    assert "tokenizer.json" in echoed
+    known = main.scrub_technical_error("upstream echoed the credential we sent", "abcdefg12345")
+    assert "abcdefg12345" not in known
+    assert known.startswith("upstream echoed")
 
 
 def test_summarize_rejects_local_path_in_url_field() -> None:
@@ -495,6 +547,272 @@ def test_download_returns_markdown_file(
     assert ".md" in response.headers["content-disposition"]
     assert not (task_dir / "video-notes.zip").exists()
     main.tasks.pop(task_id, None)
+
+
+def test_download_bundles_note_images_with_the_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正文带截图时不能只发一个 .md：相对路径在解压前无处解析，用户看到的就是「导出丢图」。"""
+    task_id = "bundle-task"
+    task_dir = tmp_path / task_id
+    (task_dir / "frames").mkdir(parents=True)
+    (task_dir / "frames" / "frame_0000_30s.jpg").write_bytes(b"\xff\xd8jpeg")
+    (task_dir / "notes.md").write_text(
+        "# 带图笔记\n\n## 视频截图\n\n![截图 1](./frames/frame_0000_30s.jpg)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id].update(status="completed", result={"title": "带图笔记"})
+
+    response = TestClient(main.app).get(f"/api/download/{task_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert ".zip" in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "带图笔记.md",
+            "frames/frame_0000_30s.jpg",
+        }
+        assert archive.read("frames/frame_0000_30s.jpg") == b"\xff\xd8jpeg"
+        assert "./frames/frame_0000_30s.jpg" in archive.read("带图笔记.md").decode("utf-8")
+    main.tasks.pop(task_id, None)
+
+
+def test_download_bundle_rewrites_legacy_image_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1.4.1 之前的笔记写的是 ./images/，历史任务重新导出时同样要拿到图。"""
+    task_id = "legacy-task"
+    task_dir = tmp_path / task_id
+    (task_dir / "frames").mkdir(parents=True)
+    (task_dir / "frames" / "frame_0001_60s.jpg").write_bytes(b"\xff\xd8old")
+    (task_dir / "notes.md").write_text(
+        "![截图 1](./images/frame_0001_60s.jpg)", encoding="utf-8"
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id].update(status="completed", result={"title": "旧任务"})
+
+    response = TestClient(main.app).get(f"/api/download/{task_id}")
+
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        note = archive.read("旧任务.md").decode("utf-8")
+        assert archive.read("frames/frame_0001_60s.jpg") == b"\xff\xd8old"
+    assert "./frames/frame_0001_60s.jpg" in note
+    assert "./images/" not in note
+    main.tasks.pop(task_id, None)
+
+
+def test_archive_note_points_refs_at_the_task_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """归档与任务目录同在 workspace/ 下，引用指过去就能就地看图，不必复制几百张 JPEG。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+
+    archived = main.archive_note(
+        "某个视频", "![截图 1](./images/frame_0000_30s.jpg)", "abc123"
+    )
+
+    assert archived.read_text(encoding="utf-8") == (
+        "![截图 1](../abc123/frames/frame_0000_30s.jpg)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_failure_never_persists_the_plaintext_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """网关常把整段请求回显进 4xx；这条路径上 Key 不能跟着 error 与日志落盘。"""
+    secret = "Zx9QWertyuio1234ABCD"  # 不带 sk- 前缀：只有"整串替换"这一层能救
+    task_id = "leak-task"
+    old_task_id = "old-leak"
+    (tmp_path / old_task_id).mkdir()
+    (tmp_path / old_task_id / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段带有反讽的原始内容"}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / task_id).mkdir()
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("复用转录的路径不该碰平台与转写")
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        get_video_info = forbidden
+        fetch_subtitles = forbidden
+        download_audio = forbidden
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            self.warnings = [f"该通道不支持关闭思考，已降级。回显凭据 {secret}"]
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            raise RuntimeError(
+                'Error code: 401 upstream echoed {"api_key": "'
+                + secret
+                + '", "authorization": Bearer Q29uZ3JldGVzczEyMzQ1Ng}"'
+            )
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1leak",
+        llm_config=main.LLMConfig(model_type="glm", api_key=secret),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "failed"
+    live = json.dumps({"error": task["error"], "logs": task["logs"]}, ensure_ascii=False)
+    persisted = (tmp_path / task_id / "task.json").read_text(encoding="utf-8")
+    assert secret not in live and secret not in persisted
+    assert "Q29uZ3JldGVzczEyMzQ1Ng" not in live  # 字段名回显那一层也要洗掉
+    # 确实是脱敏而不是整行被丢掉：底层错误那行仍然可读，只是凭据成了掩码
+    assert "底层错误：" in live and "****" in live
+
+
+@pytest.mark.asyncio
+async def test_summarizer_warnings_are_scrubbed_before_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """成功任务也会带告警，而告警里嵌的是通道原文——这条路径以前完全没脱敏。"""
+    secret = "Vh7NqzL0mBxc8dke"
+    task_id = "warn-task"
+    old_task_id = "old-warn"
+    (tmp_path / old_task_id).mkdir()
+    (tmp_path / old_task_id / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段带有反讽的原始内容"}]}',
+        encoding="utf-8",
+    )
+    (tmp_path / task_id).mkdir()
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("复用转录的路径不该碰平台与转写")
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        get_video_info = forbidden
+        fetch_subtitles = forbidden
+        download_audio = forbidden
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            # 没有字段名前缀，只有"整串替换"这一层能洗掉
+            self.warnings = [f"该通道不支持关闭深度思考，已改用默认值（{secret}）"]
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 正常笔记"
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1warn",
+        llm_config=main.LLMConfig(model_type="glm", api_key=secret),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    live = json.dumps(task["logs"], ensure_ascii=False)
+    persisted = (tmp_path / task_id / "task.json").read_text(encoding="utf-8")
+    assert secret not in live and secret not in persisted
+    assert any("该通道不支持关闭深度思考" in line for line in task["logs"])
+    assert secret[:4] + "****" in live
+
+@pytest.mark.asyncio
+async def test_pipeline_writes_frame_refs_that_exist_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务目录里的 notes.md 与 frames/ 同级，引用对不上就是坏链——导出丢图的根因在这。"""
+    task_id = "shot-task"
+    old_task_id = "old-shot-task"
+    old_dir = tmp_path / old_task_id
+    old_dir.mkdir()
+    (tmp_path / task_id).mkdir()
+    (old_dir / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段带有反讽的原始内容"}]}',
+        encoding="utf-8",
+    )
+
+    async def fake_preview(*args, **kwargs):
+        return tmp_path / task_id / "preview.mp4"
+
+    async def fake_extract_frames(video_path, target_task_id, interval, should_abort=None):
+        frames_dir = tmp_path / target_task_id / "frames"
+        frames_dir.mkdir(exist_ok=True)
+        paths = []
+        for index, timestamp in enumerate((0, interval)):
+            path = frames_dir / f"frame_{index:04d}_{timestamp}s.jpg"
+            path.write_bytes(b"\xff\xd8tiny")
+            paths.append(path)
+        return paths
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        download_preview_video = fake_preview
+        extract_frames = staticmethod(fake_extract_frames)
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 带图笔记"
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        include_screenshots=True,
+        screenshot_interval=30,
+        llm_config=main.LLMConfig(model_type="glm", api_key="test-key"),
+    )
+
+    await main.process_video_task(task_id, request)
+
+    task = main.tasks[task_id]
+    assert task["status"] == "completed"
+    assert task["result"]["screenshot_count"] == 2
+    note = (tmp_path / task_id / "notes.md").read_text(encoding="utf-8")
+    assert "./frames/frame_0000_0s.jpg" in note
+    assert "./images/" not in note
+    archived = Path(task["result"]["archived_path"]).read_text(encoding="utf-8")
+    assert f"../{task_id}/frames/frame_0001_30s.jpg" in archived
 
 
 @pytest.mark.asyncio

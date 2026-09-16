@@ -141,6 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
     safeStep(initPreferences, '读取偏好设置');
     safeStep(bindEvents, '绑定页面事件');
     safeStep(toggleSourceType, '初始化来源切换');
+    safeStep(applyMcpAccess, '初始化 MCP 接入信息');
     loadAppVersion();
     loadRecentTasks(true);
     window.__videoToNoReady = true;
@@ -160,9 +161,70 @@ async function loadAppVersion() {
         const data = await readResponse(response, '读取版本失败');
         if (data.version) byId('appVersion').textContent = `v${data.version}`;
         applyUploadLimit(data.max_upload_mb);
+        applyMcpAccess(data.dependencies?.mcp_sse);
     } catch {
         // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
         applyUploadLimit(null);
+    }
+}
+
+function mcpSseUrl() {
+    return `${location.origin}/mcp/sse`;
+}
+
+function mcpJsonConfig() {
+    return JSON.stringify(
+        { mcpServers: { "video-to-note": { type: "sse", url: mcpSseUrl() } } },
+        null,
+        2
+    );
+}
+
+// 只有后端明确说 mcp 没挂上才提示"连不通"；老后端没这个字段时按可用显示。
+function applyMcpAccess(mcpSse) {
+    const url = byId('mcpSseUrl');
+    if (url) url.textContent = mcpSseUrl();
+    const unavailable = byId('mcpUnavailable');
+    if (unavailable) unavailable.hidden = mcpSse !== false;
+    // 芯片和提示条都要等后端确认 MCP 真挂上了才出现，否则等于承诺一个连不通的地址
+    const chip = byId('mcpStatusChip');
+    if (chip) chip.hidden = mcpSse !== true;
+    const hint = byId('mcpHint');
+    if (hint) hint.hidden = !(mcpSse === true && !prefs.ui.mcp_hint_seen);
+}
+
+function revealMcpAccess() {
+    const card = byId('mcpSection');
+    if (!card) return;
+    card.open = true;
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const copyButton = byId('copyMcpUrlBtn');
+    if (copyButton) copyButton.focus();
+    dismissMcpHint();
+}
+
+function dismissMcpHint() {
+    prefs.ui.mcp_hint_seen = true;
+    persistPrefs();
+    const hint = byId('mcpHint');
+    if (hint) hint.hidden = true;
+}
+
+async function copyTextToClipboard(text, successLabel) {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            copyTextFallback(text);
+        }
+        showToast(successLabel, 'success');
+    } catch {
+        try {
+            copyTextFallback(text);
+            showToast(successLabel, 'success');
+        } catch (error) {
+            showToast(`复制失败：${error.message}`, 'error');
+        }
     }
 }
 
@@ -215,6 +277,12 @@ function bindEvents() {
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
     bindListener('customProfileDeleteBtn', 'click', deleteCustomProfile);
     bindListener('manualModelBtn', 'click', manualImportWhisperModel);
+    bindListener('copyMcpUrlBtn', 'click', () => copyTextToClipboard(mcpSseUrl(), 'MCP 地址已复制'));
+    bindListener('copyMcpConfigBtn', 'click', () =>
+        copyTextToClipboard(mcpJsonConfig(), 'MCP 配置已复制，到客户端粘贴导入即可'));
+    bindListener('mcpStatusChip', 'click', revealMcpAccess);
+    bindListener('mcpHintGoBtn', 'click', revealMcpAccess);
+    bindListener('mcpHintDismissBtn', 'click', dismissMcpHint);
     bindListener('sourceType', 'change', toggleSourceType);
     bindPreferenceAutoSave();
     const videoUrl = byId('videoUrl');
@@ -510,7 +578,7 @@ function defaultPrefs() {
             processing_mode: 'restart',
             output_mode: 'note'
         },
-        ui: { theme: 'system' }
+        ui: { theme: 'system', mcp_hint_seen: false }
     };
 }
 
@@ -683,6 +751,7 @@ function mergePrefs(stored) {
         }
     }
     if (stored.ui && typeof stored.ui.theme === 'string') next.ui.theme = stored.ui.theme;
+    if (stored.ui && stored.ui.mcp_hint_seen === true) next.ui.mcp_hint_seen = true;
     return next;
 }
 
@@ -1819,23 +1888,29 @@ async function manualImportWhisperModel() {
         showToast(error.message || '读取模型导入信息失败', 'error');
         return;
     }
+    const guideSteps = guide.folders
+        .map(
+            (folder, index) =>
+                `${index + 1}. ${folder.label}\n`
+                + `    下载这些文件（不要改文件名）：${folder.files.join(' / ')}\n`
+                + `    下载页：${folder.download_url}\n`
+                + `    放入：${folder.path}`
+        )
+        .join('\n');
     const confirmed = window.confirm(
         `将为模型「${modelLabel}」打开手动导入文件夹。\n\n`
-        + '步骤：\n'
-        + '1. 用浏览器从下载页保存这些文件（不要改文件名）：\n'
-        + `    ${guide.files.join(' / ')}\n`
-        + `    下载页：${guide.download_url}\n`
-        + `2. 把它们放入文件夹：\n    ${guide.path}\n`
-        + '3. 文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
+        + (guide.folders.length > 1 ? '这个模型由几个组件组成，逐个放好：\n' : '步骤：\n')
+        + `${guideSteps}\n\n`
+        + '文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
         + '现在打开文件夹吗？'
     );
     if (!confirmed) return;
     try {
         const data = await requestManualImportGuide(modelId, true);
         if (data.opened) {
-            showToast(`已打开导入文件夹：${data.path}`, 'success');
+            showToast(`已打开导入文件夹：${data.open_path}`, 'success');
         } else {
-            window.prompt('未能自动打开文件夹，请手动前往以下路径放入模型文件：', data.path);
+            window.prompt('未能自动打开文件夹，请手动前往以下路径放入模型文件：', data.open_path);
         }
         startManualImportPolling(modelId);
     } catch (error) {
@@ -2489,10 +2564,18 @@ function renderTranscript(content, text) {
     content.replaceChildren(...rows);
 }
 
+// 1.4.1 之前笔记里写的是 ./images/，磁盘上一直是 frames/；两种都要认，
+// 否则历史任务重新打开时截图照样显示不出来。
+const NOTE_IMAGE_RE = /!\[([^\]]*)\]\(\.\/(?:frames|images)\/([^)]+)\)/g;
+const SERVED_IMAGE_RE = new RegExp(
+    `!\\[([^\\]]*)\\]\\((${API_BASE}/image/[^)]+)\\)`,
+    'g'
+);
+
 function replaceImagePaths(markdown) {
     if (!currentTaskId) return markdown;
     return markdown.replace(
-        /!\[([^\]]*)\]\(\.\/images\/([^)]+)\)/g,
+        NOTE_IMAGE_RE,
         `![$1](${API_BASE}/image/${encodeURIComponent(currentTaskId)}/$2)`
     );
 }
@@ -2571,8 +2654,19 @@ async function downloadSummary() {
         return;
     }
 
+    let htmlSource = currentHtml || currentMarkdown;
+    if (format === 'html' && htmlSource.includes(`${API_BASE}/image/`)) {
+        setDownloading(true);
+        showToast('正在把截图嵌入 HTML，请稍候', 'info');
+        try {
+            htmlSource = await inlineServedImages(htmlSource);
+        } finally {
+            setDownloading(false);
+        }
+    }
+
     const formats = {
-        html: { content: convertToHtml(currentHtml || currentMarkdown), extension: '.html', mime: 'text/html' },
+        html: { content: convertToHtml(htmlSource), extension: '.html', mime: 'text/html' },
         json: { content: convertToJson(currentMarkdown), extension: '.json', mime: 'application/json' },
         txt: { content: stripMarkdown(currentMarkdown), extension: '.txt', mime: 'text/plain' }
     };
@@ -2587,21 +2681,7 @@ function toggleImageLayout() {
 
 async function copyFullNote() {
     if (!currentMarkdown) return validationError('没有可复制的笔记');
-    try {
-        if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(currentMarkdown);
-        } else {
-            copyTextFallback(currentMarkdown);
-        }
-        showToast('完整笔记已复制', 'success');
-    } catch {
-        try {
-            copyTextFallback(currentMarkdown);
-            showToast('完整笔记已复制', 'success');
-        } catch (error) {
-            showToast(`复制失败：${error.message}`, 'error');
-        }
-    }
+    await copyTextToClipboard(currentMarkdown, '完整笔记已复制');
 }
 
 function copyTextFallback(value) {
@@ -2729,12 +2809,57 @@ async function downloadMarkdownFile() {
     try {
         const response = await fetch(`${API_BASE}/download/${encodeURIComponent(currentTaskId)}`);
         if (!response.ok) throw new Error(await extractErrorMessage(response, '下载失败'));
-        triggerBlobDownload(await response.blob(), '.md');
-        showToast('下载已开始', 'success');
+        const filename = serverFilename(response);
+        triggerBlobDownload(await response.blob(), '.md', filename);
+        showToast(
+            /\.zip$/i.test(filename) ? '笔记与截图已打包下载，解压后 .md 里才显示截图' : '下载已开始',
+            'success'
+        );
     } catch (error) {
         showToast(`下载失败：${error.message}`, 'error');
     } finally {
         setDownloading(false);
+    }
+}
+
+// 单文件 HTML 里的 /api/image 引用只在服务运行时解析得到，离开本机就是坏图，
+// 所以导出前把截图逐张取回成 data URI。取不到的（任务已删）保留原引用，不整单失败。
+async function inlineServedImages(markdown) {
+    const urls = [...new Set(Array.from(markdown.matchAll(SERVED_IMAGE_RE), (match) => match[2]))];
+    if (!urls.length) return markdown;
+    const inlined = await Promise.all(urls.map(imageDataUri));
+    const byUrl = new Map(urls.map((url, index) => [url, inlined[index]]));
+    return markdown.replace(
+        SERVED_IMAGE_RE,
+        (match, alt, url) => (byUrl.get(url) ? `![${alt}](${byUrl.get(url)})` : match)
+    );
+}
+
+async function imageDataUri(url) {
+    try {
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) return '';
+        const blob = await response.blob();
+        return await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(blob);
+        });
+    } catch {
+        return '';
+    }
+}
+
+function serverFilename(response) {
+    const header = response.headers.get('content-disposition') || '';
+    const raw = header.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+        ?? header.match(/filename="?([^";]+)"?/i)?.[1];
+    if (!raw) return '';
+    try {
+        return decodeURIComponent(raw);
+    } catch {
+        return raw;
     }
 }
 
@@ -2746,11 +2871,11 @@ function setDownloading(active) {
     button.querySelector('.btn-text').textContent = active ? '准备下载' : '下载';
 }
 
-function triggerBlobDownload(blob, extension) {
+function triggerBlobDownload(blob, extension, filename) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `video_summary_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}${extension}`;
+    link.download = filename || `video_summary_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}${extension}`;
     document.body.appendChild(link);
     link.click();
     link.remove();

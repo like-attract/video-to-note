@@ -12,7 +12,9 @@
     --transcript-only                     只做到带时间轴转录，不调用大模型（无需 API Key）
     --no-reuse                            禁止复用同链接已有转录，强制重新转写
     --provider {deepseek,openai,qwen,glm,moonshot,custom}
-    --api-key KEY                         大模型 API Key（该地址已保存到本机可省略）
+    --api-key -                           大模型 API Key（- 表示从标准输入读）
+                                          也可设环境变量 VIDEOTONOTES_LLM_API_KEY；
+                                          该地址已保存到本机时两者都可省略
     --wait SECONDS                        最长等待秒数（默认 1800）
     --out PATH                            把笔记写入文件（默认打印到 stdout）
 
@@ -23,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 import time
 import urllib.error
@@ -34,10 +38,33 @@ PORT_RANGE = range(8000, 8020)
 POLL_INTERVAL_SECONDS = 3
 PROVIDERS = {"deepseek", "openai", "openai_gpt4", "openai_gpt35", "qwen", "glm", "moonshot", "custom"}
 UPLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+# Key 走命令行会留在 shell 历史与进程列表里，所以默认鼓励用环境变量或 stdin
+API_KEY_ENV = "VIDEOTONOTES_LLM_API_KEY"
+SK_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
+ECHO_PATTERN = re.compile(
+    r"\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|sessdata|bili_jct)"
+    r"\b([\"'’：:=\s]{1,4})([A-Za-z0-9_\-\.]{8,})",
+    re.IGNORECASE,
+)
+_KNOWN_SECRETS: list[str] = []
+
+
+def remember_secret(value: str) -> None:
+    if value and len(value) >= 8:
+        _KNOWN_SECRETS.append(value)
+
+
+def redact(text: str) -> str:
+    """打印或抛出前先洗一遍：服务端的 4xx 详情、告警文本都可能带 Key 原文。"""
+    cleaned = SK_KEY_PATTERN.sub("sk-****", str(text))
+    cleaned = ECHO_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}****", cleaned)
+    for secret in _KNOWN_SECRETS:
+        cleaned = cleaned.replace(secret, secret[:4] + "****")
+    return cleaned
 
 
 def die(message: str, code: int = 1) -> "None":
-    print(f"[VideoToNo] {message}", file=sys.stderr)
+    print(f"[VideoToNo] {redact(message)}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -58,7 +85,7 @@ def http_json(method: str, url: str, body: dict | None = None, timeout: float = 
             detail = json.loads(exc.read().decode("utf-8")).get("detail", "")
         except Exception:
             pass
-        raise RuntimeError(f"HTTP {exc.code} {url}: {detail or exc.reason}") from exc
+        raise RuntimeError(redact(f"HTTP {exc.code} {url}: {detail or exc.reason}")) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"无法连接 {url}：{exc.reason}") from exc
 
@@ -139,18 +166,19 @@ def poll_task(base: str, task_id: str, wait_seconds: int) -> dict:
         task = http_json("GET", f"{base}/api/task/{task_id}", timeout=15)
         logs = task.get("logs") or []
         for line in logs[printed_logs:]:
-            print(f"  | {line}")
+            print(f"  | {redact(line)}")
         printed_logs = len(logs)
         status = task.get("status")
         if status == "completed":
             return task
         if status == "failed":
             error_text = str(task.get("error") or "未知原因")
-            print(f"[VideoToNo] 任务失败：{error_text}", file=sys.stderr)
+            print(f"[VideoToNo] 任务失败：{redact(error_text)}", file=sys.stderr)
             if "API Key" in error_text:
                 print(
-                    "[VideoToNo] 提示：该接口地址本机没有可复用的 Key。用 --api-key 提供，"
-                    "或在网页「总结模型」填入 Key 后点「保存到本机」。",
+                    "[VideoToNo] 提示：该接口地址本机没有可复用的 Key。把 Key 交给环境变量"
+                    f" {API_KEY_ENV}（或 --api-key - 从标准输入读）后重跑，"
+                    "或在网页「总结模型」填入 Key 并点「保存到本机」。",
                     file=sys.stderr,
                 )
             print(f"[VideoToNo] 可复用中间产物重试，task_id={task_id}", file=sys.stderr)
@@ -165,6 +193,28 @@ def poll_task(base: str, task_id: str, wait_seconds: int) -> dict:
             print(f"[VideoToNo] 稍后可用 GET {base}/api/task/{task_id} 继续查询", file=sys.stderr)
             sys.exit(3)
         time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def resolve_api_key(args) -> str:
+    """Key 的来源：`--api-key -` 读标准输入 > `--api-key` 明文 > 环境变量。
+
+    命令行参数会留在 shell 历史与进程列表里（任何同用户进程都能读到），
+    所以用到那一种时明确提示换法。一个都不给时后端按接口地址复用本机已存 Key。
+    """
+    raw = (args.api_key or "").strip()
+    if raw == "-":
+        if sys.stdin.isatty():
+            print("[VideoToNo] 请输入 API Key（一行，回车结束）：", file=sys.stderr)
+        # 只读一行：管道里 printf 出来的 Key 不必等 EOF，终端里手输回车即可
+        return sys.stdin.readline().strip()
+    if raw:
+        print(
+            f"[VideoToNo] 提示：--api-key 会留在 shell 历史与进程列表里；下次请改用环境变量"
+            f" {API_KEY_ENV}，或 --api-key - 从标准输入读。",
+            file=sys.stderr,
+        )
+        return raw
+    return os.environ.get(API_KEY_ENV, "").strip()
 
 
 def main() -> None:
@@ -188,7 +238,14 @@ def main() -> None:
         help="禁止复用同链接已有转录，强制重新转写（默认只在笔记模式从头处理）",
     )
     parser.add_argument("--provider", default=None, help=f"大模型供应商：{', '.join(sorted(PROVIDERS))}")
-    parser.add_argument("--api-key", default="", help="大模型 API Key（该接口地址已保存到本机时可省略）")
+    parser.add_argument(
+        "--api-key",
+        default="",
+        help=(
+            f"大模型 API Key（该接口地址已保存到本机时可省略）。推荐 `--api-key -` 从标准输入读，"
+            f"或设环境变量 {API_KEY_ENV}；直接写在命令行会留在 shell 历史与进程列表里"
+        ),
+    )
     parser.add_argument("--base-url", default=None, help="custom 供应商的接口地址")
     parser.add_argument("--custom-model", default=None, help="custom 供应商的模型名")
     parser.add_argument("--whisper-model", default="base", help="本地转写模型（默认 base）")
@@ -226,12 +283,16 @@ def main() -> None:
         }
     else:
         endpoint = "/api/summarize"
-        # 省略 --api-key 时不下发该字段：后端按接口地址复用本机已存的 Key，
+        api_key = resolve_api_key(args)
+        if api_key:
+            # 记下明文，后面任何回显它的输出都要先被洗掉
+            remember_secret(api_key)
+        # 没有 Key 时不下发该字段：后端按接口地址复用本机已存的 Key，
         # 地址对不上会直接报错，而不是借用别的接口的 Key。
-        if args.api_key.strip() or args.provider:
+        if api_key or args.provider:
             llm_config: dict = {"model_type": args.provider or "deepseek"}
-            if args.api_key.strip():
-                llm_config["api_key"] = args.api_key.strip()
+            if api_key:
+                llm_config["api_key"] = api_key
             if args.base_url:
                 llm_config["base_url"] = args.base_url
             if args.custom_model:
@@ -265,8 +326,11 @@ def main() -> None:
             die(f"提交失败：{exc}")
         if "API Key" in str(exc) or "422" in str(exc):
             die(
-                f"提交失败：{exc}\n提示：需要大模型 API Key。请向用户询问供应商与 Key，"
-                "用 --provider/--api-key 重新运行（custom 另需 --base-url/--custom-model）。",
+                f"提交失败：{exc}\n提示：该接口地址本机没有可复用的 Key。优先问用户能否改走"
+                " --transcript-only（全程不调用大模型，不需要 Key）；确实要成品笔记时，"
+                f"让用户把 Key 交给环境变量 {API_KEY_ENV} 或以 --api-key - 从标准输入传入"
+                "（配合 --provider，custom 另需 --base-url/--custom-model）。"
+                "不要把 Key 写进命令行参数。",
                 code=1,
             )
         raise

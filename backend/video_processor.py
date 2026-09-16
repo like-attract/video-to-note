@@ -21,6 +21,9 @@ import yt_dlp
 
 from .transcript import TranscriptSegment, parse_subtitle_payload
 
+# 截图目录名会被写进笔记正文的相对引用（./frames/xxx.jpg），改它等于让历史笔记和导出包里的截图全部失效
+FRAMES_DIR_NAME = "frames"
+
 
 class VideoSource(str, Enum):
     BILIBILI = "bilibili"
@@ -912,7 +915,7 @@ class VideoProcessor:
         except ImportError as exc:
             raise RuntimeError("PyAV is required to extract screenshots") from exc
 
-        frames_dir = self._task_dir(task_id) / "frames"
+        frames_dir = self._task_dir(task_id) / FRAMES_DIR_NAME
         frames_dir.mkdir(exist_ok=True)
         paths: list[Path] = []
         with av.open(str(video_path)) as container:
