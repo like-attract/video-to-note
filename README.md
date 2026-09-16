@@ -1,7 +1,7 @@
 <p align="center">
   <img src="sources/icon.png" width="96" alt="VideoToNo 图标">
 </p>
-<h1 align="center">VideoToNo v1.4.0</h1>
+<h1 align="center">VideoToNo v1.4.1</h1>
 
 <p align="center"><em>把视频变成可回看的 Markdown 笔记</em></p>
 
@@ -13,22 +13,22 @@
 
 <p align="center">🎬 宣传视频：<a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ 交流群：<code>739200648</code></p>
 
-VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地优先**的服务：输入 B 站、抖音、YouTube 链接或本地视频，优先读取平台字幕、B 站 AI 字幕，无字幕时用本地 faster-whisper 离线转写，再由你选择的大模型生成带时间轴的 Markdown 笔记。
+VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地优先**的服务：输入 B 站、抖音、YouTube 链接或本地视频，优先读取平台字幕、B 站 AI 字幕，无字幕时用本机模型离线转写（中文首选 paraformer，也可选 whisper 系），再由你选择的大模型生成带时间轴的 Markdown 笔记。
 
 > 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（如 `C:/Users/用户名/.agents/skills/`），即可让 Claude Code、pi 等直接一句话生成视频笔记。详见该目录下的 `SKILL.md`。
 
-## 🆕 What's New（v1.3.5 → v1.4.0）
+## 🆕 What's New（v1.4.0 → v1.4.1）
 
-- **长视频笔记完整了**：一小时以上的课程、讲座改为按时间顺序逐段完整记录，不再漏掉后半段；笔记自带「内容概览 + 带时间范围的目录」，小标题标着 [起点-终点]，想回看哪一段直接定位
-- **出稿速度快了很多**：3 小时的课约 10 分钟出完整笔记，28 分钟的视频全程约 24 分钟，8 分钟的视频 1 分半；网络偶有中断会自动重试。想让模型多想一会儿，推理强度选「更高/最高」即可
-- **公式能正常显示了**：数学公式在预览里直接渲染，导出的 Markdown 放到 Typora、Obsidian 里也照常显示
-- **本地转写更快、进度可见**：新增两种更快的中文转写引擎——paraformer（80 分钟视频约 4 分钟转完，自动分段加标点）和 belle（中文识别更好的 whisper-turbo）；转写过程中每 30 秒显示已转写到的位置，不会再像卡住
-- **B 站分 P 更省心**：多 P 视频提交前可勾选要处理的分 P（默认全不勾，防止误点全量转写）；同一视频再次处理时自动沿用上次的勾选
-- **其他**：模型档案可在下拉旁一键重命名
+- **带截图的笔记导出后有图了**：下载 Markdown 连截图一起打包，导出 HTML 自带截图；老任务重新导出即可，不用重跑
+- **转写模型怎么选**：下拉框已按本机实测标好「中文推荐」和「不推荐」，选项一个没少
+- **修复 `paraformer-zh` 手动导入**：不再把你领到空文件夹，也不再列它用不到的文件
+- **MCP 好找了**：侧栏新增「让 agent 接入（MCP）」，本机地址和客户端配置一键复制
+- **隐私**：模型报错与运行记录里不再出现明文 API Key；Skill 交 Key 支持标准输入或环境变量
 
 <details>
-<summary>历史版本摘要（v1.3.5 及更早）</summary>
+<summary>历史版本摘要（v1.4.0 及更早）</summary>
 
+- **v1.4.0**：长视频笔记改为按时间顺序逐段完整记录（3 小时课不再丢约 2 小时），并自带「内容概览 + 带时间范围的目录」；出稿速度快一个量级（3 小时的课约 10 分钟）；笔记公式在预览与导出的 Markdown 里正常渲染；新增 paraformer-zh / belle-turbo-zh 两种更快的中文转写引擎并调优 CPU 解码；转写每 30 秒回报进度；B 站分 P 提交前显式勾选且沿用上次；模型档案一键重命名；失败提示按平台和阶段说清。
 - **v1.3.5**：界面新增「仅转录字幕」输出（全程不调大模型、不需要 Key，字幕稿可一键改走笔记路线）；转录出口同步开放给 MCP / Skill（`transcribe_video` + `get_transcript`）；历史失败任务的字幕稿照样能取；本地视频首次上传即正常（不再必须失败一次重试）、上限真正放开到 2 GB；GPU 缺 CUDA 运行库自动退回 CPU；「待处理」任务可删除。
 - **v1.3.0**：API Key 与 B 站凭据按**接口地址**「保存到本机」（Windows 用系统 DPAPI 加密落盘、复用前校验地址、输入框旁新增密钥状态芯片）；模型档案各自记忆所选模型，自定义接口可保存多个命名档案，非敏感设置改动即保存；取消任务在任意阶段秒级生效（实测 18.6s → 0.02s）；修复切换 Provider 时模型 ID 串写、早期失败让任务卡在 `processing`；MCP 新增只读工具 `list_llm_keys`，`save_llm_config` 支持 `label`，`get_saved_config` 增加 `endpoints` / `key_storage`。
 - **v1.2.3**：B 站 412 风控自动回退到 `api.bilibili.com` 开放接口（含多分 P 与预览流，Issue #1）、「详细复原」卡在生成阶段的三道护栏、生成进度心跳、推理强度按风格自适应、思考参数被网关拒绝时自动降级并记住结论
@@ -62,7 +62,7 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 
 ## 🚀 便携版下载（推荐）
 
-普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.4.0-portable.exe`：
+普通用户无需安装 Python 或配置开发环境，直接下载 [最新 Release](https://github.com/like-attract/video-to-note/releases/latest) 中的 `VideoToNo-1.4.1-portable.exe`：
 
 1. 下载并双击 exe；
 2. 等待浏览器自动打开本地页面；
