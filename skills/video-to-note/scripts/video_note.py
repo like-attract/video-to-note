@@ -17,6 +17,10 @@
                                           该地址已保存到本机时两者都可省略
     --wait SECONDS                        最长等待秒数（默认 1800）
     --out PATH                            把笔记写入文件（默认打印到 stdout）
+    --server-cmd CMD                      本机服务没在跑时用它拉起服务（便携版 exe 路径，
+                                          或 "python launcher.py"）；给一次会记住
+
+服务不在运行时会自动后台拉起（无头模式：不开界面、不进托盘，闲置 15 分钟自己退出）。
 
 退出码: 0 成功 | 1 参数/服务错误 | 2 任务失败 | 3 等待超时
 """
@@ -27,12 +31,16 @@ import argparse
 import json
 import os
 import re
+import shlex
+import socket
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from typing import Any
 
 PORT_RANGE = range(8000, 8020)
 POLL_INTERVAL_SECONDS = 3
@@ -40,6 +48,10 @@ PROVIDERS = {"deepseek", "openai", "openai_gpt4", "openai_gpt35", "qwen", "glm",
 UPLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 # Key 走命令行会留在 shell 历史与进程列表里，所以默认鼓励用环境变量或 stdin
 API_KEY_ENV = "VIDEOTONOTES_LLM_API_KEY"
+# 服务的启动命令：一次给出后记住，之后 agent 甩链接就不需要用户先点任何东西
+SERVER_CMD_ENV = "VIDEOTONOTES_SERVER_CMD"
+HEADLESS_IDLE_SECONDS = 900
+SERVICE_STARTUP_WAIT_SECONDS = 120
 SK_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
 ECHO_PATTERN = re.compile(
     r"\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|sessdata|bili_jct)"
@@ -90,9 +102,22 @@ def http_json(method: str, url: str, body: dict | None = None, timeout: float = 
         raise RuntimeError(f"无法连接 {url}：{exc.reason}") from exc
 
 
-def find_service() -> str:
-    """扫描 8000-8019，返回 VideoToNo 服务的 base url。"""
+def port_is_listening(port: int, timeout: float = 0.3) -> bool:
+    """先做一次裸 TCP 试探。
+
+    没监听的端口会立刻被拒，几微秒就返回；把 `urlopen` 的 1.5 秒超时挨个撞满，
+    扫一遍 8000-8019 要 60 秒——长到服务在两轮探测之间就按闲置退了（真机上踩过）。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def probe_service() -> str | None:
+    """扫一遍 8000-8019，有 VideoToNo 服务就返回它的 base url。"""
     for port in PORT_RANGE:
+        if not port_is_listening(port):
+            continue
         url = f"http://127.0.0.1:{port}"
         try:
             with urllib.request.urlopen(f"{url}/api/health", timeout=1.5) as response:
@@ -101,10 +126,184 @@ def find_service() -> str:
                 return url
         except Exception:
             continue
-    die(
-        "本机 8000-8019 端口未发现 VideoToNo 服务。请先启动 VideoToNo"
-        "（便携版 exe，或源码目录执行 python launcher.py）后重试。"
+    return None
+
+
+def server_cmd_file() -> Path:
+    """记住"服务怎么起"的位置。
+
+    技能目录是用户自己复制出去的，随时会被再复制一份，不能当配置存放点。
+    """
+    root = os.environ.get("LOCALAPPDATA")
+    base = Path(root) if root else Path.home() / ".videotono"
+    return base / "VideoToNo" / "skill-server-cmd.txt"
+
+
+def read_saved_server_cmd() -> str:
+    try:
+        return server_cmd_file().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def save_server_cmd(value: str) -> None:
+    path = server_cmd_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+    except OSError:
+        pass  # 记不住只影响下次还要问一遍，不影响这一次跑完
+
+
+def split_server_cmd(raw: str) -> list[str]:
+    """按非 POSIX 模式切：Windows 路径里的反斜杠不能被当转义符吃掉。"""
+    return [token for token in (t.strip('"') for t in shlex.split(raw, posix=False)) if token]
+
+
+def repo_launcher_cmd() -> tuple[list[str], str] | None:
+    """脚本还在仓库里（用户从源码用这套）时，直接用当前 Python 起 launcher。"""
+    try:
+        root = Path(__file__).resolve().parents[3]
+    except IndexError:
+        return None
+    if (root / "launcher.py").is_file() and (root / "backend").is_dir():
+        return [sys.executable, str(root / "launcher.py")], str(root)
+    return None
+
+
+def resolve_server_cmd(cli_value: str) -> tuple[list[str], str, str] | None:
+    """取启动服务的命令、它的工作目录、以及命令的来源名。
+
+    来源名要能对上号：报错时说"你上次给的路径找不到了"和"环境变量写错了"
+    是两件事，混成一句"启动失败"用户只能瞎猜。
+    """
+    candidates = (
+        ("--server-cmd", cli_value.strip()),
+        (SERVER_CMD_ENV, os.environ.get(SERVER_CMD_ENV, "").strip()),
+        ("上次记住的启动命令", read_saved_server_cmd()),
     )
+    for source, raw in candidates:
+        if not raw:
+            continue
+        argv = split_server_cmd(raw)
+        if not argv:
+            continue
+        head = Path(argv[0]).expanduser()
+        if head.suffix.lower() == ".exe":
+            if not head.is_file():
+                print(f"[VideoToNo] {source} 里的 exe 不存在：{head}", file=sys.stderr)
+                continue
+            # 只有一个 token 才是"便携版 exe 本身就是全部命令"：工作目录取 exe 同级，
+            # 工作区（workspace/）要落在它旁边。带后续参数的（python.exe launcher.py……）
+            # 沿用当前目录，否则解释器会在自己的 Scripts 目录里找 launcher.py。
+            return argv, (str(head.parent) if len(argv) == 1 else ""), source
+        return argv, "", source
+    repo = repo_launcher_cmd()
+    if repo is None:
+        return None
+    argv, cwd = repo
+    return argv, cwd, "仓库内的 launcher.py"
+
+
+def headless_command(argv: list[str]) -> list[str]:
+    """把用户给的启动命令补成无头模式；用户自己写了参数就不覆盖。"""
+    cmd = list(argv)
+    if "--headless" not in cmd:
+        cmd.append("--headless")
+    if "--idle-exit" not in cmd:
+        cmd += ["--idle-exit", str(HEADLESS_IDLE_SECONDS)]
+    return cmd
+
+
+def describe_idle(cmd: list[str]) -> str:
+    """按真正下发给服务的值说话：说"15 分钟"而用户给的是 25 秒就是骗人。"""
+    limit = HEADLESS_IDLE_SECONDS
+    if "--idle-exit" in cmd:
+        try:
+            limit = float(cmd[cmd.index("--idle-exit") + 1])
+        except (IndexError, ValueError):
+            return "闲置退出时间按你给的命令，脚本不清楚"
+    if limit <= 0:
+        return "常驻运行，不会自动退出"
+    if limit % 60 == 0:
+        return f"闲置 {int(limit) // 60} 分钟后自动退出"
+    return f"闲置 {int(limit)} 秒后自动退出"
+
+
+def spawn_headless_service(argv: list[str], cwd: str) -> int:
+    """把服务丢到后台跑，脚本不等它——窗口、托盘、浏览器都不该出现。"""
+    cmd = headless_command(argv)
+    popen_kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if cwd:
+        popen_kwargs["cwd"] = cwd
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+    return subprocess.Popen(cmd, **popen_kwargs).pid
+
+
+def wait_for_service(timeout: float) -> str | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        base = probe_service()
+        if base:
+            return base
+        time.sleep(1.0)
+    return None
+
+
+def find_service(server_cmd: str = "") -> str:
+    """找到本机服务；没在跑就按用户给过的命令后台拉起来。
+
+    这一层是"甩链接就能拿到字幕稿"的关键：agent 不该因为用户没先双击 exe 就停下来。
+    """
+    base = probe_service()
+    if base:
+        return base
+
+    resolved = resolve_server_cmd(server_cmd)
+    if resolved is None:
+        die(
+            "本机 8000-8019 端口没有发现 VideoToNo 服务，也不知道该怎么启动它。\n"
+            "请向用户要一次便携版 exe 的完整路径（只需一次，之后会自动记住并后台拉起），"
+            '本次带上：--server-cmd "<……VideoToNo-portable.exe>"；'
+            f"也可以设环境变量 {SERVER_CMD_ENV}，或由用户自己启动 VideoToNo。\n"
+            f"（记住的路径存在 {server_cmd_file()}）"
+        )
+    argv, cwd, source = resolved
+    cmd = headless_command(argv)
+
+    print(f"[VideoToNo] 本机没有发现服务，正在后台启动（命令来源：{source}）…", flush=True)
+    try:
+        pid = spawn_headless_service(argv, cwd)
+    except OSError as exc:
+        die(
+            f"启动服务失败：{exc}\n"
+            "请用 --server-cmd 重新指一次便携版 exe 的完整路径，或让用户自己启动 VideoToNo。"
+        )
+    if source == "--server-cmd":
+        save_server_cmd(server_cmd.strip())
+
+    base = wait_for_service(SERVICE_STARTUP_WAIT_SECONDS)
+    if base is None:
+        # 后台进程的 stdout/stderr 都接到了空设备，它要是当场退出就一句话都不会留下，
+        # 所以这里必须给一条能自己看到原因的命令。
+        die(
+            f"已发出启动命令（PID {pid}），但 {SERVICE_STARTUP_WAIT_SECONDS} 秒内没等到服务就绪。\n"
+            "便携版第一次启动要先解压自身，可能还要再等一会儿；稍后重跑本命令即可复用它。\n"
+            f"想看它到底为什么起不来，就在 VideoToNo 的目录里前台跑一遍：{' '.join(cmd)}\n"
+            "打包版的日志在 exe 同级目录的 workspace/_app.log（该目录不可写时在 "
+            "%LOCALAPPDATA%/VideoToNo/workspace/_app.log）。"
+        )
+    print(f"[VideoToNo] 服务已就绪：{base}（PID {pid}，后台无头运行，{describe_idle(cmd)}）")
+    return base
 
 
 def pick_saved_channel(base: str) -> dict | None:
@@ -253,6 +452,14 @@ def main() -> None:
     parser.add_argument("--screenshot-interval", type=int, default=30)
     parser.add_argument("--wait", type=int, default=1800, help="最长等待秒数（默认 1800）")
     parser.add_argument("--out", default=None, help="把笔记写入该 Markdown 文件")
+    parser.add_argument(
+        "--server-cmd",
+        default="",
+        help=(
+            "本机服务没在跑时用它拉起服务：便携版 exe 的完整路径，或形如 "
+            f'"python launcher.py"。给一次会记住（{SERVER_CMD_ENV} 环境变量等效）'
+        ),
+    )
     args = parser.parse_args()
 
     if args.provider and args.provider not in PROVIDERS:
@@ -269,7 +476,7 @@ def main() -> None:
             "去掉这些参数，或去掉 --transcript-only 改走笔记模式。"
         )
 
-    base = find_service()
+    base = find_service(args.server_cmd)
     print(f"[VideoToNo] 服务已连接：{base}")
 
     source_path = Path(args.source)
