@@ -218,7 +218,7 @@ The MCP server automatically scans ports 8000–8019 to locate a running VideoTo
 <details>
 <summary>🧩 Agent Skill (advanced)</summary>
 
-Besides MCP, VideoToNo also ships an **Agent Skill** (`skills/video-to-note/`) for skill-capable coding agents such as Claude Code and pi: the agent reads `SKILL.md`, then drives the bundled script through the full flow — submit a task, stream progress, and fetch the finished note. **Start VideoToNo first**; like MCP, tasks run through the local backend.
+Besides MCP, VideoToNo also ships an **Agent Skill** (`skills/video-to-note/`) for skill-capable coding agents such as Claude Code and pi: the agent reads `SKILL.md`, then drives the bundled script through the full flow — submit a task, stream progress, and fetch the finished note. **If the local service isn't running, the script starts it in the background** (no window, no tray icon, exits on its own after 15 idle minutes); you only tell the agent where the portable exe lives, once. Tasks still run through the local backend, same as MCP.
 
 ### Install
 
@@ -243,7 +243,7 @@ go deep on XXX, merge what repeats, add background the video skipped,
 and save the result as notes.md: https://www.bilibili.com/video/BV1xx
 ```
 
-The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the result. The second phrasing takes the `--transcript-only` route: no API key on this machine, and everything after the transcript — judgement, additions, structure — is the agent's call, so the instruction does not need to be precise. Common options: `--transcript-only` (timestamped transcript only, no LLM call), `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
+The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port (starting the service if none answers), submits the task, streams runtime logs, and prints (or saves) the result. The second phrasing takes the `--transcript-only` route: no API key on this machine, and everything after the transcript — judgement, additions, structure — is the agent's call, so the instruction does not need to be precise. Common options: `--transcript-only` (timestamped transcript only, no LLM call), `--style detailed|faithful|concise`, `--wait seconds`, `--out file`, `--server-cmd "<path to the portable exe>"` (how to start the service when it's down; remembered after the first time); a local video file path works as input too.
 
 > **When the agent has its own model, prefer `--transcript-only`**: that route never calls an LLM, so it needs no API key and the agent keeps full control over note structure and style. Only the finished-note route needs an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`. If this machine has a saved key for exactly one endpoint address (web page **Save to this machine** or the MCP `save_llm_config` tool), omit them and that channel is reused.
 

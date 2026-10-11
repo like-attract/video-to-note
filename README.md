@@ -218,7 +218,7 @@ MCP server 会自动扫描 8000–8019 端口来找到已运行的 VideoToNo 服
 <details>
 <summary>🧩 Agent Skill（进阶）</summary>
 
-除了 MCP，VideoToNo 也提供 **Agent Skill**（`skills/video-to-note/`），供 Claude Code、pi 等支持技能的编码类 agent 使用：agent 读取 `SKILL.md` 后，会自动调用本仓库附带的脚本完成「提交任务 → 轮询进度 → 取回笔记」全流程。**使用前请先启动 VideoToNo**，与 MCP 相同，任务由本地后端执行。
+除了 MCP，VideoToNo 也提供 **Agent Skill**（`skills/video-to-note/`），供 Claude Code、pi 等支持技能的编码类 agent 使用：agent 读取 `SKILL.md` 后，会自动调用本仓库附带的脚本完成「提交任务 → 轮询进度 → 取回笔记」全流程。**本机服务没在跑时脚本会自己后台把它拉起来**（不开界面、不进托盘，闲置一刻钟自动退出），第一次只需告诉 agent 便携版 exe 放在哪；任务与 MCP 相同，都由本地后端执行。
 
 ### 安装
 
@@ -242,7 +242,7 @@ C:\Users\<用户名>\.agents\skills\video-to-note\        # pi / 通用约定
 重复的合并，视频没讲清的地方补充背景，最后存成 notes.md：https://www.bilibili.com/video/BV1xx
 ```
 
-agent 会调用技能附带的 `scripts/video_note.py`，自动探测服务端口、提交任务、实时打印运行日志，完成后输出（或保存）结果。后一种说法会走 `--transcript-only` 取原料，本机不需要任何 API Key，拿到文字稿之后的取舍、补背景、换结构都由 agent 自己完成，提示词不必写得很具体。常用参数：`--transcript-only`（只要带时间轴转录，不调用大模型）、`--style detailed|faithful|concise`、`--wait 秒数`、`--out 文件路径`；本地视频文件路径也可直接作为输入。
+agent 会调用技能附带的 `scripts/video_note.py`，自动探测服务端口（不通就后台拉起）、提交任务、实时打印运行日志，完成后输出（或保存）结果。后一种说法会走 `--transcript-only` 取原料，本机不需要任何 API Key，拿到文字稿之后的取舍、补背景、换结构都由 agent 自己完成，提示词不必写得很具体。常用参数：`--transcript-only`（只要带时间轴转录，不调用大模型）、`--style detailed|faithful|concise`、`--wait 秒数`、`--out 文件路径`、`--server-cmd "<便携版 exe 路径>"`（服务没在跑时用它启动，给一次会记住）；本地视频文件路径也可直接作为输入。
 
 > **agent 自带模型时优先用 `--transcript-only`**：这条路线完全不调用大模型，因此不需要 API Key，转录到的内容由 agent 自己组织成笔记，不受内置笔记模板约束。只有需要一份现成成品笔记时才走 `--style`，而那需要大模型 API Key：agent 会向你要，用 `--provider` / `--api-key` 传入；若本机只为一个接口地址保存过 Key（网页端「保存到本机」或 MCP 的 `save_llm_config`），省略这些参数即可直接复用，不需要再传。
 
