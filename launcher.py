@@ -7,6 +7,10 @@
   - 无控制台窗口，服务启动后驻留系统托盘
   - 托盘菜单：打开界面 / 查看日志 / 退出
   - 日志写入工作目录的 _app.log
+
+无头模式（`--headless`，两种模式都可用，主要给 agent 后台拉起服务用）：
+  - 不开浏览器、不建托盘图标
+  - 默认闲置 15 分钟且没有在建任务时自己退出（`--idle-exit 秒` 调整，0 表示常驻）
 """
 
 from __future__ import annotations
@@ -22,15 +26,18 @@ import time
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend import update_check
 from backend.update_check import GITHUB_LATEST_RELEASE_API, version_tuple
 
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
+# 无头实例没人能点"退出"，靠闲置收摊；比一次转写短就会把服务提前关掉，给足余量
+DEFAULT_IDLE_EXIT_SECONDS = 900.0
+IDLE_POLL_SECONDS = 5.0
 APP_NAME = f"VideoToNo v{VERSION}"
 
 
@@ -152,6 +159,77 @@ def wait_healthy(
             return True
         time.sleep(0.2)
     return False
+
+
+# --------------------------------------------------------------------------
+# 无头模式（agent 在后台拉起服务，没有界面也没有托盘）
+# --------------------------------------------------------------------------
+
+def read_headless_options(argv: list[str]) -> tuple[bool, float]:
+    """取 `--headless` 与 `--idle-exit 秒`；其余参数照旧忽略。
+
+    双击便携版 exe 的人不会带参数，误写参数的人也不该被启动器拒之门外。
+    """
+    headless = "--headless" in argv
+    limit = DEFAULT_IDLE_EXIT_SECONDS
+    if "--idle-exit" in argv:
+        index = argv.index("--idle-exit") + 1
+        try:
+            limit = max(0.0, float(argv[index]))
+        except (IndexError, ValueError):
+            limit = DEFAULT_IDLE_EXIT_SECONDS
+    return headless, limit
+
+
+def backend_activity() -> tuple[float, bool]:
+    """读后端自己记的"距上次本机请求多久"与"有没有在建任务"。"""
+    from backend import main as backend_main
+
+    return backend_main.idle_seconds(), backend_main.has_active_task()
+
+
+def idle_watchdog(
+    server: Any,
+    idle_limit: float,
+    activity: Callable[[], tuple[float, bool]] | None = None,
+    poll_seconds: float | None = None,
+) -> int:
+    """无人再用时退出；`idle_limit <= 0` 表示常驻。
+
+    探测必须走进程内函数而不是健康检查——本函数自己发的请求会把空闲时间刷成 0，
+    于是闲置的服务永远不退，变成用户找不到的孤儿进程。
+    """
+    probe = activity or backend_activity
+    sleep_seconds = poll_seconds or IDLE_POLL_SECONDS
+    while not getattr(server, "should_exit", False):
+        try:
+            time.sleep(sleep_seconds)
+        except KeyboardInterrupt:
+            break
+        if idle_limit > 0:
+            try:
+                idle_seconds, busy = probe()
+            except Exception:
+                continue  # 探测不出结果就当还有人用，宁可多活一轮
+            if idle_seconds >= idle_limit and not busy:
+                print(f"闲置 {int(idle_seconds)} 秒且无在建任务，无头实例退出", flush=True)
+                break
+    server.should_exit = True
+    return 0
+
+
+def run_headless(url: str, workspace: Path, port: int, idle_limit: float) -> int:
+    print(
+        f"VideoToNo v{VERSION} 无头启动：{url}"
+        f"（闲置 {int(idle_limit)} 秒后自动退出，日志：{workspace / '_app.log'}）",
+        flush=True,
+    )
+    server, _ = start_server(port)
+    if not wait_healthy(url, mode=RUN_MODE, version=VERSION):
+        server.should_exit = True
+        print(f"服务在 {START_TIMEOUT_SECONDS} 秒内未就绪，已退出", flush=True)
+        return 1
+    return idle_watchdog(server, idle_limit)
 
 
 # --------------------------------------------------------------------------
@@ -322,8 +400,10 @@ def main() -> int:
 
         return child_main()
     configure_runtime_dirs()
+    headless, idle_limit = read_headless_options(sys.argv[1:])
     workspace = Path(os.environ["VIDEOTONOTES_WORKSPACE"])
-    no_browser = os.environ.get("VIDEOTONOTES_NO_BROWSER") == "1"
+    # 无头模式没有界面可开，环境变量也不必用户操心
+    no_browser = os.environ.get("VIDEOTONOTES_NO_BROWSER") == "1" or headless
 
     try:
         port = find_available_port()
@@ -340,6 +420,8 @@ def main() -> int:
         return 0
 
     if not is_frozen():
+        if headless:
+            return run_headless(url, workspace, port, idle_limit)
         return run_console(url, workspace, port)
 
     # ---- 打包模式 ----
@@ -350,6 +432,9 @@ def main() -> int:
             server.should_exit = True
             show_error(f"服务启动超时，请查看日志：{log_path}")
             return 1
+        if headless:
+            print(f"VideoToNo v{VERSION} 无头启动: {url}", flush=True)
+            return idle_watchdog(server, idle_limit)
         if not no_browser:
             webbrowser.open(url)
         return run_tray(url, workspace, server)

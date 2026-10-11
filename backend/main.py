@@ -138,7 +138,7 @@ NOTE_IMAGE_REF_RE = re.compile(
     rf"(!\[[^\]]*\]\()\./(?:{FRAMES_DIR_NAME}|images)/([^)]+)\)"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.4.5")
+app = FastAPI(title="VideoToNo API", version="1.4.6")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -217,6 +217,7 @@ class LocalSecurityMiddleware:
                 message["headers"] = headers
             await send(message)
 
+        touch_request()
         await self.app(scope, receive, wrapped_send)
 
 
@@ -224,6 +225,25 @@ app.add_middleware(LocalSecurityMiddleware)
 
 
 _STARTED_MONO = time.monotonic()
+_LAST_REQUEST_MONO = _STARTED_MONO
+# 与 main.py 里"任务被打断"的判定用同一组状态，别在这里另立一套口径
+_ACTIVE_TASK_STATUSES = {"pending", "queued", "processing", "cancelling"}
+
+
+def touch_request() -> None:
+    """记一次"有人在用"。无头实例的闲置退出只看这个值，见 launcher.idle_watchdog。"""
+    global _LAST_REQUEST_MONO
+    _LAST_REQUEST_MONO = time.monotonic()
+
+
+def idle_seconds() -> float:
+    """距离最后一个本机请求过了多久；一次请求都没有时，从服务启动算起。"""
+    return max(0.0, time.monotonic() - _LAST_REQUEST_MONO)
+
+
+def has_active_task() -> bool:
+    """是否有还在跑的任务——界面关了但转写没完时，绝不能收摊。"""
+    return any(task.get("status") in _ACTIVE_TASK_STATUSES for task in tasks.values())
 _LAST_BACKEND_ERRORS: deque[str] = deque(maxlen=5)
 
 

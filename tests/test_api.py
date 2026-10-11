@@ -126,7 +126,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.4.5"
+    assert health.json()["version"] == "1.4.6"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -153,6 +153,30 @@ def test_health_and_frontend_are_served() -> None:
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200
     assert favicon.headers["content-type"].startswith("image/x-icon")
+
+
+def test_any_local_request_counts_as_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无头实例靠"还有没有人请求"决定收摊，这个计数由安全中间件顺手记下来。
+
+    闲置判定若漏掉任何一条本机请求，agent 后台拉起的服务就会在用户还在用时自己关掉。
+    """
+    monkeypatch.setattr(main, "_LAST_REQUEST_MONO", time.monotonic() - 9999)
+    assert main.idle_seconds() > 9000
+
+    TestClient(main.app).get("/api/health")
+
+    assert main.idle_seconds() < 60
+
+
+def test_has_active_task_only_counts_inflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """已完成的记录留在内存里，不能把闲置的服务钉成永远不退出。"""
+    monkeypatch.setattr(
+        main, "tasks", {"a": {"status": "completed"}, "b": {"status": "failed"}}
+    )
+    assert not main.has_active_task()
+
+    monkeypatch.setattr(main, "tasks", {"a": {"status": "completed"}, "b": {"status": "processing"}})
+    assert main.has_active_task()
 
 
 def test_missing_frontend_page_explains_itself() -> None:
