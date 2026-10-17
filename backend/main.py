@@ -84,7 +84,9 @@ from .douyin_login import DouyinLoginManager
 from .transcript import (
     TranscriptSegment,
     format_timestamp,
+    parse_subtitle_payload,
     segments_to_prompt,
+    segments_to_srt,
     transcript_quality,
 )
 from .video_processor import (
@@ -135,6 +137,12 @@ ALLOWED_MEDIA_SUFFIXES = {
     ".webm",
     ".avi",
 }
+# 字幕导入只吃带时间轴的这两种：解析器现成（transcript._parse_timed_text），
+# 且时间戳是真的，不会像纯文本那样逼着后端编一排假时间码进产物。
+# 体积上限单独给一份——三小时的 .srt 也就几百 KB，跟着媒体的 2GB 走等于没设。
+ALLOWED_SUBTITLE_SUFFIXES = {".srt", ".vtt"}
+MAX_SUBTITLE_MB = int(os.getenv("MAX_SUBTITLE_MB", "20"))
+MAX_SUBTITLE_BYTES = MAX_SUBTITLE_MB * 1024 * 1024
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo", "belle-turbo-zh"}
 ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"}
 DOUYIN_HINT = (
@@ -876,6 +884,10 @@ async def submit_video_task(
         tasks[task_id] = new_task(task_id=task_id)
         tasks[task_id]["uploaded_file_path"] = uploaded_task.get("uploaded_file_path")
         tasks[task_id]["uploaded_filename"] = uploaded_task.get("uploaded_filename")
+        if uploaded_task.get("subtitle_import"):
+            tasks[task_id]["subtitle_import"] = True
+            # 字幕导入没有媒体可抽帧：勾选状态在这里就否掉，别留到第 5 步再报"没有视频"
+            request.include_screenshots = False
     else:
         if request.video_url:
             try:
@@ -977,12 +989,13 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
 
 @app.get("/api/task/{task_id}/transcript")
 async def get_task_transcript(
-    task_id: str, output_format: Literal["json", "markdown"] = "json"
+    task_id: str, output_format: Literal["json", "markdown", "srt"] = "json"
 ) -> dict[str, Any]:
     """取该任务的带时间轴转录（`segments` 的时间单位是秒）。
 
     只看转录产物在不在，不看任务状态：即便笔记在第 6 步失败，已完成的转录
-    照样能取走，不必重跑。`markdown` 返回人读版整篇文本，`json` 返回分段。
+    照样能取走，不必重跑。`markdown` 返回人读版整篇文本，`json` 返回分段，
+    `srt` 返回可直接进播放器的 SubRip 正文（与 `markdown` 同一种 JSON 包裹契约）。
     """
     try:
         directory = task_directory(task_id)
@@ -1017,6 +1030,25 @@ async def get_task_transcript(
         }
 
     segments = payload.get("segments") or []
+
+    if output_format == "srt":
+        return {
+            "task_id": task_id,
+            "title": title,
+            "format": "srt",
+            "text": segments_to_srt(
+                [
+                    TranscriptSegment(
+                        float(item.get("start") or 0),
+                        float(item.get("end") or 0),
+                        str(item.get("text") or ""),
+                    )
+                    for item in segments
+                    if isinstance(item, dict)
+                ]
+            ),
+        }
+
     return {
         "task_id": task_id,
         "title": title,
@@ -1403,6 +1435,8 @@ async def health_check() -> dict[str, Any]:
         "llm_key_storage": secret_box.storage_backend(),
         # 前端上传上限跟随本机配置，不再自己写死一个数字
         "max_upload_mb": MAX_UPLOAD_MB,
+        # 字幕导入单独一个上限：提示语要说"最大 20 MB 的字幕"，不能拿媒体的 2GB 去说
+        "max_subtitle_mb": MAX_SUBTITLE_MB,
         "dependencies": {
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
@@ -1658,13 +1692,18 @@ async def upload_video(
 ) -> dict[str, str]:
     filename = Path(file.filename or "upload.bin").name
     suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_MEDIA_SUFFIXES:
+    is_subtitle = suffix in ALLOWED_SUBTITLE_SUFFIXES
+    if not is_subtitle and suffix not in ALLOWED_MEDIA_SUFFIXES:
         raise HTTPException(status_code=415, detail="不支持的媒体文件类型")
+    byte_limit = MAX_SUBTITLE_BYTES if is_subtitle else MAX_UPLOAD_BYTES
+    limit_mb = MAX_SUBTITLE_MB if is_subtitle else MAX_UPLOAD_MB
 
     task_id = str(uuid.uuid4())
     task_dir = WORKSPACE_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=False)
-    file_path = task_dir / f"input{suffix}"
+    # 字幕刻意不落成 input.*：本地媒体与「复用转录」都靠 input.* 找媒体文件，
+    # 字幕混进那个 glob 会让之后的「从头处理」去 ffprobe 一份 .srt。
+    file_path = task_dir / (f"subtitle{suffix}" if is_subtitle else f"input{suffix}")
     wants_screenshots = (include_screenshots or "").strip().lower() in {
         "1", "true", "yes"
     }
@@ -1673,10 +1712,10 @@ async def upload_video(
         async with aiofiles.open(file_path, "wb") as destination:
             while chunk := await file.read(1024 * 1024):
                 written += len(chunk)
-                if written > MAX_UPLOAD_BYTES:
+                if written > byte_limit:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"上传文件超过大小限制（上限 {MAX_UPLOAD_MB} MB）",
+                        detail=f"上传文件超过大小限制（上限 {limit_mb} MB）",
                     )
                 await destination.write(chunk)
     except Exception:
@@ -1684,6 +1723,9 @@ async def upload_video(
         raise
     finally:
         await file.close()
+
+    if is_subtitle:
+        return await register_subtitle_upload(task_id, task_dir, file_path, filename)
 
     log_lines: list[str] = [f"文件已上传：{filename}"]
     # 大视频且不需要截图时：提取音频、删除原视频，减少工作目录体积
@@ -1722,6 +1764,44 @@ async def upload_video(
     write_upload_manifest(task_id, filename)
     persist_task_runtime(task_id)
     return {"task_id": task_id, "file_path": str(file_path), "filename": filename}
+
+
+async def register_subtitle_upload(
+    task_id: str, task_dir: Path, path: Path, filename: str
+) -> dict[str, str]:
+    """把一份字幕落成一个「转录已经完成」的任务，后面直接从生成笔记那步起跑。
+
+    读不出内容就地报错，而不是等任务跑到第 4 步才发现——上传是同步的，用户还对着
+    那个文件选择框，这时候说「这份字幕里没有带时间轴的文本」才来得及换一份。
+    """
+    try:
+        segments = parse_subtitle_payload(
+            path.read_text(encoding="utf-8-sig", errors="replace"),
+            path.suffix.lower().lstrip("."),
+        )
+    except (OSError, ValueError):
+        segments = []
+    if not segments:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=415,
+            detail="这份字幕里没有读到任何带时间轴的文本，请确认是 .srt / .vtt 且内容非空",
+        )
+    await write_transcript_files(
+        task_id, segments, {"language": "unknown", "source": "subtitle_import"}
+    )
+    tasks[task_id] = new_task(status="uploaded", task_id=task_id)
+    tasks[task_id].update(
+        uploaded_filename=filename,
+        subtitle_import=True,
+        logs=[
+            f"字幕已导入：{filename}，共 {len(segments)} 条",
+            f"时间轴到 {format_timestamp(segments[-1].end)}，跳过下载与转写",
+        ],
+    )
+    write_upload_manifest(task_id, filename)
+    persist_task_runtime(task_id)
+    return {"task_id": task_id, "file_path": str(path), "filename": filename}
 
 
 @app.get("/api/image/{task_id}/{filename}")
@@ -1920,6 +2000,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         )
         resume_task_id = task.get("resume_task_id")
         resume_dir = task_directory(resume_task_id) if resume_task_id else None
+        # 字幕导入与「复用转录」共用这条缝：转录已经在盘上了，第 1~4 步整体跳过。
+        # 差别只在从哪个目录读——导入读的是本任务自己的目录（上传当场落好的）。
+        transcript_dir = (
+            task_directory(task_id) if task.get("subtitle_import") else resume_dir
+        )
         source_url = request.video_url or (source_url_from_task(resume_dir) if resume_dir else None)
         uploaded_path = task.get("uploaded_file_path")
         if not uploaded_path and resume_dir:
@@ -1932,12 +2017,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             video_processor.detect_source(source_url) if source_url else VideoSource.LOCAL
         )
         cookie = douyin_cookie if source_kind == VideoSource.DOUYIN else bili_cookie
-        transcript_result = load_transcript_result(resume_dir) if resume_dir else None
+        transcript_result = load_transcript_result(transcript_dir) if transcript_dir else None
         bili_pages_to_transcribe: list = []
 
         if transcript_result:
             set_progress(task, 1, "恢复任务信息", 8, "正在读取已有任务信息")
-            info = load_reused_video_info(resume_dir, transcript_result, source_url)
+            info = load_reused_video_info(transcript_dir, transcript_result, source_url)
         else:
             media_input = uploaded_path or source_url or ""
             set_progress(task, 1, "读取视频信息", 8, "正在读取视频信息")
@@ -1959,9 +2044,14 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         if transcript_result:
             set_progress(task, 4, "复用转录", 48, "已读取已有转录，跳过字幕、音频和 Whisper")
-            task["logs"].append(
-                f"复用任务 {resume_task_id} 的 {len(transcript_result['segments'])} 个转录分段"
-            )
+            if task.get("subtitle_import"):
+                task["logs"].append(
+                    f"已使用导入的字幕：{len(transcript_result['segments'])} 条（跳过下载与转写）"
+                )
+            else:
+                task["logs"].append(
+                    f"复用任务 {resume_task_id} 的 {len(transcript_result['segments'])} 个转录分段"
+                )
         elif request.prefer_subtitles and not is_local:
             set_progress(task, 2, "查找平台字幕", 16, "正在查找平台字幕")
             subtitle = await video_processor.fetch_subtitles(source_url or "", info, cookie)

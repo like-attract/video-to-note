@@ -600,11 +600,133 @@ def test_summarize_rejects_upload_task_already_consumed_or_unknown(
     )
 
 
+IMPORT_SRT = """1
+00:00:00,500 --> 00:00:03,240
+今天我们讲梯度下降
+
+2
+00:00:03,240 --> 00:01:05,500
+先从一维的例子开始
+"""
+
+
+def post_subtitle(client: TestClient, filename: str = "机器学习第一讲.srt", text: str = IMPORT_SRT):
+    return client.post(
+        "/api/upload",
+        files={"file": (filename, text.encode("utf-8"), "application/octet-stream")},
+    )
+
+
+def test_upload_imports_srt_as_a_finished_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """导入一份字幕 = 转录已经完成的上传任务：不下载、不抽音频、不转写。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+    upload = post_subtitle(TestClient(main.app))
+
+    assert upload.status_code == 200
+    task_id = upload.json()["task_id"]
+    task_dir = tmp_path / task_id
+    # 落地名不能是 input.*：本地媒体与复用转录都靠 input.* 找媒体，混进去会让
+    # 之后的「从头处理」去 ffprobe 一份 .srt
+    assert (task_dir / "subtitle.srt").is_file()
+    assert not list(task_dir.glob("input.*"))
+    payload = json.loads((task_dir / "transcript.json").read_text(encoding="utf-8"))
+    assert payload["source"] == "subtitle_import"
+    assert payload["segments"] == [
+        {"start": 0.5, "end": 3.24, "text": "今天我们讲梯度下降"},
+        {"start": 3.24, "end": 65.5, "text": "先从一维的例子开始"},
+    ]
+    task = main.tasks[task_id]
+    assert task["status"] == "uploaded"
+    assert task["subtitle_import"] is True
+    assert any("字幕已导入" in line for line in task["logs"])
+
+
+def test_upload_rejects_a_subtitle_without_timed_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """读不出带时间轴的文本要当场说清，并且不许留下半个任务目录。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+
+    response = post_subtitle(TestClient(main.app), text="这就是几行普通文字，没有时间码\n第二行\n")
+
+    assert response.status_code == 415
+    assert "带时间轴" in response.json()["detail"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_subtitle_import_skips_download_and_transcription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """字幕导入跑完整任务：第 1~4 步一个都不该碰，标题取字幕文件名。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+    captured: list = []
+
+    async def fake_run(task_id, request):
+        captured.append(request)
+
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    client = TestClient(main.app)
+    upload_task_id = post_subtitle(client).json()["task_id"]
+    submit = client.post(
+        "/api/summarize",
+        json={
+            "upload_task_id": upload_task_id,
+            "include_screenshots": True,
+            "llm_config": {"model_type": "deepseek", "api_key": "test-key"},
+        },
+    )
+    assert submit.status_code == 200
+    request = captured[0]
+    # 没有媒体可抽帧：勾选状态在提交处就被否掉，不留到第 5 步再报"没有视频"
+    assert request.include_screenshots is False
+    assert main.tasks[upload_task_id]["subtitle_import"] is True
+
+    async def never_called(*args, **kwargs):
+        raise AssertionError("字幕导入不该再碰下载/转写这条链")
+
+    processor = VideoProcessor(tmp_path)
+    processor.get_video_info = never_called
+    processor.fetch_subtitles = never_called
+    processor.fetch_bilibili_subtitles = never_called
+    processor.extract_audio = never_called
+    monkeypatch.setattr(main, "video_processor", processor)
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 笔记正文"
+
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    await main.process_video_task(upload_task_id, request)
+
+    task = main.tasks[upload_task_id]
+    assert task["status"] == "completed", task.get("error")
+    assert task["result"]["title"] == "机器学习第一讲"
+    assert any("已使用导入的字幕：2 条" in line for line in task["logs"])
+    assert not any("复用任务 None" in line for line in task["logs"])
+    assert (tmp_path / upload_task_id / "notes.md").is_file()
+
+
 def test_health_reports_upload_limit_for_the_frontend(monkeypatch) -> None:
     """前端不再自己写死 500MB：本机上限只能由健康接口下发。"""
     monkeypatch.setattr(main, "MAX_UPLOAD_MB", 1536)
+    monkeypatch.setattr(main, "MAX_SUBTITLE_MB", 64)
     response = TestClient(main.app).get("/api/health")
     assert response.json()["max_upload_mb"] == 1536
+    # 字幕导入的提示语要跟媒体上限分开说，否则用户以为 20MB 的字幕也能塞进 2GB
+    assert response.json()["max_subtitle_mb"] == 64
 
 
 def test_summarize_accepts_douyin_url_and_does_not_front_reject(
@@ -2740,6 +2862,44 @@ def test_transcript_endpoint_returns_segments_and_text(tmp_path, monkeypatch) ->
     assert as_markdown.json()["text"].startswith("# 带时间戳转录")
     assert as_markdown.json()["title"] == ""
     assert client.get("/api/task/t1/transcript?output_format=bogus").status_code == 422
+
+
+def test_transcript_endpoint_serves_srt_one_cue_per_segment(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRT 与 json 版要逐条对得上：序号从 1 起、不并段、时间码按 SubRip 标准写。
+
+    Issue #4 点名了这类格式最容易写错的四件事（小时从 0 还是 1 起、毫秒补零、
+    逗号还是点、停顿处要不要并段），所以这里整篇比对而不是抽查。
+    """
+    task_dir = tmp_path / "srt-case"
+    task_dir.mkdir(parents=True)
+    (task_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "language": "zh",
+                "source": "platform_subtitle",
+                "segments": [
+                    {"start": 0.5, "end": 3.24, "text": "第一段"},
+                    {"start": 3.24, "end": 65.5, "text": "第二段"},
+                    {"start": 3661.7, "end": 3665.0, "text": "第三段"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+
+    body = TestClient(main.app).get("/api/task/srt-case/transcript?output_format=srt").json()
+
+    assert body["format"] == "srt"
+    assert body["text"] == (
+        "1\r\n00:00:00,500 --> 00:00:03,240\r\n第一段\r\n"
+        "\r\n2\r\n00:00:03,240 --> 00:01:05,500\r\n第二段\r\n"
+        "\r\n3\r\n01:01:01,700 --> 01:01:05,000\r\n第三段\r\n"
+    )
 
 
 def test_transcript_endpoint_serves_tasks_that_failed_after_transcribing(

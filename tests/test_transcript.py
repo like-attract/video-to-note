@@ -9,6 +9,7 @@ from backend.transcript import (
     merge_segment_lines,
     parse_subtitle_payload,
     segments_to_prompt,
+    segments_to_srt,
     transcript_quality,
 )
 
@@ -51,6 +52,37 @@ def test_prompt_uses_real_segment_timestamps() -> None:
     prompt = segments_to_prompt([TranscriptSegment(65, 72, "有时间依据的内容")])
     assert prompt == "[01:05-01:12] 有时间依据的内容"
     assert format_timestamp(3_661) == "01:01:01"
+
+
+def test_srt_writes_standard_timecodes_one_cue_per_segment() -> None:
+    """导出的 SRT 整篇比对：序号从 1 起、毫秒补零、跨小时进小时位、不并段。"""
+    srt = segments_to_srt(
+        [
+            TranscriptSegment(0.5, 3.24, "第一段"),
+            TranscriptSegment(3.24, 65.5, "第二段"),
+            TranscriptSegment(3_661.7, 3_665, "第三段"),
+        ]
+    )
+
+    assert srt == (
+        "1\r\n00:00:00,500 --> 00:00:03,240\r\n第一段\r\n"
+        "\r\n2\r\n00:00:03,240 --> 00:01:05,500\r\n第二段\r\n"
+        "\r\n3\r\n01:01:01,700 --> 01:01:05,000\r\n第三段\r\n"
+    )
+
+
+def test_exported_srt_round_trips_through_the_subtitle_parser() -> None:
+    """导出的 SRT 必须能被本项目自己的字幕解析器原样读回。
+
+    这一条同时钉住两件事：写出的时间码是播放器认的写法（解析器就是按播放器
+    口径写的），以及导出与导入互为逆运算、不会在往返里丢内容或错位。
+    """
+    segments = [
+        TranscriptSegment(0.5, 3.24, "今天我们讲梯度下降"),
+        TranscriptSegment(3_661.7, 3_665.0, "跨过一整小时"),
+    ]
+
+    assert parse_subtitle_payload(segments_to_srt(segments), "srt") == segments
 
 
 def test_chunking_keeps_segment_boundaries() -> None:

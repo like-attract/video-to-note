@@ -98,7 +98,7 @@
             </div>
         </section>
 
-        <section class="config-section" aria-labelledby="recognitionTitle">
+        <section class="config-section" id="recognitionSection" aria-labelledby="recognitionTitle">
             <h2 id="recognitionTitle">识别设置</h2>
             <div class="pipeline-note">
                 <span class="pipeline-index">1</span>
@@ -247,6 +247,7 @@
                     <select id="sourceType">
                         <option value="url">视频链接</option>
                         <option value="local">本地文件</option>
+                        <option value="subtitle">字幕文件</option>
                     </select>
                 </label>
                 <label id="urlField" class="field source-input-field">
@@ -255,7 +256,7 @@
                 </label>
                 <label id="fileField" class="file-picker" hidden>
                     <input type="file" id="localFile" accept="video/*,audio/*">
-                    <span>选择媒体文件</span>
+                    <span id="filePickerLabel">选择媒体文件</span>
                 </label>
                 <button id="submitBtn" class="button primary submit-button" type="button">
                     <span class="button-spinner" aria-hidden="true"></span>
@@ -375,6 +376,7 @@
                     <label class="sr-only" for="formatSelect">下载格式</label>
                     <select id="formatSelect">
                         <option value="markdown">Markdown 文件</option>
+                        <option value="srt">字幕 (.srt)</option>
                         <option value="html">HTML</option>
                         <option value="json">JSON</option>
                         <option value="txt">纯文本</option>
@@ -414,6 +416,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261003-4"></script>
+<script src="script.js?v=20261017-1"></script>
 </body>
 </html>

@@ -121,8 +121,15 @@ const LEGACY_PROVIDER_MAP = {
 let currentTaskId = null;
 // 上传上限以本机后端 /api/health 下发为准；后端未就绪时按这个回退（与后端默认值一致）
 const DEFAULT_MAX_UPLOAD_MB = 2048;
+const DEFAULT_MAX_SUBTITLE_MB = 20;
 let maxUploadBytes = DEFAULT_MAX_UPLOAD_MB * 1024 * 1024;
 let maxUploadLabel = `${DEFAULT_MAX_UPLOAD_MB / 1024} GB`;
+// 字幕导入的上限同样只由 /api/health 下发（跟媒体上限不是一个数）
+let maxSubtitleBytes = DEFAULT_MAX_SUBTITLE_MB * 1024 * 1024;
+let maxSubtitleLabel = `${DEFAULT_MAX_SUBTITLE_MB} MB`;
+const MEDIA_ACCEPT = 'video/*,audio/*';
+const SUBTITLE_ACCEPT = '.srt,.vtt';
+const SUBTITLE_NAME_RE = /\.(srt|vtt)$/i;
 let currentMarkdown = '';
 let currentHtml = '';
 // 后端下发的下载名（含视频标题与 B 站分 P 名），空串时回退成时间戳名
@@ -186,11 +193,11 @@ async function loadAppVersion() {
             const port = window.location.port ? ` · 端口 ${window.location.port}` : '';
             byId('appVersion').textContent = `v${data.version}${port}`;
         }
-        applyUploadLimit(data.max_upload_mb);
+        applyUploadLimit(data.max_upload_mb, data.max_subtitle_mb);
         applyMcpAccess(data.dependencies?.mcp_sse);
     } catch {
         // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
-        applyUploadLimit(null);
+        applyUploadLimit(null, null);
     }
 }
 
@@ -254,14 +261,18 @@ async function copyTextToClipboard(text, successLabel) {
     }
 }
 
-function applyUploadLimit(maxUploadMb) {
+function applyUploadLimit(maxUploadMb, maxSubtitleMb) {
     const mb = Number(maxUploadMb) > 0 ? Math.floor(Number(maxUploadMb)) : DEFAULT_MAX_UPLOAD_MB;
     maxUploadBytes = mb * 1024 * 1024;
     maxUploadLabel = mb >= 1024 && mb % 1024 === 0 ? `${mb / 1024} GB` : `${mb} MB`;
-    const fileInfo = byId('fileInfo');
-    if (fileInfo) {
-        fileInfo.textContent = `支持 B 站/抖音等视频链接与最大 ${maxUploadLabel} 的本地视频`;
-    }
+    const subtitleMb = Number(maxSubtitleMb) > 0
+        ? Math.floor(Number(maxSubtitleMb))
+        : DEFAULT_MAX_SUBTITLE_MB;
+    maxSubtitleBytes = subtitleMb * 1024 * 1024;
+    maxSubtitleLabel = `${subtitleMb} MB`;
+    // 提示语统一由 updateFileInfo 出：上限数字以前在两个函数里各写一份，
+    // 后端放到 2GB 时前端那份还留在 500MB
+    updateFileInfo();
 }
 
 function bindEvents() {
@@ -533,6 +544,9 @@ async function openRecentTask(taskId) {
         if (task.source_url) {
             byId('sourceType').value = 'url';
             byId('videoUrl').value = task.source_url;
+        } else if (SUBTITLE_NAME_RE.test(task.uploaded_filename || '')) {
+            // 字幕导入的任务落地时不改名，后缀就是"这条是导入的"唯一凭据
+            byId('sourceType').value = 'subtitle';
         } else if (task.uploaded_filename) {
             byId('sourceType').value = 'local';
         }
@@ -1348,13 +1362,27 @@ function getSelectedModelConfig() {
     };
 }
 
+// 「有文件、没链接」的两种来源：本地媒体与导入字幕。多处 !== 'local' 判的其实是这个
+function fileSourceSelected() {
+    return byId('sourceType').value === 'local' || byId('sourceType').value === 'subtitle';
+}
+
+function subtitleSourceSelected() {
+    return byId('sourceType').value === 'subtitle';
+}
+
 function toggleSourceType() {
-    const isLocal = byId('sourceType').value === 'local';
-    byId('urlField').hidden = isLocal;
-    byId('fileField').hidden = !isLocal;
+    const isSubtitle = subtitleSourceSelected();
+    const hasFile = fileSourceSelected();
+    byId('urlField').hidden = hasFile;
+    byId('fileField').hidden = !hasFile;
+    byId('localFile').accept = isSubtitle ? SUBTITLE_ACCEPT : MEDIA_ACCEPT;
+    byId('filePickerLabel').textContent = isSubtitle ? '选择字幕文件' : '选择媒体文件';
+    // 字幕导入既没有媒体可抽帧，也没有 Whisper 可用：整块识别设置留着只会让人以为还要选模型
+    byId('recognitionSection').hidden = isSubtitle;
     updateFileInfo();
     updateBiliHint();
-    if (isLocal) {
+    if (hasFile) {
         hideBiliPagesPanel();
     } else {
         scheduleBiliPagesPreview();
@@ -1430,7 +1458,10 @@ function hasBiliCredentials() {
 // 1) 明显走平台字幕、用不到 Whisper 的提交不弹；
 // 2) 已确认过一次下载的模型长期不再弹（localStorage 记忆；下拉框仍保留“未缓存”提示）。
 function taskWillLikelyUseSubtitles(request) {
-    if (!request || request.sourceType === 'local') return false;
+    if (!request) return false;
+    // 导入的字幕本身就是转录，这条路永远不会碰 Whisper：不能弹"要下载模型吗"
+    if (request.sourceType === 'subtitle') return true;
+    if (request.sourceType === 'local') return false;
     if (isBilibiliUrl(request.videoUrl) && hasBiliCredentials()) return true;
     if (isDouyinUrl(request.videoUrl) && douyinCookies) return true;
     return false;
@@ -1447,9 +1478,10 @@ function rememberWhisperDownloadConfirm(modelId) {
 
 function updateBiliHint(forceShow = false) {
     const value = byId('videoUrl').value.trim();
-    const notLocal = byId('sourceType').value !== 'local';
-    const isBili = notLocal && isBilibiliUrl(value);
-    const isDouyin = notLocal && isDouyinUrl(value);
+    // 切到文件类来源时链接框只是藏起来、值还在，不判这一条会给字幕导入弹 B 站凭据提示
+    const hasUrl = !fileSourceSelected();
+    const isBili = hasUrl && isBilibiliUrl(value);
+    const isDouyin = hasUrl && isDouyinUrl(value);
     const hint = byId('biliHint');
     const actions = byId('biliHintActions');
     const biliScanButton = byId('biliHintScanBtn');
@@ -1510,8 +1542,9 @@ function scheduleBiliPagesPreview() {
 }
 
 async function loadBiliPagesPanel() {
-    const notLocal = byId('sourceType').value !== 'local';
-    const normalized = notLocal ? normalizeVideoInput(byId('videoUrl').value) : null;
+    const normalized = fileSourceSelected()
+        ? null
+        : normalizeVideoInput(byId('videoUrl').value);
     if (!normalized || !isBilibiliUrl(normalized)) {
         hideBiliPagesPanel();
         return;
@@ -1811,14 +1844,22 @@ function stopDouyinLoginPolling() {
 }
 
 function updateFileInfo() {
-    if (byId('sourceType').value !== 'local') {
-        byId('fileInfo').textContent = '支持常见视频链接；平台字幕可用时优先读取';
+    const fileInfo = byId('fileInfo');
+    if (!fileInfo) return;
+    const file = byId('localFile').files[0];
+    if (subtitleSourceSelected()) {
+        fileInfo.textContent = file
+            ? `${file.name} · ${formatBytes(file.size)}`
+            : `支持 .srt / .vtt，单个文件不超过 ${maxSubtitleLabel}；导入后直接生成笔记，不再下载与转写`;
         return;
     }
-    const file = byId('localFile').files[0];
-    byId('fileInfo').textContent = file
+    if (!fileSourceSelected()) {
+        fileInfo.textContent = `支持 B 站/抖音等视频链接与最大 ${maxUploadLabel} 的本地视频`;
+        return;
+    }
+    fileInfo.textContent = file
         ? `${file.name} · ${formatBytes(file.size)}`
-        : '支持常见视频格式，单个文件不超过 2 GB；大文件未勾选截图时自动只保留音频'
+        : `支持常见视频格式，单个文件不超过 ${maxUploadLabel}；大文件未勾选截图时自动只保留音频`;
 }
 
 function toggleScreenshotSettings() {
@@ -2029,16 +2070,18 @@ async function startSummary(options = {}) {
     }
 
     resetTaskView();
-    setSubmitting(true, request.sourceType === 'local' ? '正在上传' : '正在提交');
+    const isFileSource = request.sourceType === 'local' || request.sourceType === 'subtitle';
+    setSubmitting(true, isFileSource ? '正在上传' : '正在提交');
 
     try {
         const videoUrl = request.videoUrl;
         let uploadTaskId = null;
 
-        if (request.sourceType === 'local' && !resumeTaskId) {
-            addLog('正在上传本地视频');
-            // 仅转录不会走截图阶段，上传时就不必让后端保留视频轨
-            const wantScreenshots = !request.transcriptOnly && byId('includeScreenshots').checked;
+        if (isFileSource && !resumeTaskId) {
+            addLog(request.sourceType === 'subtitle' ? '正在上传字幕文件' : '正在上传本地视频');
+            // 仅转录不会走截图阶段，上传时就不必让后端保留视频轨；字幕导入没有媒体可截
+            const wantScreenshots = request.sourceType !== 'subtitle'
+                && !request.transcriptOnly && byId('includeScreenshots').checked;
             const uploadResult = await uploadLocalFile(request.file, wantScreenshots);
             // 文件位置由 upload_task_id 的任务记录携带；video_url 只放网络链接
             uploadTaskId = uploadResult.task_id;
@@ -2092,11 +2135,16 @@ function validateAndBuildRequestBase(resumeTaskId = null) {
         }
     }
 
-    if (sourceType === 'local') {
+    if (sourceType === 'local' || sourceType === 'subtitle') {
+        const isSubtitle = sourceType === 'subtitle';
         const file = byId('localFile').files[0];
         if (resumeTaskId) return { sourceType, file: null, videoUrl: '', modelConfig, transcriptOnly };
-        if (!file) return validationError('请选择本地视频文件');
-        if (file.size > maxUploadBytes) return validationError(`文件不能超过 ${maxUploadLabel}`);
+        if (!file) {
+            return validationError(isSubtitle ? '请选择字幕文件（.srt / .vtt）' : '请选择本地视频文件');
+        }
+        if (file.size > (isSubtitle ? maxSubtitleBytes : maxUploadBytes)) {
+            return validationError(`文件不能超过 ${isSubtitle ? maxSubtitleLabel : maxUploadLabel}`);
+        }
         return { sourceType, file, videoUrl: '', modelConfig, transcriptOnly };
     }
 
@@ -2713,6 +2761,10 @@ async function downloadSummary() {
         await downloadMarkdownFile();
         return;
     }
+    if (format === 'srt') {
+        await downloadSrtFile();
+        return;
+    }
 
     let htmlSource = currentHtml || currentMarkdown;
     if (format === 'html' && htmlSource.includes(`${API_BASE}/image/`)) {
@@ -2879,6 +2931,31 @@ async function downloadMarkdownFile() {
             /\.zip$/i.test(filename) ? '笔记与截图已打包下载，解压后 .md 里才显示截图' : '下载已开始',
             'success'
         );
+    } catch (error) {
+        showToast(`下载失败：${error.message}`, 'error');
+    } finally {
+        setDownloading(false);
+    }
+}
+
+// SRT 的时间轴只有后端那份分段里才有毫秒精度（transcript.md 的时间戳是整秒），
+// 所以和 Markdown 一样走服务端给正文，前端只落成文件。
+async function downloadSrtFile() {
+    if (!currentTaskId) return validationError('没有可下载的任务');
+    setDownloading(true);
+    try {
+        const response = await fetch(
+            `${API_BASE}/task/${encodeURIComponent(currentTaskId)}/transcript?output_format=srt`,
+            { cache: 'no-store' }
+        );
+        const data = await readResponse(response, '导出字幕失败');
+        if (typeof data.text !== 'string') throw new Error('后端未返回字幕正文');
+        triggerBlobDownload(
+            new Blob([data.text], { type: 'application/x-subrip;charset=utf-8' }),
+            '.srt',
+            noteFileName('.srt')
+        );
+        showToast('下载已开始', 'success');
     } catch (error) {
         showToast(`下载失败：${error.message}`, 'error');
     } finally {

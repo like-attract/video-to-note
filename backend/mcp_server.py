@@ -521,7 +521,7 @@ async def get_transcript(task_id: str, output_format: str = "markdown") -> dict[
     Args:
         task_id: 任务 ID（transcribe_video 提交的，或历史笔记任务的）。
         output_format: markdown=整篇人读版（每行 `[MM:SS-MM:SS] 正文`）/
-            json=分段数组（时间为秒）。
+            json=分段数组（时间为秒）/ srt=SubRip 字幕正文（可直接落盘进播放器）。
     """
     return await _get_backend().get_transcript(task_id, output_format)
 
