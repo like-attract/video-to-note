@@ -222,6 +222,43 @@ def test_html_entry_is_no_store_and_assets_no_cache() -> None:
         assert response.headers["cache-control"] == "no-cache"
 
 
+def test_frontend_assets_survive_a_broken_os_mime_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """操作系统把 .js 的类型说错时，界面不能整体失活。
+
+    Windows 上 mimetypes 优先读注册表 HKCR\\<扩展名> 的 "Content Type"，某些软件会
+    把 .js 写成 text/plain；本服务带 nosniff，类型一错浏览器就拒绝执行脚本，用户看到
+    的是"页面正常但按钮全废、主题锁死暗色"，且只在注册表被动过的那台机器上出现。
+    自己资源的类型由代码钉死，不交给操作系统猜。
+    """
+    import starlette.responses
+
+    monkeypatch.setattr(
+        starlette.responses, "guess_type", lambda *args, **kwargs: ("text/plain", None)
+    )
+    client = TestClient(main.app)
+    for asset in ("/script.js", "/theme-bootstrap.js", "/vendor/marked-18.0.9.umd.js"):
+        response = client.get(asset)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/javascript"), asset
+    assert client.get("/style.css").headers["content-type"].startswith("text/css")
+    # 入口页的 no-store 判的是钉完类型之后的头，顺序被挪走这条就会红
+    page = client.get("/")
+    assert page.headers["content-type"].startswith("text/html")
+    assert page.headers["cache-control"] == "no-store"
+
+    # 重校验命中 304 时也要带上正确类型：浏览器会用这次响应的头覆盖缓存里那份，
+    # 否则已经存下 text/plain 的缓存条目靠 304 能一直坏下去。
+    fresh = client.get("/script.js")
+    stale = client.get(
+        "/script.js",
+        headers={"if-none-match": fresh.headers["etag"]},
+    )
+    assert stale.status_code == 304
+    assert stale.headers["content-type"].startswith("text/javascript")
+
+
 def test_remote_clients_are_rejected() -> None:
     """纯 ASGI 安全中间件：非回环客户端一律 403（桌面应用仅本机可访问）。"""
     client = TestClient(main.app, client=("203.0.113.9", 4321))

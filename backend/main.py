@@ -32,6 +32,18 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
+# 自己的前端资源不能让操作系统决定类型：Windows 上 mimetypes 先读注册表
+# HKCR\<扩展名> 的 "Content Type"，某些软件会把 .js 写成 text/plain，配上本服务的
+# nosniff，浏览器直接拒绝执行脚本——页面照常渲染、按钮全废、主题锁死在暗色，
+# 且只在注册表被动过的那台机器上出现（本机复现见 dev-notes/frontend.md）。
+STATIC_MEDIA_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+}
+
+
 class NoCacheStaticFiles(StaticFiles):
     """前端静态资源每次都重新校验，避免浏览器缓存旧版本。
 
@@ -39,8 +51,14 @@ class NoCacheStaticFiles(StaticFiles):
     页面元素对不上、按钮全部"点了没反应"，因此入口页不允许任何缓存。
     """
 
-    def file_response(self, *args: Any, **kwargs: Any) -> FileResponse:
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
         response = super().file_response(*args, **kwargs)
+        suffix = os.path.splitext(str(args[0]))[1].lower() if args else ""
+        media_type = STATIC_MEDIA_TYPES.get(suffix)
+        if media_type is not None:
+            # 304 也要带：浏览器重校验后用这里的头覆盖已缓存那份的头，
+            # 否则缓存里那条 text/plain 会靠一次次 304 一直续命。
+            response.headers["Content-Type"] = media_type
         if response.headers.get("content-type", "").startswith("text/html"):
             response.headers["Cache-Control"] = "no-store"
         else:
