@@ -2538,6 +2538,59 @@ def test_unhandled_error_handler_survives_redaction_failure(
     assert "后端内部错误" in response.json()["detail"]
 
 
+def test_scanned_bili_cookies_are_saved_on_the_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫码成功必须顺手落本机：以前网页端从来没有这一步，用户每次开页面都得重扫一遍。
+
+    存不上也不该把这次登录判失败——cookie 已经在手里，至少这一趟在页面上要能用。
+    """
+    manager = bili_login.BiliLoginManager(
+        tmp_path, save_cookies=main.save_scanned_bili_credentials
+    )
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    session = bili_login.BiliLoginSession(
+        browser_path="msedge.exe",
+        profile_dir=tmp_path / "_bili_profile",
+        cdp_port=9333,
+        started_at=time.time(),
+    )
+    manager.session = session
+
+    manager._mark_ready(
+        session,
+        {"sessdata": "abcdefghijklmnop1234", "bili_jct": "j1", "buvid3": "b1"},
+        "登录成功",
+    )
+
+    assert session.state == "ready" and session.saved is True
+    status = TestClient(main.app).get("/api/bili-credentials").json()
+    assert ConfigStore(tmp_path).load_bili_credentials() == {
+        "sessdata": "abcdefghijklmnop1234",
+        "bili_jct": "j1",
+        "buvid3": "b1",
+    }
+    # 状态视图只给掩码、全程不解密（换机器解不开时这个端点仍然有得报）
+    assert "abcdefghijklmnop1234" not in json.dumps(status)
+    assert status["saved"] is True and status["sessdata_masked"]
+
+    def broken(_cookies: dict[str, str]) -> None:
+        raise RuntimeError("本机加密不可用")
+
+    failing = bili_login.BiliLoginManager(tmp_path, save_cookies=broken)
+    late = bili_login.BiliLoginSession(
+        browser_path="msedge.exe",
+        profile_dir=tmp_path / "_bili_profile",
+        cdp_port=9334,
+        started_at=time.time(),
+    )
+    failing.session = late
+    failing._mark_ready(late, {"sessdata": "s2"}, "登录成功")
+
+    assert late.state == "ready" and late.cookies == {"sessdata": "s2"}
+    assert late.saved is False and "加密" in late.save_error
+
+
 def test_free_cdp_port_survives_winsock_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Winsock 被系统级问题拖垮时返回"没有可用端口"，而不是把裸 OSError 漏成 500。"""
 

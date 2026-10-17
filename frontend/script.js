@@ -160,6 +160,7 @@ document.addEventListener('DOMContentLoaded', () => {
     safeStep(applyServiceState, '显示本机服务地址');
     safeStep(applyMcpAccess, '初始化 MCP 接入信息');
     loadAppVersion();
+    refreshBiliSavedState();
     loadRecentTasks(true);
     // 启动自检更新：晚几秒再发，别跟首屏请求抢路；失败静默，托盘里有手动入口
     window.setTimeout(runStartupUpdateCheck, 2500);
@@ -1451,6 +1452,8 @@ function hasBiliCredentials() {
         byId('sessdata').value.trim()
         || byId('biliJct').value.trim()
         || byId('buvid3').value.trim()
+        // 本机存过也算有：后端在请求没带 cookie 时会自己读那份（load_bili_credentials）
+        || biliSavedMask
     );
 }
 
@@ -1715,10 +1718,13 @@ function formatPageDuration(seconds) {
 }
 
 let biliLoginTimer = null;
+// 本机存过 B 站凭据的掩码（空串 = 没存过）。任务在后端会自己兜住这份，页面不需要一直持有
+let biliSavedMask = '';
 
 function initBiliLogin() {
     bindListener('biliLoginBtn', 'click', startBiliLogin);
     bindListener('biliLoginCancelBtn', 'click', cancelBiliLogin);
+    bindListener('biliClearSavedBtn', 'click', clearSavedBiliCredentials);
 }
 
 async function startBiliLogin() {
@@ -1753,8 +1759,39 @@ function fillBiliCredentials(cookies) {
     const section = byId('credentialsSection');
     section.open = true;
     section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    showToast('B 站凭据已导入并填入下方表单', 'success');
+    showToast('B 站凭据已导入', 'success');
     updateBiliHint();
+}
+
+// 后端在扫码成功那一刻就把凭据加密存了本机（见 bili_login._mark_ready）；
+// 这里只负责把"存过"显示出来，并让提示条不再劝已经存过的人去扫码
+async function refreshBiliSavedState() {
+    try {
+        const response = await fetch(`${API_BASE}/bili-credentials`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取凭据状态失败');
+        biliSavedMask = data.saved ? String(data.sessdata_masked || '已保存') : '';
+    } catch {
+        // 服务短暂不可达：不知道就当没存过，别把扫码这条路堵死
+        biliSavedMask = '';
+    }
+    const line = byId('biliSavedState');
+    line.hidden = !biliSavedMask;
+    line.textContent = biliSavedMask
+        ? `本机已存有凭据（SESSDATA ${biliSavedMask}），任务会自动使用，不用再扫`
+        : '';
+    byId('biliClearSavedBtn').hidden = !biliSavedMask;
+    updateBiliHint();
+}
+
+async function clearSavedBiliCredentials() {
+    if (!window.confirm('清除后，本机保存的 B 站凭据会被删除；这次页面里填着的还能继续用。')) return;
+    try {
+        await fetch(`${API_BASE}/bili-credentials`, { method: 'DELETE' });
+        showToast('已清除本机保存的凭据', 'success');
+    } catch (error) {
+        showToast(`清除失败：${error.message}`, 'error');
+    }
+    await refreshBiliSavedState();
 }
 
 async function pollBiliLogin() {
@@ -1765,6 +1802,10 @@ async function pollBiliLogin() {
         if (data.state === 'ready' && data.cookies) {
             stopBiliLoginPolling();
             fillBiliCredentials(data.cookies);
+            await refreshBiliSavedState();
+            if (data.save_error) {
+                showToast(`凭据没能存进本机：${data.save_error}。这次页面里照样能用，下次要再扫一次`, 'error');
+            }
             cancelBiliLogin();
         } else if (['failed', 'timeout'].includes(data.state)) {
             stopBiliLoginPolling();

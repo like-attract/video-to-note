@@ -74,6 +74,20 @@ def test_browser_side_downloads_are_named_after_the_note() -> None:
     assert SCRIPT.count("task.download_name") == 2, "打开任务与轮询完成两条路都要带上下载名"
 
 
+def test_bili_credentials_card_tells_the_machine_store_truth() -> None:
+    """B 站凭据现在扫码即自动存本机：卡片不能再写「只保留到页面关闭」，判「有没有凭据」
+    也不能只看输入框——本机存过时后端会自己兜住那份，页面不该再劝人重扫。
+
+    群测原话是「能不能让登录态保存久一点」，而本机那份一直是长期加密存的，缺的只是
+    网页端从来没写入、也从来没显示。
+    """
+    assert "凭据只保留到页面关闭" not in PAGE, "这句承诺已经过期，会把自动落盘藏起来"
+    body = SCRIPT.split("function hasBiliCredentials(", 1)[1].split("\n}\n", 1)[0]
+    assert "biliSavedMask" in body, "本机存过凭据时不能判成「没有凭据」"
+    assert "refreshBiliSavedState();" in SCRIPT, "开页面没读本机凭据状态，提示条会一直劝人扫码"
+    assert "biliClearSavedBtn" in PAGE, "自动落盘就得同时给一条清除入口"
+
+
 def test_srt_export_is_rendered_by_the_backend() -> None:
     """字幕必须由后端从分段渲染，前端不许拿手里那份 markdown 自己拼。
 

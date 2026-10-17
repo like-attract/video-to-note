@@ -406,9 +406,29 @@ def transcribe_progress_reporter(
     return report
 
 
-bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
-douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
+
+
+def save_scanned_bili_credentials(cookies: dict[str, str]) -> None:
+    """扫码拿到的 cookie 落本机（DPAPI 加密）。
+
+    群测里"能不能让 B 站登录态保存久一点"的实情不是存不长，而是网页端从来没有写进
+    本机这一步：`POST /api/bili-credentials` 只有 MCP 会调，扫码结果只回填进三个输入框，
+    刷新即空。异常由 `BiliLoginManager._mark_ready` 兜成一次告警，不把这次登录判失败。
+    """
+    config_store.save_bili_credentials(
+        {
+            "sessdata": cookies.get("sessdata", ""),
+            "bili_jct": cookies.get("bili_jct", ""),
+            "buvid3": cookies.get("buvid3", ""),
+        }
+    )
+
+
+bili_login_manager = BiliLoginManager(
+    WORKSPACE_DIR, save_cookies=save_scanned_bili_credentials
+)
+douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
 task_slots = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
