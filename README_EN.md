@@ -18,17 +18,18 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.4.2 → v1.4.5)
+## 🆕 What's New (v1.4.5 → v1.4.6)
 
-- **Long videos and small local models finish in one run far more often**: when any single model request was rejected the whole task used to fail and everything already written was lost; now just that stretch is skipped and its original text stays in the note. Local models such as ollama succeed much more often on long videos
-- **Errors say what to change**: the "token limit" hit when a small model runs a long video is now plainly the model's context window being too small, with the way to widen it — you won't be sent to change a setting that does nothing on that channel
-- **Files finally look like files**: txt / html / json / PNG exports are named after the video title, Bilibili parts carry their part number, and "transcript only" is archived separately as `title【转录】.md`; the completion line now points straight at the file you want
-- **A transcription crash no longer takes the whole app down**: transcription runs in its own process, so a faulty model library fails that one task only — the app stays running and you can retry with another model
-- **Network trouble has a self-check now**: the connection test retries without a proxy and says which side failed, and a new self-check panel in the sidebar produces a full report when the page errors
-- **You hear about new versions**: one prompt per release — update, skip this version, or dismiss
+- **Subtitles now export as `.srt`**: the export menu has a "字幕 (.srt)" entry, one cue per transcript segment, ready to drop into VLC / PotPlayer / CapCut / Premiere. The HTTP API and MCP accept `output_format=srt` too, so archiving no longer means formatting timecodes yourself
+- **Already have a subtitle file? Skip the video entirely**: the source picker has a "字幕文件" entry — hand it a `.srt` / `.vtt` and it goes straight to writing the note. Nothing is downloaded, nothing is transcribed, and the note title comes from the subtitle filename. A file with no timed text is rejected on the spot instead of halfway through the task
+- **Scan the Bilibili QR once**: credentials are now encrypted and stored on this machine automatically, the panel says so, and later sessions work without asking you to scan again — there is also a "清除本机凭据" button to undo it. Cookies typed in by hand still live only in the current page
+- **Send a link to your agent even when the app is closed**: the skill script starts a headless instance in the background (no window, no tray icon) and carries on; it exits by itself once it has been idle with no task running
+- **Fixed: on some machines "the page loads but every button is dead and dark mode is stuck"** — if you hit that, this release addresses it. The cause was that machine's own registry mislabeling script files, which made the browser refuse to run the page's JavaScript (nothing to do with app settings, and reinstalling did not help). Front-end asset types are now pinned by the app itself
 
 <details>
-<summary>Previous releases (v1.4.2 and earlier)</summary>
+<summary>Previous releases (v1.4.5 and earlier)</summary>
+
+- **v1.4.5**: long videos and small local models finish in one run far more often (a rejected request no longer discards the whole task, and fragmented ASR lines are merged before chunking); a "token limit" error now names the model's context window and what to widen; txt / html / json / PNG exports are named after the video title, Bilibili parts carry their part number and "transcript only" archives as `title【转录】.md`; transcription runs in its own process so a faulty model library fails one task instead of the app; the connection test retries without a proxy, a self-check panel was added, and startup checks for a new release with a "skip this version" choice.
 
 - **v1.4.2**: built-in model IDs moved to each vendor's current names (nothing was removed, saved profiles keep working); "connection test failed", "Bilibili returned nothing" and "the model produced no note body" now say whose problem it is and what to change; a page that won't load gives a short set of steps and shows the local port next to the version; pasting a new link resets the button to "Generate".
 
