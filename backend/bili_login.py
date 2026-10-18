@@ -5,7 +5,8 @@ app-bound 加密），因此用独立配置启动 Edge/Chrome 并开启调试端
 用户扫码登录后通过 CDP 的 Storage.getCookies 直接取回明文 cookie。
 
 登录态保存在工作目录的 _bili_profile 中，同机器后续导入无需重复登录。
-cookie 只保存在内存中，不落盘。
+管理器自己不留 cookie 副本；拿到 cookie 时交给构造时传入的 ``save_cookies`` 落本机
+（由 main 接成加密存储），没传就只放在会话里——扫码这条路不该每次都让用户重扫。
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import websockets
 
@@ -82,12 +83,35 @@ class BiliLoginSession:
     state: str = "waiting"  # waiting | ready | failed | timeout
     message: str = ""
     cookies: dict[str, str] | None = None
+    saved: bool = False
+    save_error: str = ""
 
 
 class BiliLoginManager:
-    def __init__(self, profile_root: Path) -> None:
+    def __init__(
+        self,
+        profile_root: Path,
+        save_cookies: Callable[[dict[str, str]], None] | None = None,
+    ) -> None:
         self.profile_root = profile_root
+        self.save_cookies = save_cookies
         self.session: BiliLoginSession | None = None
+
+    def _mark_ready(
+        self, session: BiliLoginSession, cookies: dict[str, str], message: str
+    ) -> None:
+        session.cookies = cookies
+        session.state = "ready"
+        session.message = message
+        if self.save_cookies is None:
+            return
+        # 扫一次码就得重扫一遍是群测里真实的抱怨：拿到就替用户存进本机。存失败不能把
+        # 这次登录判成失败——cookie 已经在手里，这一趟至少得在页面上可用。
+        try:
+            self.save_cookies(cookies)
+            session.saved = True
+        except Exception as exc:
+            session.save_error = str(exc)
 
     async def start(self) -> dict[str, Any]:
         existing = self.session
@@ -153,9 +177,7 @@ class BiliLoginManager:
                 await asyncio.sleep(1)
         if cookies:
             # 该浏览器配置已登录过，直接完成
-            self.session.cookies = cookies
-            self.session.state = "ready"
-            self.session.message = "已从上次登录恢复"
+            self._mark_ready(self.session, cookies, "已从上次登录恢复")
             asyncio.create_task(self.cancel())
         return self._describe()
 
@@ -234,6 +256,9 @@ class BiliLoginManager:
             "cookies": session.cookies,
             "message": session.message,
             "browser": os.path.basename(session.browser_path),
+            # 前端据此决定是报"已存本机，下次不用再扫"还是提醒存不下来
+            "saved": session.saved,
+            "save_error": session.save_error,
         }
 
     async def status(self) -> dict[str, Any]:
@@ -261,9 +286,7 @@ class BiliLoginManager:
             return self._describe()
 
         if cookies:
-            session.cookies = cookies
-            session.state = "ready"
-            session.message = "登录成功"
+            self._mark_ready(session, cookies, "登录成功")
             asyncio.create_task(self.cancel())
         return self._describe()
 

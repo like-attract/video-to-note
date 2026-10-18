@@ -16,16 +16,27 @@ description: Generate structured, timestamped Markdown notes from videos (Bilibi
 
 你自己就有模型可以写笔记时，**优先走转录路线**：本机只负责取字幕或离线转写，写作由你完成，不用向用户索要 Key，也不会被套进固定的笔记模板。
 
-## 第 0 步：确认服务在运行
+## 第 0 步：服务不在就让它自己起来
 
-服务监听 `127.0.0.1` 的 8000-8019 中的一个端口。逐个探测健康检查：
+脚本先扫 `127.0.0.1` 的 8000-8019；**端口全不通时它不会让你去启动软件**，而是自己后台拉起一个无头服务（不开浏览器、不进托盘、不占桌面），等它健康再往下走。它按这个顺序找"服务怎么启动"：
+
+1. 本次命令带的 `--server-cmd "<便携版 exe 路径>"`（也接受 `python launcher.py` 这类命令）
+2. 环境变量 `VIDEOTONOTES_SERVER_CMD`
+3. 上一次 `--server-cmd` 给过的路径（记在 `%LOCALAPPDATA%\VideoToNo\skill-server-cmd.txt`）
+4. 技能脚本仍在 VideoToNo 仓库里时，直接用当前 Python 起 `launcher.py`
+
+四条都没有 → 脚本退出并说清缺什么。这时向用户要一次 exe 的位置（"VideoToNo 那个程序放在哪个目录？"），带上 `--server-cmd` 重跑；**给过这一次就不用再问**。
+
+无头实例闲置 15 分钟且没有在建任务时自己退出（要常驻就让它带 `--idle-exit 0`）；日志在 exe 同级目录的 `workspace/_app.log`。第一次拉起会多花几秒（打包版还要先解压自身），那不是卡死。
+
+想手动确认服务在不在，健康检查照旧可用：
 
 ```bash
 curl -s --max-time 2 http://127.0.0.1:8000/api/health
 # 期望返回 {"status":"ok","service":"VideoToNo",...}
 ```
 
-全部端口不通时：请用户启动 VideoToNo（便携版 exe，或源码目录执行 `python launcher.py`），启动后重试。不要替用户猜端口以外的地址。
+服务已在运行时（用户自己双击了 exe，或跑的是界面版），脚本直接复用它，不会起第二个。
 
 ## 推荐方式：用附带脚本一条命令完成
 
@@ -37,13 +48,14 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
 python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件路径>" --style detailed --wait 1800
 ```
 
-脚本会自动：探测服务端口 → （本地文件先上传）→ 提交任务 → 轮询进度（实时打印运行日志）→ 输出完整 Markdown。
+脚本会自动：探测服务端口（不通就后台拉起）→（本地文件先上传）→ 提交任务 → 轮询进度（实时打印运行日志）→ 输出完整 Markdown。
 
 - `--transcript-only`：只做到转录为止，不调用大模型；此模式**默认复用同链接已有的转录**（秒回），加 `--no-reuse` 才强制重新转写
 - `--style`：`detailed`（翔实+点评，默认）/ `faithful`（忠实复原）/ `concise`（精简摘要）
 - `--wait`：最长等待秒数，默认 1800；长视频（>30 分钟）建议加大
 - `--out <path.md>`：把结果写入文件（不加则打印到 stdout）
-- 服务未运行、API Key 未配置、任务失败时都会给出明确的中文提示，按提示向用户询问即可
+- `--server-cmd "<便携版 exe 路径>"`：本机服务没在跑时用它后台拉起，给一次会记住；也可写 `python launcher.py` 这类命令
+- 找不到启动命令、API Key 未配置、任务失败时都会给出明确的中文提示，按提示向用户询问即可
 
 ## 需要用户提供的信息
 

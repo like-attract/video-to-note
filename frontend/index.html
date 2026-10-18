@@ -23,7 +23,7 @@
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
-                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.5</span></h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.6</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
@@ -98,7 +98,7 @@
             </div>
         </section>
 
-        <section class="config-section" aria-labelledby="recognitionTitle">
+        <section class="config-section" id="recognitionSection" aria-labelledby="recognitionTitle">
             <h2 id="recognitionTitle">识别设置</h2>
             <div class="pipeline-note">
                 <span class="pipeline-index">1</span>
@@ -140,12 +140,14 @@
 
         <details id="credentialsSection" class="config-section collapsible-section">
             <summary>B 站访问凭据（可选）</summary>
-            <p class="section-note">仅在公开访问受限时填写。凭据只保留到页面关闭。</p>
+            <p class="section-note">仅在公开访问受限时填写。扫码导入的凭据会自动加密存进本机，下次打开直接能用；手填的那份只在这次页面里有效。</p>
             <div class="bili-login-row">
                 <button id="biliLoginBtn" class="button secondary" type="button">扫码登录导入</button>
                 <button id="biliLoginCancelBtn" class="button ghost" type="button" hidden>取消</button>
+                <button id="biliClearSavedBtn" class="button ghost" type="button" hidden>清除本机凭据</button>
                 <span id="biliLoginStatus" class="bili-login-status"></span>
             </div>
+            <p class="section-note" id="biliSavedState" hidden></p>
             <label class="field">
                 <span>SESSDATA</span>
                 <input type="password" id="sessdata" autocomplete="off">
@@ -247,6 +249,7 @@
                     <select id="sourceType">
                         <option value="url">视频链接</option>
                         <option value="local">本地文件</option>
+                        <option value="subtitle">字幕文件</option>
                     </select>
                 </label>
                 <label id="urlField" class="field source-input-field">
@@ -255,7 +258,7 @@
                 </label>
                 <label id="fileField" class="file-picker" hidden>
                     <input type="file" id="localFile" accept="video/*,audio/*">
-                    <span>选择媒体文件</span>
+                    <span id="filePickerLabel">选择媒体文件</span>
                 </label>
                 <button id="submitBtn" class="button primary submit-button" type="button">
                     <span class="button-spinner" aria-hidden="true"></span>
@@ -375,6 +378,7 @@
                     <label class="sr-only" for="formatSelect">下载格式</label>
                     <select id="formatSelect">
                         <option value="markdown">Markdown 文件</option>
+                        <option value="srt">字幕 (.srt)</option>
                         <option value="html">HTML</option>
                         <option value="json">JSON</option>
                         <option value="txt">纯文本</option>
@@ -414,6 +418,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261003-4"></script>
+<script src="script.js?v=20261017-2"></script>
 </body>
 </html>

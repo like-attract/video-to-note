@@ -126,7 +126,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.4.5"
+    assert health.json()["version"] == "1.4.6"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -153,6 +153,30 @@ def test_health_and_frontend_are_served() -> None:
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200
     assert favicon.headers["content-type"].startswith("image/x-icon")
+
+
+def test_any_local_request_counts_as_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无头实例靠"还有没有人请求"决定收摊，这个计数由安全中间件顺手记下来。
+
+    闲置判定若漏掉任何一条本机请求，agent 后台拉起的服务就会在用户还在用时自己关掉。
+    """
+    monkeypatch.setattr(main, "_LAST_REQUEST_MONO", time.monotonic() - 9999)
+    assert main.idle_seconds() > 9000
+
+    TestClient(main.app).get("/api/health")
+
+    assert main.idle_seconds() < 60
+
+
+def test_has_active_task_only_counts_inflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """已完成的记录留在内存里，不能把闲置的服务钉成永远不退出。"""
+    monkeypatch.setattr(
+        main, "tasks", {"a": {"status": "completed"}, "b": {"status": "failed"}}
+    )
+    assert not main.has_active_task()
+
+    monkeypatch.setattr(main, "tasks", {"a": {"status": "completed"}, "b": {"status": "processing"}})
+    assert main.has_active_task()
 
 
 def test_missing_frontend_page_explains_itself() -> None:
@@ -196,6 +220,43 @@ def test_html_entry_is_no_store_and_assets_no_cache() -> None:
         response = client.get(asset)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-cache"
+
+
+def test_frontend_assets_survive_a_broken_os_mime_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """操作系统把 .js 的类型说错时，界面不能整体失活。
+
+    Windows 上 mimetypes 优先读注册表 HKCR\\<扩展名> 的 "Content Type"，某些软件会
+    把 .js 写成 text/plain；本服务带 nosniff，类型一错浏览器就拒绝执行脚本，用户看到
+    的是"页面正常但按钮全废、主题锁死暗色"，且只在注册表被动过的那台机器上出现。
+    自己资源的类型由代码钉死，不交给操作系统猜。
+    """
+    import starlette.responses
+
+    monkeypatch.setattr(
+        starlette.responses, "guess_type", lambda *args, **kwargs: ("text/plain", None)
+    )
+    client = TestClient(main.app)
+    for asset in ("/script.js", "/theme-bootstrap.js", "/vendor/marked-18.0.9.umd.js"):
+        response = client.get(asset)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/javascript"), asset
+    assert client.get("/style.css").headers["content-type"].startswith("text/css")
+    # 入口页的 no-store 判的是钉完类型之后的头，顺序被挪走这条就会红
+    page = client.get("/")
+    assert page.headers["content-type"].startswith("text/html")
+    assert page.headers["cache-control"] == "no-store"
+
+    # 重校验命中 304 时也要带上正确类型：浏览器会用这次响应的头覆盖缓存里那份，
+    # 否则已经存下 text/plain 的缓存条目靠 304 能一直坏下去。
+    fresh = client.get("/script.js")
+    stale = client.get(
+        "/script.js",
+        headers={"if-none-match": fresh.headers["etag"]},
+    )
+    assert stale.status_code == 304
+    assert stale.headers["content-type"].startswith("text/javascript")
 
 
 def test_remote_clients_are_rejected() -> None:
@@ -539,11 +600,133 @@ def test_summarize_rejects_upload_task_already_consumed_or_unknown(
     )
 
 
+IMPORT_SRT = """1
+00:00:00,500 --> 00:00:03,240
+今天我们讲梯度下降
+
+2
+00:00:03,240 --> 00:01:05,500
+先从一维的例子开始
+"""
+
+
+def post_subtitle(client: TestClient, filename: str = "机器学习第一讲.srt", text: str = IMPORT_SRT):
+    return client.post(
+        "/api/upload",
+        files={"file": (filename, text.encode("utf-8"), "application/octet-stream")},
+    )
+
+
+def test_upload_imports_srt_as_a_finished_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """导入一份字幕 = 转录已经完成的上传任务：不下载、不抽音频、不转写。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+    upload = post_subtitle(TestClient(main.app))
+
+    assert upload.status_code == 200
+    task_id = upload.json()["task_id"]
+    task_dir = tmp_path / task_id
+    # 落地名不能是 input.*：本地媒体与复用转录都靠 input.* 找媒体，混进去会让
+    # 之后的「从头处理」去 ffprobe 一份 .srt
+    assert (task_dir / "subtitle.srt").is_file()
+    assert not list(task_dir.glob("input.*"))
+    payload = json.loads((task_dir / "transcript.json").read_text(encoding="utf-8"))
+    assert payload["source"] == "subtitle_import"
+    assert payload["segments"] == [
+        {"start": 0.5, "end": 3.24, "text": "今天我们讲梯度下降"},
+        {"start": 3.24, "end": 65.5, "text": "先从一维的例子开始"},
+    ]
+    task = main.tasks[task_id]
+    assert task["status"] == "uploaded"
+    assert task["subtitle_import"] is True
+    assert any("字幕已导入" in line for line in task["logs"])
+
+
+def test_upload_rejects_a_subtitle_without_timed_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """读不出带时间轴的文本要当场说清，并且不许留下半个任务目录。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+
+    response = post_subtitle(TestClient(main.app), text="这就是几行普通文字，没有时间码\n第二行\n")
+
+    assert response.status_code == 415
+    assert "带时间轴" in response.json()["detail"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_subtitle_import_skips_download_and_transcription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """字幕导入跑完整任务：第 1~4 步一个都不该碰，标题取字幕文件名。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+    monkeypatch.setattr(main, "running_jobs", {})
+    captured: list = []
+
+    async def fake_run(task_id, request):
+        captured.append(request)
+
+    monkeypatch.setattr(main, "run_queued_video_task", fake_run)
+    client = TestClient(main.app)
+    upload_task_id = post_subtitle(client).json()["task_id"]
+    submit = client.post(
+        "/api/summarize",
+        json={
+            "upload_task_id": upload_task_id,
+            "include_screenshots": True,
+            "llm_config": {"model_type": "deepseek", "api_key": "test-key"},
+        },
+    )
+    assert submit.status_code == 200
+    request = captured[0]
+    # 没有媒体可抽帧：勾选状态在提交处就被否掉，不留到第 5 步再报"没有视频"
+    assert request.include_screenshots is False
+    assert main.tasks[upload_task_id]["subtitle_import"] is True
+
+    async def never_called(*args, **kwargs):
+        raise AssertionError("字幕导入不该再碰下载/转写这条链")
+
+    processor = VideoProcessor(tmp_path)
+    processor.get_video_info = never_called
+    processor.fetch_subtitles = never_called
+    processor.fetch_bilibili_subtitles = never_called
+    processor.extract_audio = never_called
+    monkeypatch.setattr(main, "video_processor", processor)
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, *args, **kwargs):
+            return "# 笔记正文"
+
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    await main.process_video_task(upload_task_id, request)
+
+    task = main.tasks[upload_task_id]
+    assert task["status"] == "completed", task.get("error")
+    assert task["result"]["title"] == "机器学习第一讲"
+    assert any("已使用导入的字幕：2 条" in line for line in task["logs"])
+    assert not any("复用任务 None" in line for line in task["logs"])
+    assert (tmp_path / upload_task_id / "notes.md").is_file()
+
+
 def test_health_reports_upload_limit_for_the_frontend(monkeypatch) -> None:
     """前端不再自己写死 500MB：本机上限只能由健康接口下发。"""
     monkeypatch.setattr(main, "MAX_UPLOAD_MB", 1536)
+    monkeypatch.setattr(main, "MAX_SUBTITLE_MB", 64)
     response = TestClient(main.app).get("/api/health")
     assert response.json()["max_upload_mb"] == 1536
+    # 字幕导入的提示语要跟媒体上限分开说，否则用户以为 20MB 的字幕也能塞进 2GB
+    assert response.json()["max_subtitle_mb"] == 64
 
 
 def test_summarize_accepts_douyin_url_and_does_not_front_reject(
@@ -2355,6 +2538,59 @@ def test_unhandled_error_handler_survives_redaction_failure(
     assert "后端内部错误" in response.json()["detail"]
 
 
+def test_scanned_bili_cookies_are_saved_on_the_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫码成功必须顺手落本机：以前网页端从来没有这一步，用户每次开页面都得重扫一遍。
+
+    存不上也不该把这次登录判失败——cookie 已经在手里，至少这一趟在页面上要能用。
+    """
+    manager = bili_login.BiliLoginManager(
+        tmp_path, save_cookies=main.save_scanned_bili_credentials
+    )
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    session = bili_login.BiliLoginSession(
+        browser_path="msedge.exe",
+        profile_dir=tmp_path / "_bili_profile",
+        cdp_port=9333,
+        started_at=time.time(),
+    )
+    manager.session = session
+
+    manager._mark_ready(
+        session,
+        {"sessdata": "abcdefghijklmnop1234", "bili_jct": "j1", "buvid3": "b1"},
+        "登录成功",
+    )
+
+    assert session.state == "ready" and session.saved is True
+    status = TestClient(main.app).get("/api/bili-credentials").json()
+    assert ConfigStore(tmp_path).load_bili_credentials() == {
+        "sessdata": "abcdefghijklmnop1234",
+        "bili_jct": "j1",
+        "buvid3": "b1",
+    }
+    # 状态视图只给掩码、全程不解密（换机器解不开时这个端点仍然有得报）
+    assert "abcdefghijklmnop1234" not in json.dumps(status)
+    assert status["saved"] is True and status["sessdata_masked"]
+
+    def broken(_cookies: dict[str, str]) -> None:
+        raise RuntimeError("本机加密不可用")
+
+    failing = bili_login.BiliLoginManager(tmp_path, save_cookies=broken)
+    late = bili_login.BiliLoginSession(
+        browser_path="msedge.exe",
+        profile_dir=tmp_path / "_bili_profile",
+        cdp_port=9334,
+        started_at=time.time(),
+    )
+    failing.session = late
+    failing._mark_ready(late, {"sessdata": "s2"}, "登录成功")
+
+    assert late.state == "ready" and late.cookies == {"sessdata": "s2"}
+    assert late.saved is False and "加密" in late.save_error
+
+
 def test_free_cdp_port_survives_winsock_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Winsock 被系统级问题拖垮时返回"没有可用端口"，而不是把裸 OSError 漏成 500。"""
 
@@ -2679,6 +2915,44 @@ def test_transcript_endpoint_returns_segments_and_text(tmp_path, monkeypatch) ->
     assert as_markdown.json()["text"].startswith("# 带时间戳转录")
     assert as_markdown.json()["title"] == ""
     assert client.get("/api/task/t1/transcript?output_format=bogus").status_code == 422
+
+
+def test_transcript_endpoint_serves_srt_one_cue_per_segment(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRT 与 json 版要逐条对得上：序号从 1 起、不并段、时间码按 SubRip 标准写。
+
+    Issue #4 点名了这类格式最容易写错的四件事（小时从 0 还是 1 起、毫秒补零、
+    逗号还是点、停顿处要不要并段），所以这里整篇比对而不是抽查。
+    """
+    task_dir = tmp_path / "srt-case"
+    task_dir.mkdir(parents=True)
+    (task_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "language": "zh",
+                "source": "platform_subtitle",
+                "segments": [
+                    {"start": 0.5, "end": 3.24, "text": "第一段"},
+                    {"start": 3.24, "end": 65.5, "text": "第二段"},
+                    {"start": 3661.7, "end": 3665.0, "text": "第三段"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "tasks", {})
+
+    body = TestClient(main.app).get("/api/task/srt-case/transcript?output_format=srt").json()
+
+    assert body["format"] == "srt"
+    assert body["text"] == (
+        "1\r\n00:00:00,500 --> 00:00:03,240\r\n第一段\r\n"
+        "\r\n2\r\n00:00:03,240 --> 00:01:05,500\r\n第二段\r\n"
+        "\r\n3\r\n01:01:01,700 --> 01:01:05,000\r\n第三段\r\n"
+    )
 
 
 def test_transcript_endpoint_serves_tasks_that_failed_after_transcribing(

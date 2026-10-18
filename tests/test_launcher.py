@@ -80,3 +80,95 @@ def test_check_for_updates_opens_new_release_after_confirmation(monkeypatch) -> 
     launcher.check_for_updates()
 
     assert opened == ["https://github.com/example/release"]
+
+
+class FakeServer:
+    def __init__(self) -> None:
+        self.should_exit = False
+
+
+def test_read_headless_options() -> None:
+    assert launcher.read_headless_options([]) == (False, launcher.DEFAULT_IDLE_EXIT_SECONDS)
+    assert launcher.read_headless_options(["--headless"]) == (
+        True,
+        launcher.DEFAULT_IDLE_EXIT_SECONDS,
+    )
+    assert launcher.read_headless_options(["--headless", "--idle-exit", "30"]) == (True, 30.0)
+    # 常驻是显式选择，不是笔误：0 表示"没人负责收摊，进程自己活着"
+    assert launcher.read_headless_options(["--headless", "--idle-exit", "0"]) == (True, 0.0)
+    # 参数写坏不能挡住启动（双击 exe 的人根本不带参数）
+    assert launcher.read_headless_options(["--headless", "--idle-exit", "abc"]) == (
+        True,
+        launcher.DEFAULT_IDLE_EXIT_SECONDS,
+    )
+    assert launcher.read_headless_options(["--headless", "--idle-exit"]) == (
+        True,
+        launcher.DEFAULT_IDLE_EXIT_SECONDS,
+    )
+
+
+def test_idle_watchdog_exits_when_nobody_is_using_it() -> None:
+    server = FakeServer()
+    assert launcher.idle_watchdog(
+        server, 60.0, activity=lambda: (120.0, False), poll_seconds=0.01
+    ) == 0
+    assert server.should_exit is True
+
+
+def test_idle_watchdog_waits_for_running_task() -> None:
+    """界面关了但转写还在跑时收摊，等于把用户正在等的结果扔掉。"""
+    server = FakeServer()
+    calls: list[int] = []
+
+    def probe() -> tuple[float, bool]:
+        calls.append(1)
+        if len(calls) >= 3:
+            server.should_exit = True  # 测试出口：证明它一直活着，没自己退
+        return 9999.0, True
+
+    assert launcher.idle_watchdog(server, 60.0, activity=probe, poll_seconds=0.01) == 0
+    assert len(calls) == 3
+    assert server.should_exit is True
+
+
+def test_idle_watchdog_resident_never_probes() -> None:
+    """`--idle-exit 0` 是"由我负责关"，那看门狗连空闲探测都不必发起。"""
+    server = FakeServer()
+    server.should_exit = True
+    calls: list[int] = []
+
+    def probe() -> tuple[float, bool]:
+        calls.append(1)
+        return 9999.0, False
+
+    assert launcher.idle_watchdog(server, 0.0, activity=probe, poll_seconds=0.01) == 0
+    assert calls == []
+
+
+def test_headless_starts_service_without_browser_or_tray(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """agent 后台拉起服务这条路的形状：不开浏览器、不建托盘、闲置到点就退。"""
+    import sys
+
+    opened: list[str] = []
+    monkeypatch.setattr(sys, "argv", ["launcher.py", "--headless", "--idle-exit", "1"])
+    monkeypatch.setattr(launcher, "is_frozen", lambda: False)
+    monkeypatch.setenv("VIDEOTONOTES_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(launcher, "find_available_port", lambda: 8000)
+    monkeypatch.setattr(launcher, "server_alive", lambda *args, **kwargs: False)
+    server = FakeServer()
+    monkeypatch.setattr(launcher, "start_server", lambda port: (server, None))
+    monkeypatch.setattr(launcher, "wait_healthy", lambda *args, **kwargs: True)
+    monkeypatch.setattr(launcher, "backend_activity", lambda: (9999.0, False))
+    monkeypatch.setattr(launcher, "IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
+
+    def no_tray(*args, **kwargs):
+        raise AssertionError("无头模式不该建托盘图标")
+
+    monkeypatch.setattr(launcher, "run_tray", no_tray)
+
+    assert launcher.main() == 0
+    assert opened == []
+    assert server.should_exit is True

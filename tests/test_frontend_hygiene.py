@@ -57,16 +57,49 @@ def test_note_images_are_resolved_on_every_output_path() -> None:
 
 
 def test_browser_side_downloads_are_named_after_the_note() -> None:
-    """txt / html / json / png 由浏览器自己拼文件名，只能取后端下发的下载名。
+    """txt / html / json / png / srt 由浏览器自己拼文件名，只能取后端下发的下载名。
 
     写死 `video_summary_时间戳` 时，同一视频逐 P 导出的几份纯文本除了时间戳
     全都一样，用户根本分不清哪份是哪个 P。
     """
     assert "function noteFileName(" in SCRIPT
-    for name in ("downloadSummary", "exportSummaryImage", "downloadCanvasPages"):
+    for name in (
+        "downloadSummary",
+        "downloadSrtFile",
+        "exportSummaryImage",
+        "downloadCanvasPages",
+    ):
         body = SCRIPT.split(f"function {name}(", 1)[1].split("\n}\n", 1)[0]
         assert "noteFileName(" in body, f"{name} 里的下载没取后端下发的文件名"
     assert SCRIPT.count("task.download_name") == 2, "打开任务与轮询完成两条路都要带上下载名"
+
+
+def test_bili_credentials_card_tells_the_machine_store_truth() -> None:
+    """B 站凭据现在扫码即自动存本机：卡片不能再写「只保留到页面关闭」，判「有没有凭据」
+    也不能只看输入框——本机存过时后端会自己兜住那份，页面不该再劝人重扫。
+
+    群测原话是「能不能让登录态保存久一点」，而本机那份一直是长期加密存的，缺的只是
+    网页端从来没写入、也从来没显示。
+    """
+    assert "凭据只保留到页面关闭" not in PAGE, "这句承诺已经过期，会把自动落盘藏起来"
+    body = SCRIPT.split("function hasBiliCredentials(", 1)[1].split("\n}\n", 1)[0]
+    assert "biliSavedMask" in body, "本机存过凭据时不能判成「没有凭据」"
+    assert "refreshBiliSavedState();" in SCRIPT, "开页面没读本机凭据状态，提示条会一直劝人扫码"
+    assert "biliClearSavedBtn" in PAGE, "自动落盘就得同时给一条清除入口"
+
+
+def test_srt_export_is_rendered_by_the_backend() -> None:
+    """字幕必须由后端从分段渲染，前端不许拿手里那份 markdown 自己拼。
+
+    `transcript.md` 与 `currentMarkdown` 里的时间戳是整秒，前端现拼 SRT 会把每条
+    字幕的毫秒抹平——Issue #4 报告人点名"写错了在播放器里表现为字幕整体偏移"，
+    而分段只有后端那份带毫秒精度。
+    """
+    assert '<option value="srt">' in PAGE, "导出菜单里没有字幕这一项"
+    assert "format === 'srt'" in SCRIPT, "菜单选了字幕却没走字幕那条路"
+    body = SCRIPT.split("function downloadSrtFile(", 1)[1].split("\n}\n", 1)[0]
+    assert "output_format=srt" in body
+    assert "currentMarkdown" not in body, "SRT 不能由前端那份整秒 markdown 现拼"
 
 
 def test_completed_notice_leads_with_the_titled_file() -> None:
