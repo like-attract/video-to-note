@@ -255,6 +255,7 @@ async def test_faithful_missing_tail_gets_patched() -> None:
 
 @pytest.mark.asyncio
 async def test_detailed_missing_tail_only_warns_without_extra_calls() -> None:
+    """detailed 允许省略时间戳；只要尾部内容在笔记里，就只告警、不补写。"""
     summarizer = object.__new__(LLMSummarizer)
     summarizer.warnings = []
     calls = 0
@@ -269,7 +270,10 @@ async def test_detailed_missing_tail_only_warns_without_extra_calls() -> None:
         TranscriptSegment(0, 300, "前半部分"),
         TranscriptSegment(300, 591, "结尾的题目讲解"),
     ]
-    draft = "# 视频笔记\n\n[00:01-04:00] 前半部分要点"
+    draft = (
+        "# 视频笔记\n\n[00:01-04:00] 前半部分要点\n\n"
+        "笔记最后也写了：结尾的题目讲解"
+    )
 
     result = await summarizer._ensure_tail_coverage(
         "标题", draft, segments, "detailed", "max", None
@@ -277,7 +281,7 @@ async def test_detailed_missing_tail_only_warns_without_extra_calls() -> None:
 
     assert result == draft
     assert calls == 0
-    assert any("建议改用“详细复原”风格" in warning for warning in summarizer.warnings)
+    assert any("可能只是省略了时间戳" in warning for warning in summarizer.warnings)
 
 
 @pytest.mark.asyncio
@@ -310,20 +314,23 @@ async def test_tail_check_skipped_for_concise_and_full_coverage() -> None:
 
 @pytest.mark.asyncio
 async def test_large_gap_skips_faithful_patch_call() -> None:
-    """笔记省略了时间戳（提示词允许这种写法）不应被当成丢尾而发出超大补写请求。"""
+    """笔记省略了时间戳（提示词允许这种写法）但内容写到了结尾，不该补写。"""
     summarizer = object.__new__(LLMSummarizer)
     summarizer.warnings = []
 
     async def complete(prompt, **kwargs):
-        raise AssertionError("缺口过大时不得触发补写请求（会长时间无响应）")
+        raise AssertionError("尾部内容已经在笔记里时不得触发补写请求")
 
     summarizer._complete = complete
     segments = [
         TranscriptSegment(index * 18.0, index * 18.0 + 18.0, f"第 {index} 句口播内容")
         for index in range(300)  # 约 90 分钟
     ]
-    # 内容写到了最后，但时间戳只标到 12:00。
-    draft = "# 视频笔记\n\n[00:01-12:00] 前段要点\n\n后面每段都只写了文字，没再带时间点"
+    # 内容写到了最后（最后一句的原话就在笔记里），但时间戳只标到 12:00。
+    draft = (
+        "# 视频笔记\n\n[00:01-12:00] 前段要点\n\n"
+        "后面每段都只写了文字，没再带时间点；最后讲到：第 299 句口播内容"
+    )
 
     result = await summarizer._ensure_tail_coverage(
         "标题", draft, segments, "faithful", "max", None
@@ -337,8 +344,8 @@ async def test_large_gap_skips_faithful_patch_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_faithful_patch_material_is_capped_to_the_tail() -> None:
-    """缺口在补写范围内时，补写输入规模也要有上限，并保留最靠近结尾的材料。"""
+async def test_large_missing_material_is_written_in_sections() -> None:
+    """缺口大/材料多时必须拆段续写：单次请求有上限，且每一段都不能丢。"""
     summarizer = object.__new__(LLMSummarizer)
     summarizer.warnings = []
     prompts: list[str] = []
@@ -348,7 +355,6 @@ async def test_faithful_patch_material_is_capped_to_the_tail() -> None:
         return "补写的结尾"
 
     summarizer._complete = complete
-    # 恰好 10 分钟缺口（不超过补写范围），但句子密集，整段材料超出输入预算。
     segments = [
         TranscriptSegment(
             1_800 + index * 20.0,
@@ -364,12 +370,111 @@ async def test_faithful_patch_material_is_capped_to_the_tail() -> None:
         "标题", draft, segments, "faithful", "high", None
     )
 
-    assert len(prompts) == 1
-    assert "第0段" not in prompts[0]
-    assert "第29段" in prompts[0]
-    assert len(prompts[0]) < TAIL_PATCH_MAX_INPUT_CHARACTERS + NOTE_TAIL_CHARACTERS + 400
-    assert "补遗" in result
-    assert any("只补写最靠近结尾的一段" in warning for warning in summarizer.warnings)
+    assert prompts
+    # 每一段提示词都受 NOTE_SECTION_CHARACTERS 约束，不再出现一次塞进全部缺失转录的请求
+    assert all(len(prompt) < NOTE_SECTION_CHARACTERS * 2 for prompt in prompts)
+    # 模型没按格式写时间戳时，代码把未覆盖的原文附进笔记：第 0 段到最后一段都不能丢
+    assert "第0段" in result and "第29段" in result
+    assert any("按段补写" in warning for warning in summarizer.warnings)
+    assert result.startswith(draft)
+
+
+@pytest.mark.asyncio
+async def test_note_stopped_early_is_detected_by_missing_tail_content() -> None:
+    """用户实测形状：63 分钟视频笔记停在 36:35、转写一直到 01:03:15。
+
+    没有 finish_reason 也要能靠“尾部转录内容几乎没出现在笔记里”识别出真截断，
+    且缺口超过 10 分钟时仍然补写，而不是像旧实现那样直接跳过。
+    """
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    prompts: list[str] = []
+
+    async def complete(prompt, **kwargs):
+        prompts.append(prompt)
+        return "## 补写的小节 [01:00:00-01:03:15]\n\n[01:03:15] 补写内容"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(
+            index * 60.0,
+            (index + 1) * 60.0,
+            f"第{index}分钟讲的是主题{index}的具体推导和例子",
+        )
+        for index in range(63)
+    ]
+    draft = (
+        "# 视频笔记：《长视频》\n\n"
+        "## 前半段 [00:00-36:35]\n\n[36:35] 前半段内容"
+    )
+
+    result = await summarizer._ensure_tail_coverage(
+        "长视频", draft, segments, "faithful", "high", None
+    )
+
+    assert prompts, "真截断必须触发补写"
+    assert 63 * 60 - (36 * 60 + 35) > TAIL_PATCH_MAX_GAP_SECONDS
+    assert any("按段补写" in warning for warning in summarizer.warnings)
+    assert "补写内容" in result
+    assert result.startswith(draft)
+
+
+@pytest.mark.asyncio
+async def test_truncation_by_output_limit_is_continued_for_detailed_style() -> None:
+    """finish_reason=length 是确定的截断证据；detailed 也补写，不再只告警。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    prompts: list[str] = []
+
+    async def complete(prompt, **kwargs):
+        prompts.append(prompt)
+        return "## 补写 [03:00:00-03:10:00]\n\n[03:10:00] 详细复原的结尾"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(
+            index * 300.0,
+            (index + 1) * 300.0,
+            f"第{index}段课程内容，包含一个完整例子。",
+        )
+        for index in range(38)
+    ]
+    draft = "# 视频笔记\n\n[00:00-01:00:00] 只写到了这里"
+
+    result = await summarizer._ensure_tail_coverage(
+        "课程", draft, segments, "detailed", "high", None,
+        truncated_by_length=True,
+    )
+
+    assert prompts
+    assert "详细复原的结尾" in result
+    assert any("按段补写" in warning for warning in summarizer.warnings)
+
+
+def test_final_note_budget_grows_with_material_and_has_a_ceiling() -> None:
+    assert LLMSummarizer._final_note_max_tokens("字" * 1_000, "faithful") == 4_600
+    assert LLMSummarizer._final_note_max_tokens("字" * 1_000, "concise") == 2_400
+    middle = LLMSummarizer._final_note_max_tokens("字" * 12_000, "faithful")
+    assert 4_600 < middle < 8_000
+    assert LLMSummarizer._final_note_max_tokens("字" * 50_000, "faithful") == 8_000
+
+
+@pytest.mark.asyncio
+async def test_complete_records_finish_reason_for_tail_detection() -> None:
+    async def create(**kwargs):
+        return _stream_response("短正文", finish_reason="length")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.model_type = "custom"
+    summarizer.model = "some-model"
+    summarizer.base_url = "https://gateway.example/v1"
+    summarizer.warnings = []
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    assert await summarizer._complete("测试", 800) == "短正文"
+    assert summarizer._last_finish_reason == "length"
 
 
 @pytest.mark.asyncio
