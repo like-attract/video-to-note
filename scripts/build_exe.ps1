@@ -100,6 +100,7 @@ $pyiArgs = @(
 $pyiArgs += $vcAdd
 $pyiArgs += @(
     "--collect-data", "faster_whisper",
+    "--collect-data", "docx",
     "--collect-all", "sherpa_onnx",
     "--collect-submodules", "mcp.server",
     "--collect-data", "mcp",
