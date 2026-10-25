@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.4.6</h1>
+<h1 align="center">VideoToNo v1.4.7</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -18,16 +18,17 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
 
-## 🆕 What's New (v1.4.5 → v1.4.6)
+## 🆕 What's New (v1.4.6 → v1.4.7)
 
-- **Subtitles now export as `.srt`**: the export menu has a "字幕 (.srt)" entry, one cue per transcript segment, ready to drop into VLC / PotPlayer / CapCut / Premiere. The HTTP API and MCP accept `output_format=srt` too, so archiving no longer means formatting timecodes yourself
-- **Already have a subtitle file? Skip the video entirely**: the source picker has a "字幕文件" entry — hand it a `.srt` / `.vtt` and it goes straight to writing the note. Nothing is downloaded, nothing is transcribed, and the note title comes from the subtitle filename. A file with no timed text is rejected on the spot instead of halfway through the task
-- **Scan the Bilibili QR once**: credentials are now encrypted and stored on this machine automatically, the panel says so, and later sessions work without asking you to scan again — there is also a "清除本机凭据" button to undo it. Cookies typed in by hand still live only in the current page
-- **Send a link to your agent even when the app is closed**: the skill script starts a headless instance in the background (no window, no tray icon) and carries on; it exits by itself once it has been idle with no task running
-- **Fixed: on some machines "the page loads but every button is dead and dark mode is stuck"** — if you hit that, this release addresses it. The cause was that machine's own registry mislabeling script files, which made the browser refuse to run the page's JavaScript (nothing to do with app settings, and reinstalling did not help). Front-end asset types are now pinned by the app itself
+- **New export format: Word `.docx`**: the export menu now has a "Word 文档 (.docx)" entry. Headings, lists, bold text, tables and the note's timed screenshots all come along; Word and WPS can edit the file directly
+- **Choosing a model that is not downloaded yet no longer means waiting blindly**: pressing Generate explains the model size and recommends manual import — it opens the folder, lists the files to download and where to get them. "Auto download" is still available, and the dialog shows how much of the current file has arrived. If a download fails, the same dialog offers the manual route instead of failing the whole task
+- **Fixed: Bilibili multi-part audio sometimes failed with an incomplete download** — if the connection drops mid-file, the app now switches to Bilibili's play URLs, resuming and retrying before transcription starts
+- **Fixed: longer notes could stop halfway** — a note ending at 36:35 while the transcript ran to 01:03:15 is now recognized as a genuinely missing tail and completed in bounded sections. Notes that only omit timestamps but do contain the content are left alone
 
 <details>
-<summary>Previous releases (v1.4.5 and earlier)</summary>
+<summary>Previous releases (v1.4.6 and earlier)</summary>
+
+- **v1.4.6**: subtitles export as `.srt` and `.srt` / `.vtt` files can be imported to write a note; Bilibili credentials are encrypted and stored after one QR scan; the skill starts a headless instance when the app is closed and lets it exit when idle; fixed machines whose registry broke script MIME types and left the whole page unresponsive.
 
 - **v1.4.5**: long videos and small local models finish in one run far more often (a rejected request no longer discards the whole task, and fragmented ASR lines are merged before chunking); a "token limit" error now names the model's context window and what to widen; txt / html / json / PNG exports are named after the video title, Bilibili parts carry their part number and "transcript only" archives as `title【转录】.md`; transcription runs in its own process so a faulty model library fails one task instead of the app; the connection test retries without a proxy, a self-check panel was added, and startup checks for a new release with a "skip this version" choice.
 
@@ -66,14 +67,14 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.4.6-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.4.7-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
 3. Paste a video URL or upload a local file — for a finished note, enter a provider, model, and API key first; **for a timestamped transcript only, choose "Transcript only" and enter nothing**;
 4. Generate and review the note or the transcript.
 
-The portable build starts the local service and stays in the system tray. The first Whisper transcription downloads a model, so keep the network available. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
+The portable build starts the local service and stays in the system tray. The first Whisper / paraformer transcription offers to download a model; you can also follow the "手动导入模型" guide and place the files yourself. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
 
 ## ✨ Highlights
 
