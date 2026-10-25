@@ -35,9 +35,10 @@ def test_cache_status_three_states(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # 标点整体缺失可降级，不算 incomplete
     assert transcriber.cache_status() == "cached"
 
-    # 标点存在但不完整 → incomplete
+    # 标点存在但不完整 → incomplete（转写本身仍可用）
     _make_file(tmp_path / "cache" / "sherpa" / "punc" / "model.onnx", size=0)
     assert transcriber.cache_status() == "incomplete"
+    assert transcriber.core_ready() is True
 
 
 class _FakeResult:

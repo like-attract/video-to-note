@@ -23,7 +23,7 @@
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
-                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.6</span></h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.7</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
@@ -378,6 +378,7 @@
                     <label class="sr-only" for="formatSelect">下载格式</label>
                     <select id="formatSelect">
                         <option value="markdown">Markdown 文件</option>
+                        <option value="docx">Word 文档 (.docx)</option>
                         <option value="srt">字幕 (.srt)</option>
                         <option value="html">HTML</option>
                         <option value="json">JSON</option>
@@ -417,7 +418,28 @@
     </div>
 </div>
 
+<div id="modelDownloadModal" class="modal-backdrop" hidden>
+    <div class="modal-card model-download-card" role="dialog" aria-modal="true" aria-labelledby="modelDownloadTitle">
+        <h3 id="modelDownloadTitle">转写模型尚未下载</h3>
+        <p id="modelDownloadIntro" class="update-body"></p>
+        <div id="modelDownloadSteps" class="model-download-steps" hidden></div>
+        <div id="modelDownloadProgressWrap" class="model-download-progress" hidden>
+            <div class="download-progress-track">
+                <div id="modelDownloadBar" class="download-progress-bar"></div>
+            </div>
+            <p id="modelDownloadProgressText" class="model-download-progress-text"></p>
+        </div>
+        <p id="modelDownloadError" class="model-download-error" hidden></p>
+        <div class="modal-actions">
+            <button id="modelManualBtn" class="button ghost" type="button">手动导入（推荐）</button>
+            <button id="modelManualResumeBtn" class="button" type="button" hidden>已放好，继续生成</button>
+            <button id="modelAutoBtn" class="button" type="button">自动下载并继续</button>
+            <button id="modelCancelBtn" class="button ghost" type="button">取消</button>
+        </div>
+    </div>
+</div>
+
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261017-2"></script>
+<script src="script.js?v=20261025-1"></script>
 </body>
 </html>

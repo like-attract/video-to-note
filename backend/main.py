@@ -164,7 +164,7 @@ NOTE_IMAGE_REF_RE = re.compile(
     rf"(!\[[^\]]*\]\()\./(?:{FRAMES_DIR_NAME}|images)/([^)]+)\)"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.4.6")
+app = FastAPI(title="VideoToNo API", version="1.4.7")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -1095,6 +1095,195 @@ async def whisper_models_status() -> dict[str, Any]:
     return {"models": models, "manual_dir": str(WHISPER_CACHE_DIR / "manual")}
 
 
+class ModelDownloadPayload(BaseModel):
+    model: str
+
+
+# 模型预下载任务：前端在提交任务前显式触发，能显示进度、失败不影响已排队的任务。
+# 同一个模型同时只跑一个；不同模型也串行（两块大文件并发只会互相抢带宽）。
+MODEL_DOWNLOAD_JOB_RETENTION_SECONDS = 600
+model_download_jobs: dict[str, dict[str, Any]] = {}
+model_download_jobs_lock = threading.Lock()
+model_download_guard = threading.Lock()
+
+
+def _public_model_download_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in job.items() if not key.startswith("_")}
+
+
+def _update_model_download_job(job_id: str, **fields: Any) -> None:
+    with model_download_jobs_lock:
+        job = model_download_jobs.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _prune_model_download_jobs(now: float) -> None:
+    for job_id, job in list(model_download_jobs.items()):
+        finished_at = float(job.get("finished_at") or 0)
+        if (
+            job.get("state") in {"completed", "failed", "cancelled"}
+            and now - finished_at > MODEL_DOWNLOAD_JOB_RETENTION_SECONDS
+        ):
+            model_download_jobs.pop(job_id, None)
+
+
+def _run_model_download(job_id: str, model: str) -> None:
+    with model_download_guard:
+        with model_download_jobs_lock:
+            job = model_download_jobs.get(job_id)
+            cancel_event = job.get("_cancel_event") if job else None
+        if job is None or cancel_event is None:
+            return
+        if cancel_event.is_set():
+            _update_model_download_job(
+                job_id,
+                state="cancelled",
+                message="下载已取消",
+                finished_at=time.time(),
+            )
+            return
+        _update_model_download_job(
+            job_id, state="downloading", message="正在连接下载源…"
+        )
+
+        def report(
+            received: int,
+            total: int,
+            filename: str,
+            index: int,
+            count: int,
+        ) -> None:
+            if cancel_event.is_set():
+                return
+            _update_model_download_job(
+                job_id,
+                downloaded=int(received),
+                total=int(total),
+                file=filename,
+                file_index=int(index),
+                file_count=int(count),
+                message=(
+                    f"正在下载 {filename}（第 {index}/{count} 个文件）"
+                    if count > 1
+                    else f"正在下载 {filename}"
+                ),
+            )
+
+        try:
+            if model == "paraformer-zh":
+                warnings = paraformer_transcriber.download_models(
+                    progress_callback=report, cancel_event=cancel_event
+                )
+                # 标点模型失败只降级为无标点，asr + vad 齐了就能转写
+                status = (
+                    "cached"
+                    if paraformer_transcriber.core_ready()
+                    else paraformer_transcriber.cache_status()
+                )
+            else:
+                transcriber.download_model(
+                    model, progress_callback=report, cancel_event=cancel_event
+                )
+                warnings = []
+                status = transcriber._model_cache_status(model)
+            if status != "cached":
+                raise RuntimeError("下载结束但完整校验未通过，文件可能仍不完整")
+            _update_model_download_job(
+                job_id,
+                state="completed",
+                downloaded=job.get("total") or job.get("downloaded") or 0,
+                message="模型已下载完成",
+                warning="；".join(warnings),
+                finished_at=time.time(),
+            )
+        except asyncio.CancelledError:
+            _update_model_download_job(
+                job_id,
+                state="cancelled",
+                message="下载已取消",
+                finished_at=time.time(),
+            )
+        except Exception as exc:
+            _update_model_download_job(
+                job_id,
+                state="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                message="自动下载失败，可改用手动导入",
+                finished_at=time.time(),
+            )
+
+
+@app.post("/api/whisper-models/download")
+async def start_model_download(payload: ModelDownloadPayload) -> dict[str, Any]:
+    """开始一次模型预下载（后台线程），返回可轮询的任务。"""
+    if payload.model not in ASR_MODELS:
+        raise HTTPException(status_code=422, detail="不支持的转写模型")
+    now = time.time()
+    with model_download_jobs_lock:
+        _prune_model_download_jobs(now)
+        for existing in model_download_jobs.values():
+            if (
+                existing.get("model") == payload.model
+                and existing.get("state") in {"queued", "downloading"}
+            ):
+                return _public_model_download_job(existing)
+        status = (
+            paraformer_transcriber.cache_status()
+            if payload.model == "paraformer-zh"
+            else transcriber._model_cache_status(payload.model)
+        )
+        job: dict[str, Any] = {
+            "job_id": uuid.uuid4().hex,
+            "model": payload.model,
+            "state": "completed" if status == "cached" else "queued",
+            "message": "模型已在本机缓存" if status == "cached" else "已加入下载队列",
+            "file": "",
+            "file_index": 0,
+            "file_count": 0,
+            "downloaded": 0,
+            "total": 0,
+            "error": None,
+            "warning": "",
+            "created_at": now,
+            "finished_at": now if status == "cached" else None,
+            "_cancel_event": threading.Event(),
+        }
+        model_download_jobs[job["job_id"]] = job
+        public = _public_model_download_job(job)
+    if status != "cached":
+        threading.Thread(
+            target=_run_model_download,
+            args=(job["job_id"], payload.model),
+            name=f"model-download-{payload.model}",
+            daemon=True,
+        ).start()
+    return public
+
+
+@app.get("/api/whisper-models/download/{job_id}")
+async def get_model_download(job_id: str) -> dict[str, Any]:
+    with model_download_jobs_lock:
+        job = model_download_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="下载任务不存在或已过期")
+        return _public_model_download_job(job)
+
+
+@app.post("/api/whisper-models/download/{job_id}/cancel")
+async def cancel_model_download(job_id: str) -> dict[str, Any]:
+    with model_download_jobs_lock:
+        job = model_download_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="下载任务不存在或已过期")
+        cancel_event = job.get("_cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
+        if job.get("state") in {"queued", "downloading"}:
+            job["message"] = "正在取消下载…"
+        return _public_model_download_job(job)
+
+
 class WhisperManualFolderPayload(BaseModel):
     model: str
     open: bool = True
@@ -1841,7 +2030,9 @@ async def get_image(task_id: str, filename: str) -> FileResponse:
 
 
 @app.get("/api/download/{task_id}")
-async def download_summary_markdown(task_id: str) -> Response:
+async def download_summary_markdown(
+    task_id: str, format: Literal["markdown", "docx"] = "markdown"
+) -> Response:
     task = tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -1864,6 +2055,24 @@ async def download_summary_markdown(task_id: str) -> Response:
         note_text = output_path.read_text(encoding="utf-8")
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"读取笔记失败：{exc}")
+
+    if format == "docx":
+        try:
+            from .docx_export import markdown_to_docx
+
+            content = await asyncio.to_thread(
+                markdown_to_docx, note_text, task_dir, str(title)
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"生成 Word 文档失败：{exc}")
+        encoded_name = quote(f"{safe_name}.docx")
+        return Response(
+            content=content,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+        )
 
     bundle = await asyncio.to_thread(
         build_note_bundle, note_text, task_dir, f"{safe_name}.md"

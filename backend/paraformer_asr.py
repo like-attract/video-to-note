@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,28 @@ class ParaformerTranscriber:
         except TranscriptionCancelledError as exc:
             raise asyncio.CancelledError("转写已被用户取消") from exc
 
+    def download_models(
+        self,
+        progress_callback: Any = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[str]:
+        """预下载三份模型；标点模型可缺（缺了转写仍可用，只是没有标点）。
+
+        progress_callback(已下载字节, 总字节, 文件名, 第几个文件, 文件总数)。
+        返回非致命告警（目前只有标点模型下载失败）。
+        """
+        if not self.download_root:
+            raise RuntimeError("Paraformer 引擎需要配置模型缓存目录")
+        warnings: list[str] = []
+        for component in ("asr", "vad", "punc"):
+            try:
+                self._download_component(component, cancel_event, progress_callback)
+            except Exception as exc:
+                if component != "punc":
+                    raise
+                warnings.append(f"标点模型未下载成功（{exc}），转写仍可用但没有标点")
+        return warnings
+
     # ---- 模型缓存与加载 ----
 
     def _component_dir(self, component: str) -> Path:
@@ -116,27 +139,76 @@ class ParaformerTranscriber:
             return "cached"
         return "incomplete" if any_file else "missing"
 
-    def _download_component(self, component: str, cancel_event: threading.Event | None) -> Path:
+    def core_ready(self) -> bool:
+        """转写必需的 asr + vad 是否完整；标点模型坏了不影响转写。"""
+        return all(
+            self._file_complete(self._component_dir(component) / name)
+            for component in ("asr", "vad")
+            for name in MODEL_SPECS[component]["files"]
+        )
+
+    def _download_component(
+        self,
+        component: str,
+        cancel_event: threading.Event | None,
+        progress_callback: Any = None,
+    ) -> Path:
         spec = MODEL_SPECS[component]
         directory = self._component_dir(component)
         directory.mkdir(parents=True, exist_ok=True)
+        endpoints = [HF_ENDPOINT]
+        if HF_ENDPOINT == "https://hf-mirror.com":
+            endpoints.append("https://huggingface.co")
         last_error: Exception | None = None
-        for filename in spec["files"]:
+        for file_index, filename in enumerate(spec["files"], start=1):
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError("任务已取消")
             target = directory / filename
             if self._file_complete(target):
                 continue
-            url = f"{HF_ENDPOINT}/{spec['repo']}/resolve/main/{filename}"
-            ok, error = download_to_file(url, target, HEADERS, cancel_event)
-            if not ok:
+            downloaded = False
+            for endpoint in endpoints:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError("任务已取消")
+                url = f"{endpoint}/{spec['repo']}/resolve/main/{filename}"
+                file_progress = None
+                if progress_callback is not None:
+                    def file_progress(
+                        received: int,
+                        total: int,
+                        _name: str = f"{component}/{filename}",
+                        _index: int = file_index,
+                    ) -> None:
+                        progress_callback(
+                            received, total, _name, _index, len(spec["files"])
+                        )
+                ok, error = download_to_file(
+                    url,
+                    target,
+                    HEADERS,
+                    cancel_event,
+                    progress_callback=file_progress,
+                )
+                if ok:
+                    downloaded = True
+                    last_error = None
+                    break
                 last_error = error
+                # 404 是确定性结果：换镜像也一样没有，直接换下一个文件更没意义
+                if isinstance(error, urllib.error.HTTPError) and error.code == 404:
+                    break
+            if not downloaded:
+                raise RuntimeError(
+                    f"Paraformer {component} 模型下载失败：{last_error}。"
+                    "已尝试 hf-mirror.com 与 huggingface.co，请检查网络/代理，"
+                    "或在节点页手动导入到 "
+                    f"{directory}"
+                )
         if any(
             not self._file_complete(directory / name) for name in MODEL_SPECS[component]["files"]
         ):
             raise RuntimeError(
-                f"Paraformer {component} 模型下载失败：{last_error}。"
-                f"默认走 hf-mirror.com 镜像，请检查网络/代理或通过 HF_ENDPOINT 指定可用镜像。"
+                f"Paraformer {component} 模型文件不完整，请检查网络后重试。"
             )
         return directory
 

@@ -757,3 +757,61 @@ input[type="checkbox"] {
     flex-wrap: wrap;
     margin-top: 14px;
 }
+
+/* 转写模型下载弹窗：手动导入清单 + 自动下载进度 */
+.model-download-card {
+    width: min(620px, 100%);
+}
+.model-download-steps {
+    margin: 10px 0 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-sunken, rgba(127, 127, 127, 0.08));
+    font-size: 0.86rem;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 240px;
+    overflow: auto;
+}
+.model-download-progress {
+    margin-top: 12px;
+}
+.download-progress-track {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--border);
+    overflow: hidden;
+}
+.download-progress-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent, #3b82f6);
+    transition: width 0.25s ease;
+}
+.download-progress-bar.is-indeterminate {
+    width: 35% !important;
+    animation: download-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes download-indeterminate {
+    0% { transform: translateX(-110%); }
+    100% { transform: translateX(320%); }
+}
+.model-download-progress-text {
+    margin: 8px 0 0;
+    font-size: 0.84rem;
+    color: var(--text-soft);
+    word-break: break-all;
+}
+.model-download-error {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(220, 38, 38, 0.1);
+    color: #b91c1c;
+    font-size: 0.86rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+}

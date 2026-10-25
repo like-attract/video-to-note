@@ -358,8 +358,37 @@ class WhisperTranscriber:
             for filename in cls._required_files(model_name)
         ]
 
+    def download_model(
+        self,
+        model_name: str,
+        progress_callback: Callable[[int, int, str, int, int], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Path:
+        """把模型下载到本工具缓存并返回快照目录（供手动/自动下载任务复用）。
+
+        progress_callback(已下载字节, 总字节, 文件名, 第几个文件, 文件总数)。
+        总字节未知时传 0；调用方负责展示。
+        """
+        if not self.download_root:
+            raise RuntimeError("Whisper 引擎需要配置模型缓存目录")
+        cached = self._cached_model_path(model_name)
+        if cached:
+            return cached
+        snapshot = self._download_model_files(
+            model_name, cancel_event, progress_callback=progress_callback
+        )
+        if snapshot:
+            return snapshot
+        error = self._last_download_error
+        if error is not None:
+            raise self._model_load_error(model_name, error) from error
+        raise RuntimeError(f"Whisper 模型 {model_name} 下载失败，未得到完整缓存")
+
     def _download_model_files(
-        self, model_name: str, cancel_event: threading.Event | None = None
+        self,
+        model_name: str,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int, str, int, int], None] | None = None,
     ) -> Path | None:
         """下载 Whisper 模型到标准缓存目录结构。
 
@@ -379,7 +408,7 @@ class WhisperTranscriber:
         for candidate in endpoints:
             try:
                 snapshot = self._download_model_files_from_endpoint(
-                    model_name, candidate, cancel_event
+                    model_name, candidate, cancel_event, progress_callback=progress_callback
                 )
                 if snapshot:
                     return snapshot
@@ -388,7 +417,11 @@ class WhisperTranscriber:
         return None
 
     def _download_model_files_from_endpoint(
-        self, model_name: str, endpoint: str, cancel_event: threading.Event | None = None
+        self,
+        model_name: str,
+        endpoint: str,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int, str, int, int], None] | None = None,
     ) -> Path | None:
         """从单个 Hugging Face endpoint 下载完整快照。"""
         repo = self._model_repo(model_name)
@@ -414,7 +447,7 @@ class WhisperTranscriber:
         )
         snapshot.mkdir(parents=True, exist_ok=True)
         required_files = self._required_files(model_name)
-        for filename in required_files:
+        for file_index, filename in enumerate(required_files, start=1):
             candidates = self._slot_candidates(filename)
             # 槽位已有文件必须通过完整性下限校验；损坏/截断的遗留文件会被重新下载
             if any(self._file_complete(snapshot / name) for name in candidates):
@@ -423,8 +456,23 @@ class WhisperTranscriber:
             for name in candidates:
                 if cancel_event is not None and cancel_event.is_set():
                     raise asyncio.CancelledError("任务已取消")
+                file_progress = None
+                if progress_callback is not None:
+                    def file_progress(
+                        received: int,
+                        total: int,
+                        _name: str = name,
+                        _index: int = file_index,
+                    ) -> None:
+                        progress_callback(
+                            received, total, _name, _index, len(required_files)
+                        )
                 downloaded = self._download_one_file(
-                    f"{base_url}/{name}", snapshot / name, headers, cancel_event
+                    f"{base_url}/{name}",
+                    snapshot / name,
+                    headers,
+                    cancel_event,
+                    progress_callback=file_progress,
                 )
                 if downloaded:
                     # 换名成功：别把上一个候选的 404 留下冒充真正的失败原因
@@ -448,9 +496,16 @@ class WhisperTranscriber:
         target: Path,
         headers: dict[str, str],
         cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> bool:
-        """单文件下载：断点续传（Range）+ 重试三次 + Content-Length 完整性校验。"""
-        ok, error = download_to_file(url, target, headers, cancel_event)
+        """单文件下载：断点续传（Range）+ 重试 + Content-Length 完整性校验。"""
+        ok, error = download_to_file(
+            url,
+            target,
+            headers,
+            cancel_event,
+            progress_callback=progress_callback,
+        )
         if error is not None:
             self._last_download_error = error
         return ok

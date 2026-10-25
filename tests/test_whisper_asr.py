@@ -244,7 +244,7 @@ def test_download_replaces_undersized_existing_file(
 
     downloaded: list[str] = []
 
-    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None) -> bool:
+    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None, **kwargs) -> bool:
         downloaded.append(target.name)
         target.write_bytes(b"0" * 2048)
         return True
@@ -271,7 +271,7 @@ def test_download_falls_back_to_other_vocabulary_name(
     transcriber = WhisperTranscriber(tmp_path)
     attempted: list[str] = []
 
-    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None) -> bool:
+    def fake_download_one(url: str, target: Path, headers: dict[str, str], cancel_event=None, **kwargs) -> bool:
         attempted.append(target.name)
         if target.name == "vocabulary.txt":
             transcriber._last_download_error = urllib.error.HTTPError(url, 404, "Not Found", {}, None)
@@ -409,7 +409,7 @@ def test_model_download_falls_back_to_official_endpoint(
     calls: list[str] = []
     expected = tmp_path / "snapshot"
 
-    def fake_download(model_name: str, endpoint: str, cancel_event=None) -> Path | None:
+    def fake_download(model_name: str, endpoint: str, cancel_event=None, **kwargs) -> Path | None:
         calls.append(endpoint)
         if endpoint == "https://hf-mirror.com":
             raise RuntimeError("certificate verify failed")

@@ -319,6 +319,11 @@ function bindEvents() {
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
     bindListener('customProfileDeleteBtn', 'click', deleteCustomProfile);
     bindListener('manualModelBtn', 'click', manualImportWhisperModel);
+    bindListener('modelManualBtn', 'click', openModelImportFromDialog);
+    bindListener('modelManualResumeBtn', 'click', resumeAfterManualImport);
+    bindListener('modelAutoBtn', 'click', startAutoModelDownload);
+    bindListener('modelCancelBtn', 'click', cancelModelDownloadDialog);
+    bindListener('whisperModel', 'change', showUncachedModelHint);
     bindListener('copyMcpUrlBtn', 'click', () => copyTextToClipboard(mcpSseUrl(), 'MCP 地址已复制'));
     bindListener('copyMcpConfigBtn', 'click', () =>
         copyTextToClipboard(mcpJsonConfig(), 'MCP 配置已复制，到客户端粘贴导入即可'));
@@ -1457,9 +1462,9 @@ function hasBiliCredentials() {
     );
 }
 
-// ---- Whisper 未缓存确认的降噪逻辑 ----
+// ---- Whisper 未缓存提示的降噪逻辑 ----
 // 1) 明显走平台字幕、用不到 Whisper 的提交不弹；
-// 2) 已确认过一次下载的模型长期不再弹（localStorage 记忆；下拉框仍保留“未缓存”提示）。
+// 2) 弹窗内可以选手动导入，也可以直接自动下载；两种选择都只影响这一次提交。
 function taskWillLikelyUseSubtitles(request) {
     if (!request) return false;
     // 导入的字幕本身就是转录，这条路永远不会碰 Whisper：不能弹"要下载模型吗"
@@ -1468,15 +1473,6 @@ function taskWillLikelyUseSubtitles(request) {
     if (isBilibiliUrl(request.videoUrl) && hasBiliCredentials()) return true;
     if (isDouyinUrl(request.videoUrl) && douyinCookies) return true;
     return false;
-}
-
-function whisperDownloadConfirmed(modelId) {
-    return prefs.confirmations.whisper_download[modelId] === true;
-}
-
-function rememberWhisperDownloadConfirm(modelId) {
-    prefs.confirmations.whisper_download[modelId] = true;
-    persistPrefs();
 }
 
 function updateBiliHint(forceShow = false) {
@@ -2045,6 +2041,287 @@ async function manualImportWhisperModel() {
     }
 }
 
+// ---- 未缓存模型的提交弹窗：手动导入优先，也可在弹窗里自动下载 ----
+// 以前只是 window.confirm 问一句"是否继续下载"，用户确认后任务在后台静默下载
+// 几百 MB 到几 GB，进度条停在 38% 不动，分不清是在下载还是卡死；下载失败还会
+// 顺着任务一起失败。现在把这一步提到提交之前，进度和失败都只影响这个弹窗。
+let modelDialogModel = '';
+let modelDialogStatus = 'missing';
+let modelDialogResolve = null;
+let modelDialogJobId = '';
+let modelDialogPollTimer = null;
+let modelDialogPollErrors = 0;
+
+function showUncachedModelHint() {
+    const option = byId('whisperModel').selectedOptions[0];
+    if (!option || option.dataset.status === 'cached') return;
+    const label = (option.dataset.baseLabel || option.textContent).split('（')[0];
+    const size = WHISPER_MODEL_SIZES[option.value] || '';
+    showToast(
+        `「${label}」尚未完整下载${size ? `（约 ${size}）` : ''}；开始生成时可选择手动导入或自动下载`,
+        'info'
+    );
+}
+
+function promptModelDownload(modelId, status) {
+    const option = byId('whisperModel').selectedOptions[0];
+    if (!option) return Promise.resolve('cancel');
+    const label = (option.dataset.baseLabel || option.textContent).split('（')[0];
+    const size = WHISPER_MODEL_SIZES[modelId] || '';
+    modelDialogModel = modelId;
+    modelDialogStatus = status || 'missing';
+    modelDialogJobId = '';
+    byId('modelDownloadTitle').textContent = status === 'incomplete'
+        ? '转写模型缓存不完整'
+        : '转写模型尚未下载';
+    byId('modelDownloadIntro').textContent = status === 'incomplete'
+        ? `所选模型「${label}」的缓存不完整${size ? `（完整模型约 ${size}）` : ''}。`
+            + '自动下载会补全缺失文件；也可以按「打开导入文件夹」的清单手动放好完整文件。'
+        : `所选模型「${label}」还没有下载${size ? `（约 ${size}）` : ''}。`
+            + '建议先手动导入：打开文件夹后按清单放入文件，程序几秒内自动识别。'
+            + '也可以让程序自动下载，进度会显示在这里。';
+    byId('modelDownloadSteps').hidden = true;
+    byId('modelDownloadSteps').textContent = '';
+    byId('modelDownloadProgressWrap').hidden = true;
+    byId('modelDownloadBar').style.width = '0%';
+    byId('modelDownloadProgressText').textContent = '';
+    byId('modelDownloadError').hidden = true;
+    byId('modelDownloadError').textContent = '';
+    byId('modelManualBtn').disabled = false;
+    byId('modelManualResumeBtn').hidden = true;
+    byId('modelManualResumeBtn').disabled = false;
+    byId('modelAutoBtn').disabled = false;
+    byId('modelAutoBtn').textContent = '自动下载并继续';
+    byId('modelCancelBtn').disabled = false;
+    byId('modelCancelBtn').textContent = '取消';
+    byId('modelDownloadModal').hidden = false;
+    return new Promise((resolve) => {
+        modelDialogResolve = resolve;
+    });
+}
+
+function closeModelDownloadDialog(result) {
+    stopModelDialogPolling();
+    byId('modelDownloadModal').hidden = true;
+    const resolve = modelDialogResolve;
+    modelDialogResolve = null;
+    if (resolve) resolve(result);
+}
+
+function modelDialogError(message) {
+    const error = byId('modelDownloadError');
+    error.textContent = message;
+    error.hidden = false;
+}
+
+async function openModelImportFromDialog() {
+    const modelId = modelDialogModel;
+    if (!modelId) return;
+    byId('modelDownloadError').hidden = true;
+    const button = byId('modelManualBtn');
+    button.disabled = true;
+    try {
+        const guide = await requestManualImportGuide(modelId, false);
+        const steps = guide.folders
+            .map(
+                (folder, index) =>
+                    `${index + 1}. ${folder.label}\n`
+                    + `   文件：${folder.files.join(' / ')}\n`
+                    + `   下载页：${folder.download_url}\n`
+                    + `   放入：${folder.path}`
+            )
+            .join('\n\n');
+        const block = byId('modelDownloadSteps');
+        block.textContent = steps;
+        block.hidden = false;
+        const data = await requestManualImportGuide(modelId, true);
+        if (!data.opened) {
+            modelDialogError(`未能自动打开文件夹，请手动前往：${data.open_path}`);
+        }
+        byId('modelManualResumeBtn').hidden = false;
+        startManualImportPolling(modelId);
+    } catch (error) {
+        modelDialogError(error.message || '读取模型导入信息失败');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function resumeAfterManualImport() {
+    const button = byId('modelManualResumeBtn');
+    button.disabled = true;
+    try {
+        await refreshWhisperModelHints();
+        const option = byId('whisperModel').selectedOptions[0];
+        if (
+            option
+            && option.value === modelDialogModel
+            && option.dataset.status === 'cached'
+        ) {
+            closeModelDownloadDialog('ready');
+            showToast('已识别到模型文件，继续生成', 'success');
+            return;
+        }
+        modelDialogError(
+            '还没有识别到完整模型文件。请确认文件名没有改、文件已放进上面列出的目录；'
+            + '放好后程序会在几秒内自动刷新，也可以再点一次「已放好，继续生成」。'
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function startAutoModelDownload() {
+    const modelId = modelDialogModel;
+    if (!modelId || modelDialogJobId) return;
+    byId('modelDownloadError').hidden = true;
+    byId('modelDownloadSteps').hidden = true;
+    byId('modelDownloadProgressWrap').hidden = false;
+    byId('modelDownloadProgressText').textContent = '正在创建下载任务…';
+    byId('modelDownloadBar').style.width = '0%';
+    byId('modelAutoBtn').disabled = true;
+    byId('modelAutoBtn').textContent = '正在下载…';
+    byId('modelManualBtn').disabled = true;
+    byId('modelManualResumeBtn').disabled = true;
+    try {
+        const response = await fetch(`${API_BASE}/whisper-models/download`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelId })
+        });
+        const job = await readResponse(response, '启动模型下载失败');
+        if (job.state === 'completed') {
+            await finishAutoModelDownload(job);
+            return;
+        }
+        modelDialogJobId = job.job_id;
+        applyModelDownloadProgress(job);
+        modelDialogPollErrors = 0;
+        modelDialogPollTimer = window.setInterval(pollModelDownloadJob, 800);
+    } catch (error) {
+        autoDownloadFailed(error.message || '启动模型下载失败');
+    }
+}
+
+async function pollModelDownloadJob() {
+    if (!modelDialogJobId) return;
+    try {
+        const response = await fetch(
+            `${API_BASE}/whisper-models/download/${encodeURIComponent(modelDialogJobId)}`,
+            { cache: 'no-store' }
+        );
+        const job = await readResponse(response, '读取下载进度失败');
+        modelDialogPollErrors = 0;
+        applyModelDownloadProgress(job);
+        if (job.state === 'completed') {
+            await finishAutoModelDownload(job);
+        } else if (job.state === 'failed') {
+            autoDownloadFailed(job.error || '自动下载失败');
+        } else if (job.state === 'cancelled') {
+            stopModelDialogPolling();
+            closeModelDownloadDialog('cancel');
+            showToast('模型下载已取消', 'info');
+        }
+    } catch (error) {
+        modelDialogPollErrors += 1;
+        if (modelDialogPollErrors >= 3) {
+            autoDownloadFailed(error.message || '读取下载进度失败');
+        }
+    }
+}
+
+function applyModelDownloadProgress(job) {
+    const total = Number(job.total) || 0;
+    const downloaded = Number(job.downloaded) || 0;
+    const bar = byId('modelDownloadBar');
+    const label = byId('modelDownloadProgressText');
+    if (total > 0) {
+        bar.classList.remove('is-indeterminate');
+        bar.style.width = `${Math.max(1, Math.min(100, Math.round(downloaded / total * 100)))}%`;
+    } else if (job.state === 'downloading' || job.state === 'queued') {
+        bar.classList.add('is-indeterminate');
+    }
+    if (job.state === 'queued') {
+        label.textContent = '已加入下载队列，前面的下载完成后开始…';
+        return;
+    }
+    if (!job.file) {
+        label.textContent = job.message || '正在准备下载…';
+        return;
+    }
+    const count = Number(job.file_count) || 0;
+    const index = Number(job.file_index) || 0;
+    const prefix = count > 1 ? `第 ${index}/${count} 个文件 · ` : '';
+    label.textContent = total > 0
+        ? `${prefix}${job.file} · ${formatBytes(downloaded)} / ${formatBytes(total)}`
+        : `${prefix}${job.file} · 已下载 ${formatBytes(downloaded)}`;
+}
+
+async function finishAutoModelDownload(job) {
+    stopModelDialogPolling();
+    modelDialogJobId = '';
+    byId('modelDownloadBar').classList.remove('is-indeterminate');
+    byId('modelDownloadBar').style.width = '100%';
+    byId('modelDownloadProgressText').textContent = job.warning
+        ? `下载完成（${job.warning}）`
+        : '下载完成，正在重新检查模型…';
+    await refreshWhisperModelHints();
+    const option = byId('whisperModel').selectedOptions[0];
+    const status = option ? option.dataset.status : '';
+    // paraformer 的标点模型失败只影响标点，asr+vad 齐了就能转写；后端会在 warning 里说明
+    const usable = status === 'cached' || Boolean(job.warning && status === 'incomplete');
+    if (option && option.value === modelDialogModel && usable) {
+        closeModelDownloadDialog('ready');
+        showToast(
+            job.warning ? `模型已可用（${job.warning}），继续生成` : '模型已下载完成，继续生成笔记',
+            'success'
+        );
+    } else {
+        autoDownloadFailed('下载结束但模型状态还不是「已缓存」，请改用手动导入');
+    }
+}
+
+function autoDownloadFailed(message) {
+    stopModelDialogPolling();
+    modelDialogJobId = '';
+    byId('modelDownloadBar').classList.remove('is-indeterminate');
+    modelDialogError(
+        `${message}\n可点「手动导入（推荐）」按清单手动放好文件；网络恢复后也可以重试自动下载。`
+    );
+    byId('modelAutoBtn').disabled = false;
+    byId('modelAutoBtn').textContent = '重试自动下载';
+    byId('modelManualBtn').disabled = false;
+    byId('modelManualResumeBtn').disabled = false;
+    byId('modelCancelBtn').disabled = false;
+}
+
+function stopModelDialogPolling() {
+    if (modelDialogPollTimer) {
+        window.clearInterval(modelDialogPollTimer);
+        modelDialogPollTimer = null;
+    }
+}
+
+async function cancelModelDownloadDialog() {
+    if (modelDialogJobId) {
+        const jobId = modelDialogJobId;
+        stopModelDialogPolling();
+        modelDialogJobId = '';
+        try {
+            await fetch(
+                `${API_BASE}/whisper-models/download/${encodeURIComponent(jobId)}/cancel`,
+                { method: 'POST' }
+            );
+        } catch {
+            // 服务不可达时下载进程也会在下一块检查到取消事件；这里不阻塞关闭弹窗
+        }
+        closeModelDownloadDialog('cancel');
+        showToast('模型下载已取消', 'info');
+        return;
+    }
+    closeModelDownloadDialog('cancel');
+}
+
 function normalizeScreenshotInterval() {
     const input = byId('screenshotInterval');
     const value = Math.min(300, Math.max(5, Number.parseInt(input.value, 10) || 30));
@@ -2053,7 +2330,7 @@ function normalizeScreenshotInterval() {
 }
 
 async function startSummary(options = {}) {
-    if (isSubmitting || isTaskActive) {
+    if (isSubmitting || isTaskActive || modelDialogResolve) {
         showToast('已有任务正在处理中', 'info');
         return;
     }
@@ -2065,13 +2342,17 @@ async function startSummary(options = {}) {
     const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
     const request = validateAndBuildRequestBase(resumeTaskId);
     if (!request) return;
-    // 所选 Whisper 模型未完整缓存时，先确认下载（新用户首次使用）。
-    // 以下情况跳过确认：复用转录/续跑（不用 Whisper）、明显走平台字幕的提交
-    // （B 站已填凭据、抖音已验证）、已在任意会话确认过该模型下载的用户
-    // （localStorage 长期记忆——前端无法预知本次是否真的会用到 Whisper，
-    // 弹窗只负责首次告知下载体积，此后交任务内下载/失败提示）。
-    if (!resumeTaskId && forceRestart && !taskWillLikelyUseSubtitles(request)) {
-        const whisperOption = byId('whisperModel').selectedOptions[0];
+    // 所选 Whisper 模型未完整缓存时，先弹窗决定手动导入还是自动下载。
+    // 以下情况跳过：有可复用的转录且这次不从头跑（不用 Whisper）、明显走平台字幕的提交
+    // （B 站已填凭据、抖音已验证）。没有 resumeTaskId 时哪怕模式选了“复用”也会走转写，
+    // 所以不能只按 forceRestart 判断。
+    if ((!resumeTaskId || forceRestart) && !taskWillLikelyUseSubtitles(request)) {
+        let whisperOption = byId('whisperModel').selectedOptions[0];
+        if (whisperOption && !whisperOption.dataset.status) {
+            // 页面刚打开时状态还没回来：先刷新一次，别让“没查到状态”变成静默下载
+            await refreshWhisperModelHints();
+            whisperOption = byId('whisperModel').selectedOptions[0];
+        }
         const status = whisperOption ? whisperOption.dataset.status : 'missing';
         const modelId = whisperOption ? whisperOption.value : '';
         if (
@@ -2079,18 +2360,12 @@ async function startSummary(options = {}) {
             && status
             && status !== 'cached'
             && modelId
-            && !whisperDownloadConfirmed(modelId)
         ) {
-            const modelLabel = (whisperOption.dataset.baseLabel || whisperOption.textContent).split('（')[0];
-            const size = WHISPER_MODEL_SIZES[modelId] || '';
-            const message = status === 'incomplete'
-                ? `所选模型「${modelLabel}」缓存不完整，将自动补全缺失文件（约 ${size}）。是否继续？`
-                : `当前缺少所选模型「${modelLabel}」。首次使用需从镜像下载约 ${size}（下载完成后自动开始转写）。是否继续？`;
-            if (!window.confirm(message)) {
+            const decision = await promptModelDownload(modelId, status);
+            if (decision !== 'ready') {
                 showToast('已取消，任务未提交', 'info');
                 return;
             }
-            rememberWhisperDownloadConfirm(modelId);
         }
     }
 
@@ -2802,6 +3077,10 @@ async function downloadSummary() {
         await downloadMarkdownFile();
         return;
     }
+    if (format === 'docx') {
+        await downloadDocxFile();
+        return;
+    }
     if (format === 'srt') {
         await downloadSrtFile();
         return;
@@ -2979,10 +3258,30 @@ async function downloadMarkdownFile() {
     }
 }
 
+// Word 由后端生成：.docx 是 zip 包，截图要嵌进包内；浏览器端没有现成的
+// Markdown→docx 组件，前端只负责把后端给的文件落盘。
+async function downloadDocxFile() {
+    if (!currentTaskId) return validationError('没有可下载的任务');
+    setDownloading(true);
+    try {
+        const response = await fetch(
+            `${API_BASE}/download/${encodeURIComponent(currentTaskId)}?format=docx`,
+            { cache: 'no-store' }
+        );
+        if (!response.ok) throw new Error(await extractErrorMessage(response, '生成 Word 文档失败'));
+        const filename = serverFilename(response);
+        triggerBlobDownload(await response.blob(), '.docx', filename || noteFileName('.docx'));
+        showToast('Word 文档已生成，下载已开始', 'success');
+    } catch (error) {
+        showToast(`下载失败：${error.message}`, 'error');
+    } finally {
+        setDownloading(false);
+    }
+}
+
 // SRT 的时间轴只有后端那份分段里才有毫秒精度（transcript.md 的时间戳是整秒），
 // 所以和 Markdown 一样走服务端给正文，前端只落成文件。
-async function downloadSrtFile() {
-    if (!currentTaskId) return validationError('没有可下载的任务');
+async function downloadSrtFile() {    if (!currentTaskId) return validationError('没有可下载的任务');
     setDownloading(true);
     try {
         const response = await fetch(
@@ -3053,7 +3352,7 @@ function setDownloading(active) {
     button.querySelector('.btn-text').textContent = active ? '准备下载' : '下载';
 }
 
-// 网页端自己拼的文件名（txt / html / json / png）。后端清洗过分 P 与非法字符，
+// 网页端自己拼的文件名（txt / html / json / png / docx）。后端清洗过分 P 与非法字符，
 // 这里只负责拼上扩展名；没有下载名时返回空串，让 triggerBlobDownload 兜时间戳。
 function noteFileName(extension) {
     return currentDownloadName ? `${currentDownloadName}${extension}` : '';
