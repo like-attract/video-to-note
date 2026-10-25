@@ -478,6 +478,49 @@ async def test_complete_records_finish_reason_for_tail_detection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_condensed_pipeline_recovers_a_length_truncated_draft() -> None:
+    """完整链路回归：63 分钟转录的成稿被额度截断在 36:35，尾部必须续写出来。"""
+    segments = [
+        TranscriptSegment(
+            index * 60.0,
+            (index + 1) * 60.0,
+            (f"第{index}分钟讲的是主题{index}的定义、推导和具体例子。" * 5),
+        )
+        for index in range(63)
+    ]
+    final_tokens: list[int] = []
+
+    async def complete(prompt, max_tokens, effort="auto", **kwargs):
+        if "个连续片段" in prompt:
+            return "片段材料" * 1_500
+        if "写一份翔实、自然的 Markdown 视频笔记" in prompt:
+            final_tokens.append(max_tokens)
+            summarizer._last_finish_reason = "length"
+            return (
+                "# 视频笔记：《长视频》\n\n"
+                "## 前半段 [00:00-36:35]\n\n"
+                + "\n".join(
+                    f"[{index:02d}:00] 第{index}分钟讲的是主题{index}的定义、推导和具体例子。"
+                    for index in range(36)
+                )
+            )
+        if "补写第" in prompt:
+            return "## 补写 [01:00:00-01:03:00]\n\n[01:03:00] 第62分钟的结尾内容。"
+        raise AssertionError(f"未预期的请求：{prompt[:60]}")
+
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    summarizer._complete = complete
+
+    result = await summarizer.generate_summary("长视频", segments, style="faithful")
+
+    assert final_tokens and final_tokens[0] > 4_600, "成稿额度没有随材料放大"
+    assert "第62分钟的结尾内容" in result
+    assert any("按段补写" in warning for warning in summarizer.warnings)
+    assert all(warning.find("已跳过自动补写") == -1 for warning in summarizer.warnings)
+
+
+@pytest.mark.asyncio
 async def test_faithful_patch_timeout_keeps_original_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
