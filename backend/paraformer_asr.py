@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 import urllib.error
@@ -25,7 +26,7 @@ from .download import download_to_file
 from .whisper_asr import TranscriptionCancelledError
 from .transcript import TranscriptSegment
 
-HF_ENDPOINT = "https://hf-mirror.com"
+HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
 HEADERS = {"User-Agent": "VideoToNo/1.0", "Accept-Encoding": "identity"}
 
 # 每个组件的 HF 仓库与必需文件（sherpa-onnx 转换版把词表内嵌进 onnx 元数据，
@@ -200,7 +201,7 @@ class ParaformerTranscriber:
             if not downloaded:
                 raise RuntimeError(
                     f"Paraformer {component} 模型下载失败：{last_error}。"
-                    "已尝试 hf-mirror.com 与 huggingface.co，请检查网络/代理，"
+                    f"已尝试 {'、'.join(endpoints)}，请检查网络/代理，"
                     "或在节点页手动导入到 "
                     f"{directory}"
                 )

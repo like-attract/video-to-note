@@ -41,6 +41,36 @@ def test_cache_status_three_states(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert transcriber.core_ready() is True
 
 
+def test_download_component_falls_back_to_official_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认镜像失败时换官方源；自定义 HF_ENDPOINT 时不应偷偷换回官方源。"""
+    monkeypatch.setattr(paraformer_asr, "MIN_FILE_BYTES", tiny_min_sizes())
+    monkeypatch.setattr(paraformer_asr, "HF_ENDPOINT", "https://hf-mirror.com")
+    urls: list[str] = []
+
+    def fake_download(url, target, headers, cancel_event=None, **kwargs):
+        urls.append(url)
+        if "hf-mirror.com" in url:
+            return False, RuntimeError("mirror down")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"0" * 10)
+        return True, None
+
+    monkeypatch.setattr(paraformer_asr, "download_to_file", fake_download)
+    transcriber = ParaformerTranscriber(tmp_path / "cache")
+    transcriber._download_component("vad", None)
+
+    assert any("hf-mirror.com" in url for url in urls)
+    assert any("huggingface.co" in url for url in urls)
+
+    urls.clear()
+    monkeypatch.setattr(paraformer_asr, "HF_ENDPOINT", "https://mirror.example")
+    transcriber = ParaformerTranscriber(tmp_path / "cache2")
+    transcriber._download_component("vad", None)
+    assert urls and all("mirror.example" in url for url in urls)
+
+
 class _FakeResult:
     def __init__(self, text: str) -> None:
         self.text = text
