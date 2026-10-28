@@ -87,6 +87,11 @@ def test_bili_credentials_card_tells_the_machine_store_truth() -> None:
     assert "biliSavedMask" in body, "本机存过凭据时不能判成「没有凭据」"
     assert "refreshBiliSavedState();" in SCRIPT, "开页面没读本机凭据状态，提示条会一直劝人扫码"
     assert "biliClearSavedBtn" in PAGE, "自动落盘就得同时给一条清除入口"
+    # 旧 profile 会自动恢复登录；没有“换账号/重扫”的显式入口时，用户点扫码只会
+    # 一次次被送回旧账号，任务又报 412——群里就是这么卡住的。
+    assert 'id="biliRescanBtn"' in PAGE, "缺少重新扫码（换账号）入口"
+    assert "startBiliLogin({ force: true })" in SCRIPT
+    assert "已恢复上次登录的 B 站账号" in SCRIPT
 
 
 def test_srt_export_is_rendered_by_the_backend() -> None:

@@ -192,7 +192,7 @@ button, select { cursor: pointer; }
 .llm-test-status.error { color: var(--danger, #f85149); }
 .llm-test-status.testing { color: var(--text-muted); }
 
-.bili-login-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.bili-login-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .bili-login-row .button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
 .bili-login-status { min-width: 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
 

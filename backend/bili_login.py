@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import subprocess
 import time
@@ -27,6 +28,10 @@ LOGIN_URL = "https://passport.bilibili.com/login"
 SESSION_TTL_SECONDS = 300
 CDP_PORT_START = 9333
 CDP_PORT_COUNT = 10
+BILI_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
 # urllib 在 Windows 上会读注册表里的系统代理（changelog/1.4.2.md 排查 500 悬案时
 # 就记了这条）。系统代理指向一个已经僵死的本地代理进程时，连 127.0.0.1 上的 CDP
@@ -113,9 +118,17 @@ class BiliLoginManager:
         except Exception as exc:
             session.save_error = str(exc)
 
-    async def start(self) -> dict[str, Any]:
+    async def start(self, force: bool = False, _retry_invalid: bool = False) -> dict[str, Any]:
+        profile_dir = self.profile_root / "_bili_profile"
+        if force:
+            # 用户明确要换账号/重扫：连浏览器 profile 一起清掉，否则下一次启动
+            # 又会从同一个旧会话里把失效 cookie 读回来，扫码窗口根本不会出现。
+            self._terminate_browser()
+            await asyncio.to_thread(self._kill_profile_browsers, profile_dir)
+            await asyncio.to_thread(shutil.rmtree, profile_dir, ignore_errors=True)
+
         existing = self.session
-        if existing and self._alive() and existing.state != "timeout":
+        if not force and existing and self._alive() and existing.state != "timeout":
             return self._describe()
         self._terminate_browser()
 
@@ -126,7 +139,6 @@ class BiliLoginManager:
         if port is None:
             return {"ok": False, "error": "没有可用的调试端口，请稍后重试"}
 
-        profile_dir = self.profile_root / "_bili_profile"
         profile_dir.mkdir(parents=True, exist_ok=True)
         # 同一 profile 只能由一个浏览器实例持有，先清理残留进程
         await asyncio.to_thread(self._kill_profile_browsers, profile_dir)
@@ -176,10 +188,68 @@ class BiliLoginManager:
                 await asyncio.to_thread(self._kill_profile_browsers, profile_dir)
                 await asyncio.sleep(1)
         if cookies:
-            # 该浏览器配置已登录过，直接完成
-            self._mark_ready(self.session, cookies, "已从上次登录恢复")
+            # 该浏览器配置已登录过，但 cookie 可能早已失效：先在线校验一次。
+            # 失效时清掉 profile 重新起一个干净窗口，让用户能看到二维码。
+            valid = await asyncio.to_thread(self._cookies_look_logged_in, cookies)
+            if valid is False and not _retry_invalid:
+                self._terminate_browser()
+                await asyncio.to_thread(self._kill_profile_browsers, profile_dir)
+                await asyncio.to_thread(shutil.rmtree, profile_dir, ignore_errors=True)
+                return await self.start(force=True, _retry_invalid=True)
+            if valid is False:
+                # 干净 profile 里仍读到失效 cookie：不冒充登录成功，留在当前窗口让用户重扫
+                self.session.state = "waiting"
+                self.session.message = "检测到旧的登录态已失效，请在窗口中重新扫码登录"
+                return self._describe()
+            message = "已从上次登录恢复"
+            if valid is None:
+                message += "（未能在线校验登录态；若提示 412 请点「重新扫码（换账号）」）"
+            self._mark_ready(self.session, cookies, message)
             asyncio.create_task(self.cancel())
         return self._describe()
+
+    @staticmethod
+    def _cookies_look_logged_in(cookies: dict[str, str]) -> bool | None:
+        """在线校验 cookie 是否仍是有效登录。
+
+        返回 True/False 是确定结论，None 表示无法判断（网络、代理或 B 站风控）。
+        只有 False 才值得清掉 profile：把“网断了”误判成“登录失效”会白白逼用户重扫。
+        """
+        if not cookies.get("sessdata"):
+            return False
+        names = (
+            ("SESSDATA", "sessdata"),
+            ("bili_jct", "bili_jct"),
+            ("buvid3", "buvid3"),
+            ("buvid4", "buvid4"),
+            ("b_nut", "b_nut"),
+            ("b_lsid", "b_lsid"),
+        )
+        cookie_header = "; ".join(
+            f"{header}={cookies[value]}"
+            for header, value in names
+            if cookies.get(value)
+        )
+        request = urllib.request.Request(
+            "https://api.bilibili.com/x/web-interface/nav",
+            headers={
+                "User-Agent": BILI_USER_AGENT,
+                "Referer": "https://www.bilibili.com/",
+                "Cookie": cookie_header,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+        except Exception:
+            return None
+        code = payload.get("code")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        if code == 0:
+            return bool(data.get("isLogin"))
+        if code == -101:
+            return False
+        return None
 
     def _alive(self) -> bool:
         session = self.session

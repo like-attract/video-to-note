@@ -1719,14 +1719,32 @@ let biliSavedMask = '';
 
 function initBiliLogin() {
     bindListener('biliLoginBtn', 'click', startBiliLogin);
+    bindListener('biliRescanBtn', 'click', () => startBiliLogin({ force: true }));
     bindListener('biliLoginCancelBtn', 'click', cancelBiliLogin);
     bindListener('biliClearSavedBtn', 'click', clearSavedBiliCredentials);
 }
 
-async function startBiliLogin() {
+async function startBiliLogin(options = {}) {
     if (biliLoginTimer) return;
+    // 两个入口共用这个函数：按钮点击会把事件对象传进来，所以只认显式 force。
+    const force = Boolean(options.force);
+    if (force && !window.confirm(
+        '将清除本机浏览器里的 B 站登录态和本机已保存的凭据，然后打开扫码窗口重新登录。继续吗？'
+    )) return;
+    if (force) {
+        try {
+            await fetch(`${API_BASE}/bili-credentials`, { method: 'DELETE' });
+        } catch {
+            // 清除失败也继续：新扫到的 cookie 会在本次页面里优先于本机旧凭据
+        }
+        await refreshBiliSavedState();
+    }
     try {
-        const response = await fetch(`${API_BASE}/bili-login/start`, { method: 'POST' });
+        const response = await fetch(`${API_BASE}/bili-login/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ force })
+        });
         const data = await readResponse(response, '启动扫码登录失败');
         if (!data.ok) {
             showToast(data.error || data.message || '启动失败', 'error');
@@ -1734,7 +1752,12 @@ async function startBiliLogin() {
         }
         if (data.state === 'ready' && data.cookies) {
             // 该浏览器配置已登录过：直接回填，无需等待弹窗
-            fillBiliCredentials(data.cookies);
+            fillBiliCredentials(
+                data.cookies,
+                force
+                    ? '已重新导入 B 站凭据'
+                    : '已恢复上次登录的 B 站账号；要换账号请点「重新扫码（换账号）」'
+            );
             cancelBiliLogin();
             return;
         }
@@ -1748,14 +1771,14 @@ async function startBiliLogin() {
     }
 }
 
-function fillBiliCredentials(cookies) {
+function fillBiliCredentials(cookies, notice = 'B 站凭据已导入') {
     byId('sessdata').value = cookies.sessdata || '';
     byId('biliJct').value = cookies.bili_jct || '';
     byId('buvid3').value = cookies.buvid3 || '';
     const section = byId('credentialsSection');
     section.open = true;
     section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    showToast('B 站凭据已导入', 'success');
+    showToast(notice, 'success');
     updateBiliHint();
 }
 
@@ -1773,7 +1796,7 @@ async function refreshBiliSavedState() {
     const line = byId('biliSavedState');
     line.hidden = !biliSavedMask;
     line.textContent = biliSavedMask
-        ? `本机已存有凭据（SESSDATA ${biliSavedMask}），任务会自动使用，不用再扫`
+        ? `本机已存有凭据（SESSDATA ${biliSavedMask}），任务会自动使用；要换账号请点「重新扫码（换账号）」`
         : '';
     byId('biliClearSavedBtn').hidden = !biliSavedMask;
     updateBiliHint();

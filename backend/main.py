@@ -1859,9 +1859,15 @@ async def run_diagnostics(request: Request) -> dict[str, Any]:
     return {"ok": True, "checks": checks, "hints": hints}
 
 
+class BiliLoginStartPayload(BaseModel):
+    force: bool = False
+
+
 @app.post("/api/bili-login/start")
-async def bili_login_start() -> dict[str, Any]:
-    return await bili_login_manager.start()
+async def bili_login_start(
+    payload: BiliLoginStartPayload | None = None,
+) -> dict[str, Any]:
+    return await bili_login_manager.start(force=bool(payload and payload.force))
 
 
 @app.get("/api/bili-login/status")
@@ -2792,8 +2798,8 @@ def friendly_task_error(
         marker in lowered for marker in ("403", "412", "forbidden", "precondition")
     ):
         return (
-            "B 站拒绝了本次请求（风控或访问凭据失效）。请在「B 站访问凭据」里重新扫码导入 "
-            "SESSDATA 后重投链接；也可以稍等几分钟再试。"
+            "B 站拒绝了本次请求（风控或访问凭据失效）。请在「B 站访问凭据」里点"
+            "「重新扫码（换账号）」重新登录后重投链接；也可以稍等几分钟再试。"
         )
     return message
 

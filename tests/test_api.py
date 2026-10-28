@@ -2642,6 +2642,144 @@ def test_unhandled_error_handler_survives_redaction_failure(
     assert "后端内部错误" in response.json()["detail"]
 
 
+@pytest.mark.asyncio
+async def test_bili_login_force_clears_the_browser_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """换账号重扫必须清掉 _bili_profile，否则旧会话会被自动导入、二维码根本不出现。"""
+    manager = bili_login.BiliLoginManager(tmp_path)
+    profile = tmp_path / "_bili_profile"
+    profile.mkdir()
+    (profile / "old-session-marker").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(bili_login, "find_browser", lambda: "msedge.exe")
+    monkeypatch.setattr(bili_login, "free_cdp_port", lambda: 9333)
+    monkeypatch.setattr(manager, "_kill_profile_browsers", lambda _path: None)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(bili_login.asyncio, "sleep", no_sleep)
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(bili_login.subprocess, "Popen", lambda _args: FakeProcess())
+
+    async def no_cookies() -> dict[str, str]:
+        return {}
+
+    manager._fetch_cookies = no_cookies
+    result = await manager.start(force=True)
+
+    assert result["state"] == "waiting"
+    assert not (profile / "old-session-marker").exists()
+    manager._terminate_browser()
+
+
+@pytest.mark.asyncio
+async def test_bili_login_discards_an_expired_restored_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧 profile 里的 SESSDATA 已失效时不能直接“恢复成功”，要换成干净窗口让用户重扫。"""
+    manager = bili_login.BiliLoginManager(tmp_path)
+    profile = tmp_path / "_bili_profile"
+    profile.mkdir()
+    (profile / "old-session-marker").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(bili_login, "find_browser", lambda: "msedge.exe")
+    monkeypatch.setattr(bili_login, "free_cdp_port", lambda: 9333)
+    monkeypatch.setattr(manager, "_kill_profile_browsers", lambda _path: None)
+    monkeypatch.setattr(manager, "_cookies_look_logged_in", lambda _cookies: False)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(bili_login.asyncio, "sleep", no_sleep)
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(bili_login.subprocess, "Popen", lambda _args: FakeProcess())
+    calls = {"count": 0}
+
+    async def stale_once() -> dict[str, str]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"sessdata": "expired", "bili_jct": "j", "buvid3": "b"}
+        return {}
+
+    manager._fetch_cookies = stale_once
+    result = await manager.start()
+
+    assert result["state"] == "waiting"
+    assert result["cookies"] is None
+    assert not (profile / "old-session-marker").exists()
+    manager._terminate_browser()
+
+
+def test_bili_login_cookie_validation_distinguishes_expired_and_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self.payload = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(_request, timeout):  # noqa: ANN001
+        return FakeResponse({"code": -101, "data": {"isLogin": False}})
+
+    monkeypatch.setattr(bili_login.urllib.request, "urlopen", fake_urlopen)
+    assert bili_login.BiliLoginManager._cookies_look_logged_in(
+        {"sessdata": "expired"}
+    ) is False
+
+    def fake_logged_in(_request, timeout):  # noqa: ANN001
+        return FakeResponse({"code": 0, "data": {"isLogin": True}})
+
+    monkeypatch.setattr(bili_login.urllib.request, "urlopen", fake_logged_in)
+    assert bili_login.BiliLoginManager._cookies_look_logged_in(
+        {"sessdata": "valid"}
+    ) is True
+
+    def fake_network_error(_request, timeout):  # noqa: ANN001
+        raise RuntimeError("proxy down")
+
+    monkeypatch.setattr(bili_login.urllib.request, "urlopen", fake_network_error)
+    assert bili_login.BiliLoginManager._cookies_look_logged_in(
+        {"sessdata": "unknown"}
+    ) is None
+
+
+def test_bili_login_start_accepts_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    async def fake_start(force: bool = False) -> dict:
+        calls.append(force)
+        return {"ok": True, "state": "waiting", "cookies": None, "message": ""}
+
+    monkeypatch.setattr(main.bili_login_manager, "start", fake_start)
+    client = TestClient(main.app)
+
+    assert client.post("/api/bili-login/start").status_code == 200
+    assert client.post("/api/bili-login/start", json={"force": True}).status_code == 200
+    assert calls == [False, True]
+
+
 def test_scanned_bili_cookies_are_saved_on_the_machine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

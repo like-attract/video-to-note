@@ -143,6 +143,7 @@
             <p class="section-note">仅在公开访问受限时填写。扫码导入的凭据会自动加密存进本机，下次打开直接能用；手填的那份只在这次页面里有效。</p>
             <div class="bili-login-row">
                 <button id="biliLoginBtn" class="button secondary" type="button">扫码登录导入</button>
+                <button id="biliRescanBtn" class="button ghost" type="button" title="清除浏览器里的旧登录态，重新打开扫码窗口">重新扫码（换账号）</button>
                 <button id="biliLoginCancelBtn" class="button ghost" type="button" hidden>取消</button>
                 <button id="biliClearSavedBtn" class="button ghost" type="button" hidden>清除本机凭据</button>
                 <span id="biliLoginStatus" class="bili-login-status"></span>
@@ -440,6 +441,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261025-1"></script>
+<script src="script.js?v=20261025-2"></script>
 </body>
 </html>
