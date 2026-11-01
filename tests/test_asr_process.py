@@ -46,6 +46,24 @@ for line in sys.stdin:
         break
 """
 
+# 一条 done 事件就把整段转录装在一行里：large-v3 跑 20 分钟以上的音频，这行 JSON 轻易超过
+# asyncio 默认的 64 KB 行上限（issue #6）。这里用纯 ASCII 把体积撑到约 150 KB，避免编码干扰。
+BIG_LINE_SCRIPT = """
+import json, sys
+sys.stdin.readline()
+text = "lorem ipsum dolor sit amet " * 6000
+print(json.dumps({"event": "progress", "done": 1.0, "total": 2.0}), flush=True)
+print(json.dumps({"event": "done", "result": {
+    "segments": [{"start": 0.0, "end": 1.0, "text": text}],
+    "language": "zh", "device": "cuda", "model": "large-v3",
+    "requested_model": "large-v3", "duration": 1.0, "transcribe_seconds": 0.1,
+}}, ensure_ascii=False), flush=True)
+"""
+
+# 等待方靠「哨兵」醒，任何一条路漏发哨兵都是永久挂住 —— 所以这里一律加超时兜底，
+# 让回归失败成 TimeoutError 而不是把整个测试进程吊死。
+WAIT_SECONDS = 30.0
+
 
 def fake_child(script: str):
     return lambda: [sys.executable, "-c", script]
@@ -112,6 +130,73 @@ async def test_cancel_reaches_the_worker(tmp_path, monkeypatch) -> None:
         await asr_process.run_in_child(
             tmp_path / "a.mp3", "small", False, "标题", cancel_event
         )
+
+
+@pytest.mark.asyncio
+async def test_oversized_done_line_is_read_instead_of_hanging(tmp_path, monkeypatch) -> None:
+    """issue #6：单行 done 事件超过 asyncio 默认 64 KB 时，任务必须正常拿到转录。
+
+    修复前 `readline()` 抛 ValueError、`pump()` 静默死掉、哨兵永不入队，主循环永远卡在
+    `events.get()` 上；界面停在「语音转写 N%」，GPU 还在算，任务既不失败也不完成。
+    """
+    monkeypatch.setattr(asr_process, "child_command", fake_child(BIG_LINE_SCRIPT))
+
+    result = await asyncio.wait_for(
+        asr_process.run_in_child(tmp_path / "a.mp3", "large-v3", True, "长音频"),
+        timeout=WAIT_SECONDS,
+    )
+
+    assert len(result["segments"]) == 1
+    assert len(result["segments"][0].text) > 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_line_limit_exceeded_fails_the_task_instead_of_hanging(
+    tmp_path, monkeypatch
+) -> None:
+    """上限真被顶破时也要收口：报可读原因并叫停工人，绝不能换个地方继续挂。"""
+    monkeypatch.setattr(asr_process, "PIPE_LINE_LIMIT", 512)
+    monkeypatch.setattr(asr_process, "child_command", fake_child(BIG_LINE_SCRIPT))
+
+    with pytest.raises(asr_process.TranscriptionWorkerDied) as raised:
+        await asyncio.wait_for(
+            asr_process.run_in_child(tmp_path / "a.mp3", "large-v3", True, "长音频"),
+            timeout=WAIT_SECONDS,
+        )
+
+    assert "单行输出超过了管道行上限" in str(raised.value)
+    assert "程序本身仍在运行" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_crash_does_not_leak_the_pump_task(
+    tmp_path, monkeypatch
+) -> None:
+    """回调抛异常时 pump/cancel 两个协程也要被收走，不留悬挂任务。"""
+    monkeypatch.setattr(asr_process, "child_command", fake_child(OK_SCRIPT))
+    created: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def tracking_create_task(coro, **kwargs):
+        task = real_create_task(coro, **kwargs)
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(asr_process.asyncio, "create_task", tracking_create_task)
+
+    def boom(done: float, total: float) -> None:
+        raise RuntimeError("进度回调炸了")
+
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(
+            asr_process.run_in_child(
+                tmp_path / "a.mp3", "base", False, "标题", None, boom
+            ),
+            timeout=WAIT_SECONDS,
+        )
+
+    await asyncio.sleep(0)
+    assert created and all(task.done() for task in created)
 
 
 def test_exit_code_is_printed_as_ntstatus() -> None:

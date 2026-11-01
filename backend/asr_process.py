@@ -22,6 +22,12 @@ from .transcript import TranscriptSegment
 # 工人被取消后，主程序最多再等这么久就硬收
 CANCEL_GRACE_SECONDS = 60.0
 
+# 工人是「一行一个 JSON 事件」，done 事件里带着整段转录。asyncio 的默认行上限只有 64 KB，
+# 一条二十分钟以上的转录就能顶破它：readline() 抛 ValueError → pump() 静默死掉 → 哨兵永不
+# 入队 → 主循环永远卡在 events.get() 上（2026-10-17 issue #6，本机按同样脚本复现过）。
+# 16 MB 足够装下十小时量级的转录，真撞上了也还有 pump() 里的兜底把任务判失败。
+PIPE_LINE_LIMIT = 16 * 1024 * 1024
+
 
 def child_command() -> list[str]:
     """工人怎么起：打包版复用自身（带 --asr-child），源码版直接跑本模块。"""
@@ -97,6 +103,8 @@ async def run_in_child(
         stdout=asyncio.subprocess.PIPE,
         # stderr 不接管道：让它照原样进 _app.log，native 库的唠叨不会撑满管道把工人卡死
         stderr=None,
+        # 单行事件（done 的 result 带着整段转录）可能远超 asyncio 默认的 64 KB，见 PIPE_LINE_LIMIT
+        limit=PIPE_LINE_LIMIT,
     )
     assert process.stdin and process.stdout
     writer = process.stdin
@@ -104,15 +112,36 @@ async def run_in_child(
     await writer.drain()
 
     events: asyncio.Queue[str] = asyncio.Queue()
+    # 输出通道已经判死：不再等工人退出（它被 kill 了，等下去只会换来第二个挂死点）
+    abandoned = False
+
+    async def fail(message: str) -> None:
+        """读取输出这条路已经不可用：报一条 error 事件，把工人和它的管道一起收掉。"""
+        nonlocal abandoned
+        abandoned = True
+        await events.put(
+            json.dumps({"event": "error", "message": message}, ensure_ascii=False) + "\n"
+        )
+        abandon_worker(process)
 
     async def pump() -> None:
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            await events.put(line.decode("utf-8", "replace"))
-        # 管道关了就说明工人没了（崩溃、被杀或自己退出）：用哨兵把等待的一方叫醒
-        await events.put("")
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                await events.put(line.decode("utf-8", "replace"))
+        except (asyncio.LimitOverrunError, ValueError):
+            await fail(
+                f"转写工人的单行输出超过了管道行上限（{PIPE_LINE_LIMIT // (1024 * 1024)} MB）；"
+                "本次任务已停止，可换一个转写档位重试"
+            )
+        except Exception as exc:  # noqa: BLE001
+            await fail(f"读取转写输出失败：{type(exc).__name__}: {exc}")
+        finally:
+            # 管道关了就说明工人没了（崩溃、被杀或自己退出）：用哨兵把等待的一方叫醒。
+            # 无论正常结束还是异常退出都要发，等待方不能靠「猜」来醒。
+            await events.put("")
 
     pump_task = asyncio.create_task(pump())
     cancel_task = asyncio.create_task(
@@ -122,6 +151,7 @@ async def run_in_child(
     payload: dict[str, Any] | None = None
     failure: str | None = None
     cancelled = False
+    exit_code: int | None = None
     try:
         while True:
             line = await events.get()
@@ -145,13 +175,15 @@ async def run_in_child(
             elif kind == "error":
                 failure = str(event.get("message") or "转写工人未给出原因")
                 break
+        exit_code = process.returncode if abandoned else await _reap(process, cancelled)
     finally:
+        # 放在 finally 里：循环里任何一处抛异常（比如 progress 回调炸了）都不会留下悬挂协程
         cancel_task.cancel()
-        await asyncio.gather(cancel_task, return_exceptions=True)
-
-    exit_code = await _reap(process, cancelled)
-    pump_task.cancel()
-    await asyncio.gather(pump_task, return_exceptions=True)
+        pump_task.cancel()
+        await asyncio.gather(cancel_task, pump_task, return_exceptions=True)
+        if exit_code is None and process.returncode is None:
+            # 循环是抛异常退出的：工人还活着就会继续占着 GPU，而主程序已经认定这次任务结束
+            abandon_worker(process)
 
     if cancelled:
         from .whisper_asr import TranscriptionCancelledError
@@ -182,6 +214,28 @@ async def _send_cancel_when_asked(
         await asyncio.sleep(0.5)
 
 
+def abandon_worker(process: asyncio.subprocess.Process) -> None:
+    """杀掉工人，并把它的管道一起关掉。
+
+    只 kill 是不够的：行超限时 StreamReader 已经把管道暂停（不再有挂起的读），工人死掉
+    之后这条管道也等不到 EOF，transport 就永远不算 disconnected，`_try_finish()` 不触发，
+    `process.wait()` 的等待者永远不会被叫醒 —— 等于换个地方挂死。2026-11-01 本机实测：
+    kill 后 returncode 0.1 秒就变成 1，`wait()` 却一直不返回；close() 之后立刻返回。
+    """
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+    transport = getattr(process, "_transport", None)
+    close = getattr(transport, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _reap(process: asyncio.subprocess.Process, cancelled: bool) -> int | None:
     if process.returncode is not None:
         return process.returncode
@@ -191,8 +245,12 @@ async def _reap(process: asyncio.subprocess.Process, cancelled: bool) -> int | N
         else:
             await process.wait()
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
+        # 宽限期过了就硬收；收完再给 5 秒看它退没退，退不掉也不再等（同一条管道可能也收不到 EOF）
+        abandon_worker(process)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
     return process.returncode
 
 
