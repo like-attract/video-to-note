@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urljoin, urlunsplit
 
 import yt_dlp
 
+from .download import download_to_file
 from .transcript import TranscriptSegment, parse_subtitle_payload
 
 # 截图目录名会被写进笔记正文的相对引用（./frames/xxx.jpg），改它等于让历史笔记和导出包里的截图全部失效
@@ -688,8 +689,9 @@ class VideoProcessor:
         kind: str,
         should_abort: Callable[[], bool] | None = None,
         notes: list[str] | None = None,
+        reason: str | None = None,
     ) -> Path:
-        """风控回退下载：playurl 取 dash 流直链（kind=audio / video）。
+        """风控/网络失败回退下载：playurl 取 dash 流直链（kind=audio / video）。
 
         音频取带宽最高的 dash.audio；预览取高度 >=360 中最小的一路 video。
         拿不到 dash 时退到 durl（完整 mp4，体积大但转写/截图都能用）。
@@ -740,7 +742,8 @@ class VideoProcessor:
             )
         if notes is not None:
             notes.append(
-                "yt-dlp 下载被 B 站风控拦截，已改用 playurl 接口直连"
+                (reason or "yt-dlp 下载被 B 站风控拦截")
+                + "，已改用 playurl 接口直连"
                 + ("音频流" if kind == "audio" else "预览视频流")
                 + f"（分 P {page['page']}）"
             )
@@ -760,6 +763,7 @@ class VideoProcessor:
             except Exception as exc:
                 last_error = exc
                 target.unlink(missing_ok=True)
+                target.with_name(target.name + ".part").unlink(missing_ok=True)
         raise RuntimeError(f"B 站接口直连下载失败：{last_error}")
 
     async def download_audio(
@@ -801,15 +805,30 @@ class VideoProcessor:
                     return max(matches, key=lambda item: item.stat().st_size)
             except Exception as exc:
                 kind = self.detect_source(url)
-                if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
-                    return self._download_bilibili_media_via_api(
-                        url,
-                        task_dir / f"{media_name}.m4a",
-                        cookie,
-                        "audio",
-                        should_abort,
-                        notes,
+                if kind == VideoSource.BILIBILI:
+                    # 不再只在"风控"时回退：内容不完整、连接被掐断同样会让 yt-dlp
+                    # 报 "Downloaded N bytes, expected M bytes"，playurl 直连通常能下完。
+                    reason = (
+                        "yt-dlp 下载被 B 站风控拦截"
+                        if self._bilibili_blocked(exc)
+                        else f"yt-dlp 下载失败（{self._brief_error(exc)}）"
                     )
+                    try:
+                        return self._download_bilibili_media_via_api(
+                            url,
+                            task_dir / f"{media_name}.m4a",
+                            cookie,
+                            "audio",
+                            should_abort,
+                            notes,
+                            reason=reason,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as api_error:
+                        raise RuntimeError(
+                            f"{reason}；B 站接口直连也失败：{api_error}"
+                        ) from exc
                 if kind != VideoSource.DOUYIN:
                     raise
                 ydl_error = exc
@@ -860,15 +879,28 @@ class VideoProcessor:
                     return max(matches, key=lambda item: item.stat().st_size)
             except Exception as exc:
                 kind = self.detect_source(url)
-                if kind == VideoSource.BILIBILI and self._bilibili_blocked(exc):
-                    return self._download_bilibili_media_via_api(
-                        url,
-                        task_dir / "preview.m4s",
-                        cookie,
-                        "video",
-                        should_abort,
-                        notes,
+                if kind == VideoSource.BILIBILI:
+                    reason = (
+                        "yt-dlp 下载被 B 站风控拦截"
+                        if self._bilibili_blocked(exc)
+                        else f"yt-dlp 下载失败（{self._brief_error(exc)}）"
                     )
+                    try:
+                        return self._download_bilibili_media_via_api(
+                            url,
+                            task_dir / "preview.m4s",
+                            cookie,
+                            "video",
+                            should_abort,
+                            notes,
+                            reason=reason,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as api_error:
+                        raise RuntimeError(
+                            f"{reason}；B 站接口直连也失败：{api_error}"
+                        ) from exc
                 if kind != VideoSource.DOUYIN:
                     raise
             if self.detect_source(url) != VideoSource.DOUYIN:
@@ -1122,6 +1154,11 @@ class VideoProcessor:
                     return found
         return None
 
+    @staticmethod
+    def _brief_error(error: Exception) -> str:
+        text = " ".join(str(error).split())
+        return text[:160] or type(error).__name__
+
     def _download_direct_media(
         self,
         media_url: str,
@@ -1140,24 +1177,29 @@ class VideoProcessor:
         )
         if cookie_header:
             headers["Cookie"] = cookie_header
-        request = urllib.request.Request(media_url, headers=headers)
         target.parent.mkdir(parents=True, exist_ok=True)
-        # 先写 .part 再改名：Windows 不能删除还打开的文件，且中断的半文件不能被
-        # 主流程的 audio.* 复用扫描当成可用产物（.part 已在调用方的排除列表里）。
-        partial = target.with_name(target.name + ".part")
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-                while chunk := response.read(1024 * 1024):
-                    if should_abort is not None and should_abort():
-                        raise asyncio.CancelledError("任务已取消")
-                    output.write(chunk)
-            if partial.stat().st_size == 0:
-                raise RuntimeError("媒体直连下载结果为空")
-            partial.replace(target)
-            return target
-        finally:
-            partial.unlink(missing_ok=True)
+        # 与模型下载共用同一套 .part 断点续传 + Content-Length 校验：
+        # B 站 CDN 也会在单次连接里提前断流，截断的音频绝不能改名成正式产物。
+        class _AbortFlag:
+            def is_set(self) -> bool:
+                return bool(should_abort is not None and should_abort())
 
+        try:
+            ok, error = download_to_file(
+                media_url,
+                target,
+                headers,
+                cancel_event=_AbortFlag(),
+                attempts=3,
+                timeout=60,
+            )
+        except asyncio.CancelledError:
+            # 用户取消时丢掉半成品；网络中断留下的 .part 则保留给下一次续传
+            target.with_name(target.name + ".part").unlink(missing_ok=True)
+            raise
+        if not ok:
+            raise RuntimeError(f"媒体直连下载失败：{error}")
+        return target
 
     @staticmethod
     def _select_subtitle(
@@ -1234,6 +1276,14 @@ class VideoProcessor:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            # B 站 CDN 偶发在单次连接里提前断流（用户反馈 "Downloaded 8302093 bytes,
+            # expected 24828782 bytes"）。yt-dlp 自己会重试，这里把次数与超时放宽；
+            # 仍失败时 download_audio 会回退到 playurl 直连。
+            "retries": 10,
+            "fragment_retries": 10,
+            "extractor_retries": 3,
+            "socket_timeout": 60,
+            "continuedl": True,
             "http_headers": {"User-Agent": user_agent or VideoProcessor.BILI_USER_AGENT},
         }
 

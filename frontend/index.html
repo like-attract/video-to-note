@@ -23,7 +23,7 @@
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
-                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.6</span></h1>
+                <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.7</span></h1>
                 <p>个人本地视频笔记工具</p>
             </div>
         </div>
@@ -143,6 +143,7 @@
             <p class="section-note">仅在公开访问受限时填写。扫码导入的凭据会自动加密存进本机，下次打开直接能用；手填的那份只在这次页面里有效。</p>
             <div class="bili-login-row">
                 <button id="biliLoginBtn" class="button secondary" type="button">扫码登录导入</button>
+                <button id="biliRescanBtn" class="button ghost" type="button" title="清除浏览器里的旧登录态，重新打开扫码窗口">重新扫码（换账号）</button>
                 <button id="biliLoginCancelBtn" class="button ghost" type="button" hidden>取消</button>
                 <button id="biliClearSavedBtn" class="button ghost" type="button" hidden>清除本机凭据</button>
                 <span id="biliLoginStatus" class="bili-login-status"></span>
@@ -164,14 +165,14 @@
 
         <details id="mcpSection" class="config-section mcp-section collapsible-section">
             <summary>让 agent 接入（MCP）</summary>
-            <p class="section-note">本程序内置 MCP 服务器：在 Cherry Studio、Codex 这类客户端里填下面的地址，就能让你的 agent 直接把视频转成字幕稿或笔记。任务仍在这台机器上跑，请先让本程序开着。</p>
+            <p class="section-note">本程序内置 MCP 服务器：在 WorkBuddy、Cherry Studio、Codex 这类客户端里填下面的地址，就能让你的 agent 直接把视频转成字幕稿或笔记。任务仍在这台机器上跑，请先让本程序开着。</p>
             <div class="mcp-row">
                 <code id="mcpSseUrl">http://127.0.0.1:8000/mcp/sse</code>
                 <button id="copyMcpUrlBtn" class="button ghost compact-button" type="button">复制地址</button>
             </div>
             <div class="mcp-row">
                 <button id="copyMcpConfigBtn" class="button ghost compact-button" type="button">复制 JSON 配置</button>
-                <small>Cherry Studio：设置 → MCP 服务器 → 添加 → 从 JSON 导入。</small>
+                <small>WorkBuddy：粘进 <code>%USERPROFILE%\.workbuddy-ai\mcp.json</code>，保存后到「连接器 → 自定义连接器」点一次「信任」。Cherry Studio：设置 → MCP 服务器 → 添加 → 从 JSON 导入。</small>
             </div>
             <p class="mcp-note">可以跟 agent 说「先把这个视频转成带时间轴的文字稿」——它走 <code>transcribe_video</code> + <code>get_transcript</code>，<strong>本机不需要配 API Key</strong>，整理成什么样由客户端的模型决定；要一份现成成品笔记才用 <code>summarize_video</code>（需要 Key）。</p>
             <p class="mcp-note">只支持 stdio 的客户端可以跑 <code>python -m backend.mcp_server</code>，它会自动找 8000–8019 上已经开着的本服务。</p>
@@ -296,7 +297,7 @@
             <div id="mcpHint" class="hint-bar info" hidden>
                 <div class="hint-text">
                     <strong>想让 AI 客户端直接帮你转视频？</strong>
-                    <span>左侧「让 agent 接入（MCP）」里就是本机地址，点一下即可复制，Cherry Studio / Codex 粘贴就能用。</span>
+                    <span>左侧「让 agent 接入（MCP）」里就是本机地址，点一下即可复制，WorkBuddy / Cherry Studio / Codex 粘贴就能用。</span>
                 </div>
                 <div class="hint-actions">
                     <button id="mcpHintGoBtn" class="button ghost" type="button">看地址</button>
@@ -378,6 +379,7 @@
                     <label class="sr-only" for="formatSelect">下载格式</label>
                     <select id="formatSelect">
                         <option value="markdown">Markdown 文件</option>
+                        <option value="docx">Word 文档 (.docx)</option>
                         <option value="srt">字幕 (.srt)</option>
                         <option value="html">HTML</option>
                         <option value="json">JSON</option>
@@ -417,7 +419,28 @@
     </div>
 </div>
 
+<div id="modelDownloadModal" class="modal-backdrop" hidden>
+    <div class="modal-card model-download-card" role="dialog" aria-modal="true" aria-labelledby="modelDownloadTitle">
+        <h3 id="modelDownloadTitle">转写模型尚未下载</h3>
+        <p id="modelDownloadIntro" class="update-body"></p>
+        <div id="modelDownloadSteps" class="model-download-steps" hidden></div>
+        <div id="modelDownloadProgressWrap" class="model-download-progress" hidden>
+            <div class="download-progress-track">
+                <div id="modelDownloadBar" class="download-progress-bar"></div>
+            </div>
+            <p id="modelDownloadProgressText" class="model-download-progress-text"></p>
+        </div>
+        <p id="modelDownloadError" class="model-download-error" hidden></p>
+        <div class="modal-actions">
+            <button id="modelManualBtn" class="button ghost" type="button">手动导入（推荐）</button>
+            <button id="modelManualResumeBtn" class="button" type="button" hidden>已放好，继续生成</button>
+            <button id="modelAutoBtn" class="button" type="button">自动下载并继续</button>
+            <button id="modelCancelBtn" class="button ghost" type="button">取消</button>
+        </div>
+    </div>
+</div>
+
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261017-2"></script>
+<script src="script.js?v=20261025-2"></script>
 </body>
 </html>

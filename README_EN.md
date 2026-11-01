@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.4.6</h1>
+<h1 align="center">VideoToNo v1.4.7</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -16,18 +16,21 @@
 
 VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: give it a Bilibili, Douyin, YouTube link or a local video; it prefers platform captions including Bilibili AI captions, falls back to on-device transcription when none exist (paraformer is the fast default for Chinese, the Whisper family stays available), then has your chosen LLM write timestamped Markdown notes. 
 
-> 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
+> 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (WorkBuddy uses `~/.workbuddy-ai/skills/`; Claude Code and pi follow their own conventions) and agents like WorkBuddy, Claude Code or pi can generate video notes from a single sentence. **The Skill is only a remote control — VideoToNo itself must exist on the machine first** (the portable exe is enough; no need to launch it). WorkBuddy can also attach to the local MCP server directly — see the **MCP / AI clients** and **Agent Skill** sections below. See `skills/video-to-note/SKILL.md` for details.
 
-## 🆕 What's New (v1.4.5 → v1.4.6)
+## 🆕 What's New (v1.4.6 → v1.4.7)
 
-- **Subtitles now export as `.srt`**: the export menu has a "字幕 (.srt)" entry, one cue per transcript segment, ready to drop into VLC / PotPlayer / CapCut / Premiere. The HTTP API and MCP accept `output_format=srt` too, so archiving no longer means formatting timecodes yourself
-- **Already have a subtitle file? Skip the video entirely**: the source picker has a "字幕文件" entry — hand it a `.srt` / `.vtt` and it goes straight to writing the note. Nothing is downloaded, nothing is transcribed, and the note title comes from the subtitle filename. A file with no timed text is rejected on the spot instead of halfway through the task
-- **Scan the Bilibili QR once**: credentials are now encrypted and stored on this machine automatically, the panel says so, and later sessions work without asking you to scan again — there is also a "清除本机凭据" button to undo it. Cookies typed in by hand still live only in the current page
-- **Send a link to your agent even when the app is closed**: the skill script starts a headless instance in the background (no window, no tray icon) and carries on; it exits by itself once it has been idle with no task running
-- **Fixed: on some machines "the page loads but every button is dead and dark mode is stuck"** — if you hit that, this release addresses it. The cause was that machine's own registry mislabeling script files, which made the browser refuse to run the page's JavaScript (nothing to do with app settings, and reinstalling did not help). Front-end asset types are now pinned by the app itself
+- **New export format: Word `.docx`**: the export menu now has a "Word 文档 (.docx)" entry. Headings, lists, bold text, tables and the note's timed screenshots all come along; Word and WPS can edit the file directly
+- **Choosing a model that is not downloaded yet no longer means waiting blindly**: pressing Generate explains the model size and recommends manual import — it opens the folder, lists the files to download and where to get them. "Auto download" is still available, and the dialog shows how much of the current file has arrived. If a download fails, the same dialog offers the manual route instead of failing the whole task
+- **Fixed: Bilibili multi-part audio sometimes failed with an incomplete download** — if the connection drops mid-file, the app now switches to Bilibili's play URLs, resuming and retrying before transcription starts
+- **Fixed: an expired Bilibili session could not be re-scanned** — "Scan to log in" used to restore the old account from the local browser profile; when those cookies had expired, tasks kept failing with "Bilibili rejected this request". The app now validates the restored session and opens a clean QR window when it is no longer valid, and the credentials panel has a "重新扫码（换账号）" button to switch accounts at any time
+- **Fixed: long transcriptions sometimes froze for good** — with `large-v3` on a 20-minute-plus file the progress bar stalled, the log stopped growing, the GPU kept working, and the task neither failed nor finished. The worker returns the whole transcript as one JSON line, and anything past asyncio's default 64 KB line limit silently killed the reader coroutine, leaving the parent waiting forever. The line limit is now 16 MB, and a genuine read failure reports a clear error and stops the worker instead of hanging
+- **Fixed: longer notes could stop halfway** — a note ending at 36:35 while the transcript ran to 01:03:15 is now recognized as a genuinely missing tail and completed in bounded sections. Notes that only omit timestamps but do contain the content are left alone
 
 <details>
-<summary>Previous releases (v1.4.5 and earlier)</summary>
+<summary>Previous releases (v1.4.6 and earlier)</summary>
+
+- **v1.4.6**: subtitles export as `.srt` and `.srt` / `.vtt` files can be imported to write a note; Bilibili credentials are encrypted and stored after one QR scan; the skill starts a headless instance when the app is closed and lets it exit when idle; fixed machines whose registry broke script MIME types and left the whole page unresponsive.
 
 - **v1.4.5**: long videos and small local models finish in one run far more often (a rejected request no longer discards the whole task, and fragmented ASR lines are merged before chunking); a "token limit" error now names the model's context window and what to widen; txt / html / json / PNG exports are named after the video title, Bilibili parts carry their part number and "transcript only" archives as `title【转录】.md`; transcription runs in its own process so a faulty model library fails one task instead of the app; the connection test retries without a proxy, a self-check panel was added, and startup checks for a new release with a "skip this version" choice.
 
@@ -66,14 +69,14 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.4.6-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.4.7-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;
 3. Paste a video URL or upload a local file — for a finished note, enter a provider, model, and API key first; **for a timestamped transcript only, choose "Transcript only" and enter nothing**;
 4. Generate and review the note or the transcript.
 
-The portable build starts the local service and stays in the system tray. The first Whisper transcription downloads a model, so keep the network available. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
+The portable build starts the local service and stays in the system tray. The first Whisper / paraformer transcription offers to download a model; you can also follow the "手动导入模型" guide and place the files yourself. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
 
 ## ✨ Highlights
 
@@ -142,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 <details>
 <summary>🤖 MCP / AI clients (advanced)</summary>
 
-VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a timestamped transcript or a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
+VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as WorkBuddy, Cherry Studio and Codex can turn a video link into a timestamped transcript or a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
 
 Pick a route: if your client already has a capable model, use `transcribe_video` + `get_transcript` to take the timestamped transcript only — **no API key for this machine**, and the client decides the note structure and style. Reach for `summarize_video` when a finished note is wanted in one shot (or for a long video best processed in the background).
 
@@ -172,7 +175,52 @@ Available tools:
 | `list_llm_keys` | List the endpoint addresses whose keys are saved locally (masked values and storage algorithm only) |
 | `get_saved_config` | View saved configuration status with secrets masked |
 
-### Cherry Studio (recommended; no local Python needed)
+### WorkBuddy (recommended)
+
+There are two ways in: **installing the Skill is the least work** (no MCP config, no port juggling); use MCP if you want the model to call the tools directly mid-conversation.
+
+> Neither route is cloud-only: the Skill and the MCP server are just remote controls — transcription, subtitles and note writing all happen in VideoToNo on this machine. So VideoToNo has to exist here first: grab the [portable exe](https://github.com/like-attract/video-to-note/releases/latest) if you have not already (any folder will do). You do **not** need to launch it — the script starts it in the background.
+
+#### Option 1: install the Skill (recommended)
+
+1. Copy the whole `skills/video-to-note/` directory from this repo into WorkBuddy's user skills directory:
+
+```text
+C:\Users\<you>\.workbuddy-ai\skills\video-to-note\
+```
+
+2. Start a new WorkBuddy conversation (skills load at session start) and check that `video-to-note` appears in the skill list;
+3. Then just ask:
+
+```text
+Turn this Bilibili video into notes: https://www.bilibili.com/video/BV1xx
+```
+
+The bundled script scans ports 8000–8019 first: if a service answers it reuses it, otherwise it starts a headless instance in the background (no browser window, no tray icon, exits after 15 idle minutes). **The first time it will ask where the portable exe lives** — give the full path once and it is remembered (in `%LOCALAPPDATA%\VideoToNo\skill-server-cmd.txt`); you can also set `VIDEOTONOTES_SERVER_CMD` up front. If the skill directory still lives inside the VideoToNo repo, it simply starts the repo's `launcher.py` and needs no path at all.
+
+#### Option 2: attach the MCP server (call the tools directly)
+
+Edit `C:\Users\<you>\.workbuddy-ai\mcp.json` (older builds may use `C:\Users\<you>\.workbuddy\mcp.json`; merge into `mcpServers` if other servers are already there — do not replace the whole file):
+
+```json
+{
+  "mcpServers": {
+    "video-to-note": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8000/mcp/sse",
+      "description": "VideoToNo local video-notes service"
+    }
+  }
+}
+```
+
+After saving, open WorkBuddy's **Connectors** page: `video-to-note` shows up under the custom-connector entry in the top-right corner, and you must click **Trust** once before it actually loads. Then ask "use video-to-note to transcribe this video". If the port is not 8000, use the real one — the in-app **Connect an agent (MCP)** card's **Copy JSON config** button generates exactly this block (minus `description`).
+
+> MCP talks to a service that is **already running**, so start VideoToNo first for this route; the Skill route starts it for you. Either way tasks run on this machine and land in the same `workspace/`.
+
+WorkBuddy brings its own model, so the easiest pattern is the one above: let it use `transcribe_video` / `--transcript-only` for the timestamped transcript only, then organise and write in the same conversation — **no API key needed on this machine**.
+
+### Cherry Studio (alternative; no local Python needed)
 
 1. Start VideoToNo, then open Cherry Studio **Settings → MCP Servers → Add**;
 2. Choose **Server-Sent Events (SSE)** and enter:
@@ -219,14 +267,15 @@ The MCP server automatically scans ports 8000–8019 to locate a running VideoTo
 <details>
 <summary>🧩 Agent Skill (advanced)</summary>
 
-Besides MCP, VideoToNo also ships an **Agent Skill** (`skills/video-to-note/`) for skill-capable coding agents such as Claude Code and pi: the agent reads `SKILL.md`, then drives the bundled script through the full flow — submit a task, stream progress, and fetch the finished note. **If the local service isn't running, the script starts it in the background** (no window, no tray icon, exits on its own after 15 idle minutes); you only tell the agent where the portable exe lives, once. Tasks still run through the local backend, same as MCP.
+Besides MCP, VideoToNo also ships an **Agent Skill** (`skills/video-to-note/`) for skill-capable agents such as WorkBuddy, Claude Code and pi: the agent reads `SKILL.md`, then drives the bundled script through the full flow — submit a task, stream progress, and fetch the finished note. **If the local service isn't running, the script starts it in the background** (no window, no tray icon, exits on its own after 15 idle minutes); you only tell the agent where the portable exe lives, once. Tasks still run through the local backend, same as MCP.
 
 ### Install
 
-Copy the whole `skills/video-to-note/` directory from this repo into your agent's skills directory, for example:
+The Skill contains no transcription engine — it is a remote control. **VideoToNo must already exist on this machine** (the [portable exe](https://github.com/like-attract/video-to-note/releases/latest), or this source checkout), but you do not need to start it. Then copy the whole `skills/video-to-note/` directory into your agent's skills directory, for example:
 
 ```text
-C:\Users\<you>\.agents\skills\video-to-note\        # pi / common convention
+C:\Users\<you>\.workbuddy-ai\skills\video-to-note\   # WorkBuddy
+C:\Users\<you>\.agents\skills\video-to-note\          # pi / common convention
 ~/.claude/skills/video-to-note/                       # Claude Code
 ```
 

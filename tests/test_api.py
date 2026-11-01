@@ -126,7 +126,7 @@ def test_health_and_frontend_are_served() -> None:
     client = TestClient(main.app)
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "1.4.6"
+    assert health.json()["version"] == "1.4.7"
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
@@ -278,15 +278,17 @@ def test_frontend_sanitizes_generated_markdown() -> None:
     assert "persistApiKeyIfRequested" not in script
 
 
-def test_frontend_whisper_confirm_dedup_logic() -> None:
-    """Whisper 未缓存确认的降噪逻辑：字幕链路跳过、会话内只确认一次、任务后自动刷新状态。"""
+def test_frontend_whisper_model_prepare_flow() -> None:
+    """Whisper 未缓存时先弹窗决定手动导入/自动下载；字幕链路仍然跳过。"""
     script = (main.FRONTEND_DIR / "script.js").read_text(encoding="utf-8")
     assert "taskWillLikelyUseSubtitles" in script
-    assert "whisper_confirm_" in script
-    assert "localStorage" in script
-    assert "!whisperDownloadConfirmed(modelId)" in script
-    assert "rememberWhisperDownloadConfirm(modelId)" in script
+    assert "promptModelDownload(" in script
+    assert "startAutoModelDownload(" in script
+    assert "whisper-models/download" in script
+    assert "manual-folder" in script
     assert "refreshWhisperModelHints();" in script
+    # 旧实现只在 localStorage 里记“确认过下载”，没有进度也没有手动导入入口
+    assert "whisperDownloadConfirmed" not in script
 
 
 def test_whisper_manual_folder_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -926,6 +928,108 @@ def test_download_bundle_rewrites_legacy_image_refs(
     assert "./frames/frame_0001_60s.jpg" in note
     assert "./images/" not in note
     main.tasks.pop(task_id, None)
+
+
+def test_download_word_document_embeds_note_and_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.docx 是给用户继续编辑的：标题/表格/截图都要在，不能只换个扩展名。"""
+    from docx import Document
+    from PIL import Image
+
+    task_id = "docx-task"
+    task_dir = tmp_path / task_id
+    (task_dir / "frames").mkdir(parents=True)
+    Image.new("RGB", (160, 90), (30, 120, 200)).save(
+        task_dir / "frames" / "frame_0000_10s.png"
+    )
+    (task_dir / "notes.md").write_text(
+        "# 视频笔记：《测试》\n\n"
+        "## 小节 [00:00-00:10]\n\n**重点**内容\n\n"
+        "![截图 1](./frames/frame_0000_10s.png)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    main.tasks[task_id] = main.new_task()
+    main.tasks[task_id].update(status="completed", result={"title": "测试"})
+
+    response = TestClient(main.app).get(f"/api/download/{task_id}?format=docx")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert ".docx" in unquote(response.headers["content-disposition"])
+    document = Document(io.BytesIO(response.content))
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "视频笔记：《测试》" in text and "重点内容" in text
+    assert len(document.inline_shapes) == 1
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert any(name.startswith("word/media/") for name in archive.namelist())
+    main.tasks.pop(task_id, None)
+
+
+def test_model_download_job_exposes_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模型自动下载走显式任务：前端能轮询到文件名/已下载字节，失败不拖累任务。"""
+    state = {"done": False}
+    monkeypatch.setattr(main, "model_download_jobs", {})
+    monkeypatch.setattr(
+        main.transcriber,
+        "_model_cache_status",
+        lambda _name: "cached" if state["done"] else "missing",
+    )
+
+    def fake_download(model, progress_callback=None, cancel_event=None):
+        progress_callback(512, 1024, "model.bin", 1, 2)
+        state["done"] = True
+        return tmp_path / model
+
+    monkeypatch.setattr(main.transcriber, "download_model", fake_download)
+    client = TestClient(main.app)
+
+    started = client.post("/api/whisper-models/download", json={"model": "base"})
+    assert started.status_code == 200
+    job = started.json()
+    assert job["state"] in {"queued", "downloading", "completed"}
+
+    for _ in range(100):
+        current = client.get(f"/api/whisper-models/download/{job['job_id']}").json()
+        if current["state"] == "completed":
+            break
+        time.sleep(0.01)
+    assert current["state"] == "completed"
+    assert current["file"] == "model.bin"
+    assert current["downloaded"] == 1024
+    assert current["total"] == 1024
+    assert current["file_index"] == 1 and current["file_count"] == 2
+    assert current["error"] is None
+
+    invalid = client.post("/api/whisper-models/download", json={"model": "no-such"})
+    assert invalid.status_code == 422
+
+
+def test_model_download_job_short_circuits_when_already_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "model_download_jobs", {})
+    monkeypatch.setattr(main.transcriber, "_model_cache_status", lambda _name: "cached")
+    start_calls: list[str] = []
+
+    def fake_download(model, **_kwargs):
+        start_calls.append(model)
+        raise AssertionError("已缓存时不应再启动下载线程")
+
+    monkeypatch.setattr(main.transcriber, "download_model", fake_download)
+
+    response = TestClient(main.app).post(
+        "/api/whisper-models/download", json={"model": "base"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "completed"
+    assert start_calls == []
 
 
 def test_archive_note_points_refs_at_the_task_dir(
@@ -2087,7 +2191,7 @@ async def test_rerun_faithful_after_failure_has_no_oversized_tail_call(
             if item["start"] < 12 * 60
             else ""
         )
-        draft_lines.append(f"{stamp}第 {item['start']} 段的完整复原内容")
+        draft_lines.append(f"{stamp}{item['text']}")
     draft = "\n".join(draft_lines)
 
     calls: list[tuple[str, int]] = []
@@ -2536,6 +2640,144 @@ def test_unhandled_error_handler_survives_redaction_failure(
     assert response.status_code == 500
     assert response.headers["content-type"].startswith("application/json")
     assert "后端内部错误" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_bili_login_force_clears_the_browser_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """换账号重扫必须清掉 _bili_profile，否则旧会话会被自动导入、二维码根本不出现。"""
+    manager = bili_login.BiliLoginManager(tmp_path)
+    profile = tmp_path / "_bili_profile"
+    profile.mkdir()
+    (profile / "old-session-marker").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(bili_login, "find_browser", lambda: "msedge.exe")
+    monkeypatch.setattr(bili_login, "free_cdp_port", lambda: 9333)
+    monkeypatch.setattr(manager, "_kill_profile_browsers", lambda _path: None)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(bili_login.asyncio, "sleep", no_sleep)
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(bili_login.subprocess, "Popen", lambda _args: FakeProcess())
+
+    async def no_cookies() -> dict[str, str]:
+        return {}
+
+    manager._fetch_cookies = no_cookies
+    result = await manager.start(force=True)
+
+    assert result["state"] == "waiting"
+    assert not (profile / "old-session-marker").exists()
+    manager._terminate_browser()
+
+
+@pytest.mark.asyncio
+async def test_bili_login_discards_an_expired_restored_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧 profile 里的 SESSDATA 已失效时不能直接“恢复成功”，要换成干净窗口让用户重扫。"""
+    manager = bili_login.BiliLoginManager(tmp_path)
+    profile = tmp_path / "_bili_profile"
+    profile.mkdir()
+    (profile / "old-session-marker").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(bili_login, "find_browser", lambda: "msedge.exe")
+    monkeypatch.setattr(bili_login, "free_cdp_port", lambda: 9333)
+    monkeypatch.setattr(manager, "_kill_profile_browsers", lambda _path: None)
+    monkeypatch.setattr(manager, "_cookies_look_logged_in", lambda _cookies: False)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(bili_login.asyncio, "sleep", no_sleep)
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(bili_login.subprocess, "Popen", lambda _args: FakeProcess())
+    calls = {"count": 0}
+
+    async def stale_once() -> dict[str, str]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"sessdata": "expired", "bili_jct": "j", "buvid3": "b"}
+        return {}
+
+    manager._fetch_cookies = stale_once
+    result = await manager.start()
+
+    assert result["state"] == "waiting"
+    assert result["cookies"] is None
+    assert not (profile / "old-session-marker").exists()
+    manager._terminate_browser()
+
+
+def test_bili_login_cookie_validation_distinguishes_expired_and_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self.payload = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(_request, timeout):  # noqa: ANN001
+        return FakeResponse({"code": -101, "data": {"isLogin": False}})
+
+    monkeypatch.setattr(bili_login.urllib.request, "urlopen", fake_urlopen)
+    assert bili_login.BiliLoginManager._cookies_look_logged_in(
+        {"sessdata": "expired"}
+    ) is False
+
+    def fake_logged_in(_request, timeout):  # noqa: ANN001
+        return FakeResponse({"code": 0, "data": {"isLogin": True}})
+
+    monkeypatch.setattr(bili_login.urllib.request, "urlopen", fake_logged_in)
+    assert bili_login.BiliLoginManager._cookies_look_logged_in(
+        {"sessdata": "valid"}
+    ) is True
+
+    def fake_network_error(_request, timeout):  # noqa: ANN001
+        raise RuntimeError("proxy down")
+
+    monkeypatch.setattr(bili_login.urllib.request, "urlopen", fake_network_error)
+    assert bili_login.BiliLoginManager._cookies_look_logged_in(
+        {"sessdata": "unknown"}
+    ) is None
+
+
+def test_bili_login_start_accepts_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    async def fake_start(force: bool = False) -> dict:
+        calls.append(force)
+        return {"ok": True, "state": "waiting", "cookies": None, "message": ""}
+
+    monkeypatch.setattr(main.bili_login_manager, "start", fake_start)
+    client = TestClient(main.app)
+
+    assert client.post("/api/bili-login/start").status_code == 200
+    assert client.post("/api/bili-login/start", json={"force": True}).status_code == 200
+    assert calls == [False, True]
 
 
 def test_scanned_bili_cookies_are_saved_on_the_machine(

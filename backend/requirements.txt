@@ -9,6 +9,7 @@ python-dotenv>=1,<2
 aiofiles>=24,<25
 av>=13,<17
 Pillow>=10,<13
+python-docx>=1.1,<2
 pystray>=0.19,<1
 mcp>=1.0,<2
 websockets>=13,<16

@@ -105,16 +105,21 @@ SECTION_EFFORT = "off"
 TAIL_GAP_SECONDS = 60.0
 # 补尾时附带给模型参考的已有笔记结尾长度。
 NOTE_TAIL_CHARACTERS = 600
-# 补写结尾的三道护栏。成稿提示词明确允许“不必每段都加时间戳”，所以“笔记末尾时间戳
-# 落后于转写结尾”既可能是真的丢尾，也可能只是省略了时间戳。不加护栏时，后者会把
-# 整段剩余转录塞进一次 max 思考档的补写请求（几十分钟无任何进度反馈，表现为“卡住不动”，
-# 而 detailed 只记告警不发请求，所以只有“详细复原”会卡）。
-# 缺口超过该秒数视为“省略时间戳”而不是丢尾，只告警不补写。
+# 补写结尾的护栏。成稿提示词明确允许“不必每段都加时间戳”，所以“笔记末尾时间戳
+# 落后于转写结尾”既可能是真的丢尾，也可能只是省略了时间戳。现在先用“尾部转录内容
+# 在笔记里出现了没有”来区分，再决定补写；时间戳缺口只用来选补写方式：
+# 缺口小且材料少时一次补完，缺口大或材料多时按 6500 字一段续写。
 TAIL_PATCH_MAX_GAP_SECONDS = 600.0
-# 补写材料字符上限，超过时只保留最靠近结尾的部分。
+# 一次补写请求的材料上限（仅用于“缺口小 + 材料少”的单次补写）。
 TAIL_PATCH_MAX_INPUT_CHARACTERS = 4_000
 # 补写请求的整体耗时上限：超时则保留原笔记，绝不让任务停在补写阶段不放。
 TAIL_PATCH_TIMEOUT_SECONDS = 240.0
+# 尾部内容重合度：抽样看缺失区间里的 6 字片段在笔记里出现过多少比例。
+# 只用时间戳判断会把“省略时间戳但内容写全”误判成丢尾；只用内容判断又会把
+# 模型换了一种说法当成丢尾。两者合起来：时间戳落后 + 内容基本没出现 = 真截断。
+TAIL_CONTENT_WINDOW_CHARACTERS = 6
+TAIL_CONTENT_SAMPLE_SEGMENTS = 40
+TAIL_CONTENT_COVERED_RATIO = 0.05
 # 流式读取心跳间隔：把"模型仍在输出"反映到任务进度上，避免长时间同一句话看起来像死锁。
 # 与转写心跳同节奏（30s）：20s 时日志滚动太快，反而看不清进度。
 LLM_HEARTBEAT_SECONDS = 30.0
@@ -125,6 +130,14 @@ LLM_HEARTBEAT_SECONDS = 30.0
 # 所以阈值以下一律保持原管线，不拿已验证良好的行为去换未验证的路径。
 # 24_000 净字数 ≈ 70~80 分钟口播，是策略选择而非推导值：中长度视频若反馈变差就下调。
 LONG_TRANSCRIPT_CHARACTERS = 24_000
+# 阈值以下的最终成稿仍有 4_600 token 的固定上限：63 分钟转录逐段压缩后材料接近
+# 14_000 字，faithful 风格要写出的正文很可能超过 4_600 token，模型会在半程被额度截断
+# （2026-10 用户反馈：笔记停在 36:35，转写一直到 01:03:15）。所以成稿额度改为随
+# 材料规模缩放；上限 8_000 是常见的第三方网关单请求额度，再高会被 400 拒掉，
+# _complete 虽有降级但会把额度砍回去，仍然写不完。
+FINAL_NOTE_MAX_TOKENS_MIN = 4_600
+FINAL_NOTE_MAX_TOKENS_MAX = 8_000
+FINAL_NOTE_KEEP_RATIO = 0.8
 # 每段直写的转录净字数预算（时间戳开销不计入，见 chunk_segments 的同名参数）。
 NOTE_SECTION_CHARACTERS = 6_500
 # 提示词内把碎 ASR 行合并到的目标字数：whisper 常切成平均 7.5 字一段，逐行加时间戳会让
@@ -649,7 +662,7 @@ class LLMSummarizer:
                 for index, note in enumerate(condensed_chunks, start=1)
             )
 
-        max_tokens = {"detailed": 4_600, "faithful": 4_600, "concise": 2_400}[style]
+        max_tokens = self._final_note_max_tokens(source, style)
         coverage_end = format_timestamp(segments[-1].end)
         draft_progress = 78
         draft_stage = "正在生成完整笔记"
@@ -663,6 +676,9 @@ class LLMSummarizer:
             stage=draft_stage,
             should_abort=should_abort,
         )
+        truncated_by_length = (
+            getattr(self, "_last_finish_reason", None) == "length"
+        )
         return await self._ensure_tail_coverage(
             title,
             draft,
@@ -671,6 +687,26 @@ class LLMSummarizer:
             notes_effort,
             progress_callback,
             should_abort,
+            truncated_by_length=truncated_by_length,
+            reasoning_effort=reasoning_effort,
+        )
+
+    @staticmethod
+    def _final_note_max_tokens(source: str, style: str) -> int:
+        """最终成稿的输出额度：按材料规模估算正文，再给思考链留余量。
+
+        concise 仍是固定 2_400；detailed/faithful 以前恒为 4_600，长一点的视频
+        会在半程被额度截断。这里按 0.8 保留率估算，夹在 4_600~8_000 之间。
+        """
+        if style == "concise":
+            return 2_400
+        content = int(
+            len(source) / SECTION_TOKENS_PER_CHARACTER * FINAL_NOTE_KEEP_RATIO
+        )
+        estimate = content + NOTE_BUDGET_THINKING_RESERVE_TOKENS
+        return max(
+            FINAL_NOTE_MAX_TOKENS_MIN,
+            min(FINAL_NOTE_MAX_TOKENS_MAX, estimate),
         )
 
     @staticmethod
@@ -1206,17 +1242,21 @@ class LLMSummarizer:
         effort: str,
         progress_callback: ProgressCallback | None,
         should_abort: Callable[[], bool] | None = None,
+        truncated_by_length: bool = False,
+        reasoning_effort: str = "auto",
     ) -> str:
         """核对笔记是否推进到转写结尾，尽力弥补生成时丢失的尾部内容。
 
         - concise 摘要允许只挑要点，不做核对；
-        - faithful（详细复原）要求完整覆盖：确实丢尾时自动补写一次结尾；
-        - detailed 的笔记允许按需省略时间戳，自动补写容易误伤，只记录告警。
+        - faithful / detailed 要求内容覆盖：先看时间戳缺口，再用尾部转录内容在笔记里的
+          重合度区分「真的截断」与「只是省略了时间戳」；
+        - 确认截断后：缺口小且材料少时一次补完；缺口大或材料多时按 6500 字一段续写，
+          不再因为缺口超过 10 分钟就直接跳过（那会把真截断留在成稿里）。
 
-        补写受三道护栏约束（缺口上限 / 材料字符上限 / 整体耗时上限）：成稿提示词允许
-        “不必每段都加时间戳”，长视频里只标前半段时间戳很常见，此时“末尾时间戳落后”
-        并不代表丢尾。没有护栏时会自动发一次覆盖剩余全部转录的 max 思考档请求，几十分钟
-        不返回进度，表现为“详细复原卡在生成阶段不动，而详细+点评正常”（用户反馈）。
+        旧实现只看“最后一个时间戳落后多少”，缺口一大于 10 分钟就假定是省略时间戳。
+        用户反馈 63 分钟视频笔记停在 36:35、转写一直到 01:03:15，正好被这条假定
+        放过；现在 ``truncated_by_length``（finish_reason=length）或尾部内容重合度
+        接近零都会走补写。
         """
         if style == "concise" or not segments:
             return draft
@@ -1231,36 +1271,73 @@ class LLMSummarizer:
         gap = coverage_end - note_end
         if gap <= TAIL_GAP_SECONDS:
             return draft
-        missing = [segment for segment in segments if segment.start >= note_end - 5]
+        # 只取笔记末尾之后开始的段：跨过末尾的长段前半句已经写进笔记，整段重写会重复。
+        # 容忍 5 秒重叠，避免时间戳与分段边界差一点就把下一段漏掉。
+        missing = [
+            segment for segment in segments if segment.start >= note_end - 5
+        ]
         if not missing:
             return draft
         message = (
             "检测到笔记内容停在 "
             f"{format_timestamp(note_end)}，未覆盖转写结尾 {format_timestamp(coverage_end)}"
         )
-        if style == "detailed":
-            self.warnings.append(
-                message + "；也可能只是笔记省略了时间戳；建议改用“详细复原”风格或更高推理强度重新生成"
-            )
+        content_missing = truncated_by_length or self._tail_content_missing(draft, missing)
+        if not content_missing:
+            if style == "detailed":
+                self.warnings.append(
+                    message + "；笔记里能找到尾部内容，可能只是省略了时间戳；"
+                    "建议改用“详细复原”风格或更高推理强度重新生成"
+                )
+            else:
+                self.warnings.append(
+                    message + "；笔记里能找到尾部内容，判断只是省略了时间戳，已跳过自动补写"
+                )
             return draft
-        # 护栏一：缺口过大时不是“丢尾”，补写等于把剩余转录重写一遍，只告警。
-        if gap > TAIL_PATCH_MAX_GAP_SECONDS:
-            self.warnings.append(
-                message
-                + f"；缺口约 {gap / 60:.0f} 分钟，更像笔记省略了时间戳而不是真的丢尾，"
-                "已跳过自动补写（强行补写会把剩余转录重写一遍，长时间出不来结果）"
+
+        material_characters = sum(len(segment.text) + 33 for segment in missing)
+        if (
+            gap <= TAIL_PATCH_MAX_GAP_SECONDS
+            and material_characters <= TAIL_PATCH_MAX_INPUT_CHARACTERS
+        ):
+            return await self._patch_tail_once(
+                title,
+                draft,
+                missing,
+                message,
+                effort,
+                progress_callback,
+                should_abort,
+                coverage_end,
             )
-            return draft
-        # 护栏二：材料只保留预算内最靠近结尾的一段，保证补写请求规模有上限。
+        return await self._write_missing_tail_sections(
+            title,
+            draft,
+            missing,
+            style,
+            reasoning_effort,
+            message,
+            progress_callback,
+            should_abort,
+        )
+
+    async def _patch_tail_once(
+        self,
+        title: str,
+        draft: str,
+        missing: Sequence[TranscriptSegment],
+        message: str,
+        effort: str,
+        progress_callback: ProgressCallback | None,
+        should_abort: Callable[[], bool] | None,
+        coverage_end: float,
+    ) -> str:
         material = self._tail_patch_material(missing)
         missing_start = format_timestamp(material[0].start)
-        scope_note = "" if material is missing else "（缺口较大，只补写最靠近结尾的一段）"
-        self.warnings.append(
-            message + f"，正在自动补写 {missing_start} 之后的内容{scope_note}"
-        )
+        self.warnings.append(message + f"，正在自动补写 {missing_start} 之后的内容")
         await self._report_progress(progress_callback, 88, "正在补写笔记缺失的结尾内容")
         try:
-            # 护栏三：补写本身有整体耗时上限，超时保留原笔记，不停在补写阶段不放。
+            # 补写本身有整体耗时上限，超时保留原笔记，不停在补写阶段不放。
             patch = await asyncio.wait_for(
                 self._complete(
                     self._tail_patch_prompt(
@@ -1285,10 +1362,7 @@ class LLMSummarizer:
             await self._report_progress(progress_callback, 91, "补写结尾超时，已保留原笔记")
             return draft
         except Exception as exc:
-            # 补写只是"把结尾再往前推一点"的可选增强，它失败绝不能推翻已经写完整的笔记。
-            # 以前只 catch TimeoutError，一次「模型未返回正文」会把 78% 处已成稿的任务
-            # 判死——用户实测：18 分钟视频「详细复原」失败、「精简摘要」通过，差别正是
-            # concise 在函数开头就跳过了补写。
+            # 补写只是可选增强，失败绝不能推翻已经写完整的笔记。
             # CancelledError 不是 Exception 子类，用户取消照样原样往外抛。
             self.warnings.append(
                 f"补写结尾失败（{type(exc).__name__}: {exc}），已跳过并保留原笔记"
@@ -1296,6 +1370,162 @@ class LLMSummarizer:
             await self._report_progress(progress_callback, 91, "补写结尾失败，已保留原笔记")
             return draft
         return f"{draft.rstrip()}\n\n### 补遗（{missing_start} 之后）\n\n{patch.strip()}"
+
+    async def _write_missing_tail_sections(
+        self,
+        title: str,
+        draft: str,
+        missing: Sequence[TranscriptSegment],
+        style: str,
+        reasoning_effort: str,
+        message: str,
+        progress_callback: ProgressCallback | None,
+        should_abort: Callable[[], bool] | None,
+    ) -> str:
+        """真截断且缺口大：把缺失区间切成与长视频同规模的段，逐段写成终稿正文。
+
+        每次请求都落在 ``NOTE_SECTION_CHARACTERS`` 以内，既有心跳也不会像旧的
+        “一次补完剩余全部转录”那样长时间不返回。某一段失败时附上该段原文，
+        不把已经补出来的内容一起丢掉。
+        """
+        merged = merge_segment_lines(missing, SECTION_LINE_MERGE_CHARACTERS)
+        sections = chunk_segments(
+            merged,
+            max_characters=NOTE_SECTION_CHARACTERS,
+            include_timestamp_overhead=False,
+        )
+        total = len(sections)
+        if not total:
+            return draft
+        missing_start = format_timestamp(sections[0][0].start)
+        missing_end = format_timestamp(sections[-1][-1].end)
+        self.warnings.append(
+            message
+            + f"，正在按段补写 {missing_start}–{missing_end} 的内容（共 {total} 段）"
+        )
+        section_effort = self._stage_effort(reasoning_effort, style, "section")
+        mechanical_effort = self._mechanical_effort(reasoning_effort)
+        context = draft[-NOTE_TAIL_CHARACTERS:]
+        pieces: list[str] = []
+        for index, section in enumerate(sections, start=1):
+            if should_abort is not None and should_abort():
+                raise asyncio.CancelledError("任务已取消")
+            stage = f"正在补写缺失的第 {index}/{total} 段"
+            progress = 88 + int(2 * (index - 1) / total)
+            await self._report_progress(progress_callback, progress, stage)
+            try:
+                text = await self._complete(
+                    self._tail_section_prompt(
+                        title,
+                        index,
+                        total,
+                        section,
+                        context,
+                        format_timestamp(section[-1].end),
+                    ),
+                    max_tokens=self._section_max_tokens(section),
+                    effort=section_effort,
+                    progress_callback=progress_callback,
+                    progress=progress,
+                    stage=stage,
+                    should_abort=should_abort,
+                )
+                try:
+                    text = await self._continue_section(
+                        title,
+                        index,
+                        total,
+                        text,
+                        section,
+                        mechanical_effort,
+                        progress_callback,
+                        stage,
+                        should_abort,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.warnings.append(
+                        f"补写第 {index}/{total} 段续写失败（{type(exc).__name__}: {exc}）"
+                    )
+                if not text.strip():
+                    raise RuntimeError("模型未返回正文")
+                uncovered = self._uncovered(section, text)
+                if uncovered:
+                    self.warnings.append(
+                        f"补写第 {index}/{total} 段未覆盖到本段结尾，已把剩余原文附在笔记里"
+                    )
+                    text = (
+                        f"{text.rstrip()}\n\n"
+                        f"{self._raw_block(uncovered, '补写未覆盖到本段结尾')}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.warnings.append(
+                    f"补写第 {index}/{total} 段失败（{type(exc).__name__}: {exc}），"
+                    "已把这一段原文附在笔记里"
+                )
+                text = self._raw_block(
+                    section, f"补写失败（{type(exc).__name__}: {exc}）"
+                )
+            pieces.append(text.strip())
+            context = text[-NOTE_TAIL_CHARACTERS:]
+        if not pieces:
+            return draft
+        return f"{draft.rstrip()}\n\n" + "\n\n".join(pieces)
+
+    @classmethod
+    def _tail_content_missing(
+        cls, draft: str, missing: Sequence[TranscriptSegment]
+    ) -> bool:
+        """缺失区间的内容是否真的没进笔记（而不是只是没写时间戳）。
+
+        抽样看缺失区间里的 6 字片段在笔记里出现过多少；同时单独看最后几段：
+        只要最后几段有内容出现在笔记里，就说明模型写到了结尾，不该补写。
+        6 字窗口是刻意选的：4 字太容易偶然命中，8 字在改写后几乎不可能命中。
+        """
+        note = cls._overlap_text(draft)
+        if not note:
+            return True
+        candidates = [
+            cls._overlap_text(segment.text)
+            for segment in missing
+            if len(cls._overlap_text(segment.text)) >= TAIL_CONTENT_WINDOW_CHARACTERS
+        ]
+        if not candidates:
+            return True
+        if len(candidates) > TAIL_CONTENT_SAMPLE_SEGMENTS:
+            step = (len(candidates) - 1) / (TAIL_CONTENT_SAMPLE_SEGMENTS - 1)
+            candidates = [
+                candidates[min(len(candidates) - 1, round(index * step))]
+                for index in range(TAIL_CONTENT_SAMPLE_SEGMENTS)
+            ]
+        last_tail_covered = any(
+            cls._segment_appears(segment, note) for segment in candidates[-5:]
+        )
+        if last_tail_covered:
+            return False
+        covered = sum(
+            1 for segment in candidates if cls._segment_appears(segment, note)
+        )
+        return covered / len(candidates) < TAIL_CONTENT_COVERED_RATIO
+
+    @staticmethod
+    def _overlap_text(text: str) -> str:
+        # 去掉时间戳、Markdown 标记与空白，只留文字与数字，避免格式差异影响比对
+        text = re.sub(r"\[[^\]]*\]", "", text)
+        return re.sub(r"[^\w\u4e00-\u9fff]+", "", text).lower()
+
+    @classmethod
+    def _segment_appears(cls, segment: str, note: str) -> bool:
+        window = TAIL_CONTENT_WINDOW_CHARACTERS
+        if len(segment) <= window:
+            return segment in note
+        positions = {0, (len(segment) - window) // 2, len(segment) - window}
+        return any(
+            segment[position : position + window] in note for position in positions
+        )
 
     @staticmethod
     def _tail_patch_material(
@@ -1332,6 +1562,30 @@ class LLMSummarizer:
             if match.group(2):
                 seconds.append(LLMSummarizer._parse_clock(match.group(2)))
         return max(seconds) if seconds else None
+
+    @staticmethod
+    def _tail_section_prompt(
+        title: str,
+        index: int,
+        total: int,
+        section: Sequence[TranscriptSegment],
+        note_tail: str,
+        end: str,
+    ) -> str:
+        start = format_timestamp(section[0].start)
+        context = f"\n已有笔记的结尾（仅供衔接参考，不要重复）：\n{note_tail}\n" if note_tail else ""
+        return f"""视频《{title}》的笔记在 {start} 之前已经写好，但后面还缺一段。现在补写第 {index}/{total} 段（{start} – {end}）。
+
+请把这一段直接写成终稿正文：
+- 与已有笔记保持相同的结构、语气和时间戳格式；不要重复已有内容，也不要输出 # 文档标题
+- 完整记录本段的每一个话题、例子、推导过程和数字；压缩的是说法，不是话题
+- 每个 ## 或 ### 小标题写成「## 标题 [起点-终点]」，最后一行以接近 {end} 的时间戳开头
+- 时间点只能取自材料，写成 [MM:SS] 或 [起点-终点]，超过一小时请带上小时
+- 数学公式一律用 Markdown 公式：行内 $...$、独立公式块 $$...$$
+- 忠实于讲者本意，不补充外部知识，不做评价
+{context}
+本段转录：
+{segments_to_prompt(section)}"""
 
     @staticmethod
     def _tail_patch_prompt(
@@ -1599,6 +1853,7 @@ class LLMSummarizer:
                     await closed
 
         content = "".join(parts)
+        self._last_finish_reason = finish_reason
         # 把"我们下发了什么"与"通道实际给了什么"并排记下来：静默忽略关思考请求、或把
         # max_tokens 悄悄砍小，都不会回 400，参数降级阶梯因此永远不触发，光看
         # finish_reason=length 猜不到额度是谁缩的。

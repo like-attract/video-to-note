@@ -779,15 +779,43 @@ async def test_download_audio_fallback_reports_clear_error_without_streams(
 
 
 @pytest.mark.asyncio
-async def test_download_audio_does_not_swallow_other_failures(
+async def test_download_audio_falls_back_for_non_blocking_bilibili_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """内容不完整/连接中断不是风控，但同样该走 playurl 直连；不能直接判任务失败。
+
+    用户反馈的原话是 "Got error: Downloaded 8302093 bytes, expected 24828782 bytes"，
+    旧实现只在 ``_bilibili_blocked`` 为真时回退，这类错误会一路抛到任务层。
+    """
+    processor = VideoProcessor(tmp_path)
+    _ydl_blocked(
+        monkeypatch,
+        processor,
+        message="ERROR: [download] Got error: Downloaded 8302093 bytes, expected 24828782 bytes",
+    )
+    _api_json(monkeypatch, processor)
+    downloaded = _record_direct_downloads(monkeypatch, processor)
+    notes: list[str] = []
+
+    path = await processor.download_audio(
+        _BILI_URL, "t1", {"sessdata": "abc"}, notes=notes
+    )
+
+    assert path.read_bytes() == b"media"
+    assert downloaded
+    assert any("yt-dlp 下载失败" in note for note in notes)
+    assert any("playurl 接口直连音频流" in note for note in notes)
+
+
+@pytest.mark.asyncio
+async def test_download_audio_reports_both_errors_when_api_fallback_also_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     processor = VideoProcessor(tmp_path)
     _ydl_blocked(monkeypatch, processor, message="ERROR: unable to decrypt")
-    _api_json(monkeypatch, processor)
-    _record_direct_downloads(monkeypatch, processor)
+    _api_json(monkeypatch, processor, playurl={"code": 0, "data": {}})
 
-    with pytest.raises(RuntimeError, match="unable to decrypt"):
+    with pytest.raises(RuntimeError, match="yt-dlp 下载失败.*接口直连也失败"):
         await processor.download_audio(_BILI_URL, "t1", {"sessdata": "abc"})
 
 
@@ -800,6 +828,9 @@ def test_download_direct_media_aborts_when_cancel_requested(
     target = tmp_path / "task" / "audio.m4a"
 
     class FakeResponse:
+        status = 200
+        headers: dict[str, str] = {}
+
         def __init__(self):
             self.remaining = 3
 
@@ -816,7 +847,7 @@ def test_download_direct_media_aborts_when_cancel_requested(
             return False
 
     monkeypatch.setattr(
-        "backend.video_processor.urllib.request.urlopen", lambda *a, **k: FakeResponse()
+        "backend.download.urllib.request.urlopen", lambda *a, **k: FakeResponse()
     )
 
     state = {"called": 0}

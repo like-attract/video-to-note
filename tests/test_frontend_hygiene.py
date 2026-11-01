@@ -66,6 +66,7 @@ def test_browser_side_downloads_are_named_after_the_note() -> None:
     for name in (
         "downloadSummary",
         "downloadSrtFile",
+        "downloadDocxFile",
         "exportSummaryImage",
         "downloadCanvasPages",
     ):
@@ -86,6 +87,11 @@ def test_bili_credentials_card_tells_the_machine_store_truth() -> None:
     assert "biliSavedMask" in body, "本机存过凭据时不能判成「没有凭据」"
     assert "refreshBiliSavedState();" in SCRIPT, "开页面没读本机凭据状态，提示条会一直劝人扫码"
     assert "biliClearSavedBtn" in PAGE, "自动落盘就得同时给一条清除入口"
+    # 旧 profile 会自动恢复登录；没有“换账号/重扫”的显式入口时，用户点扫码只会
+    # 一次次被送回旧账号，任务又报 412——群里就是这么卡住的。
+    assert 'id="biliRescanBtn"' in PAGE, "缺少重新扫码（换账号）入口"
+    assert "startBiliLogin({ force: true })" in SCRIPT
+    assert "已恢复上次登录的 B 站账号" in SCRIPT
 
 
 def test_srt_export_is_rendered_by_the_backend() -> None:
@@ -100,6 +106,31 @@ def test_srt_export_is_rendered_by_the_backend() -> None:
     body = SCRIPT.split("function downloadSrtFile(", 1)[1].split("\n}\n", 1)[0]
     assert "output_format=srt" in body
     assert "currentMarkdown" not in body, "SRT 不能由前端那份整秒 markdown 现拼"
+
+
+def test_docx_export_uses_the_backend() -> None:
+    """Word 由后端生成：截图与 OOXML 结构不在前端拼，前端只落盘。"""
+    assert '<option value="docx">' in PAGE, "导出菜单里没有 Word 文档"
+    assert "format === 'docx'" in SCRIPT, "菜单选了 Word 却没走 Word 那条路"
+    body = SCRIPT.split("function downloadDocxFile(", 1)[1].split("\n}\n", 1)[0]
+    assert "?format=docx" in body
+    assert "serverFilename(" in body, "Word 下载也要用后端下发的文件名"
+
+
+def test_model_download_dialog_is_wired() -> None:
+    """未缓存模型要先给手动导入/自动下载两个出口，并显示真实下载进度。"""
+    for element_id in (
+        "modelDownloadModal",
+        "modelDownloadBar",
+        "modelManualBtn",
+        "modelManualResumeBtn",
+        "modelAutoBtn",
+        "modelCancelBtn",
+    ):
+        assert f'id="{element_id}"' in PAGE, f"模型下载弹窗缺少 {element_id}"
+    assert "promptModelDownload(" in SCRIPT
+    assert "whisper-models/download" in SCRIPT
+    assert "applyModelDownloadProgress(" in SCRIPT
 
 
 def test_completed_notice_leads_with_the_titled_file() -> None:
