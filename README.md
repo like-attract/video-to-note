@@ -15,7 +15,7 @@
 
 VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地优先**的服务：输入 B 站、抖音、YouTube 链接或本地视频，优先读取平台字幕、B 站 AI 字幕，无字幕时用本机模型离线转写（中文首选 paraformer，也可选 whisper 系），再由你选择的大模型生成带时间轴的 Markdown 笔记。
 
-> 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（如 `C:/Users/用户名/.agents/skills/`），即可让 Claude Code、pi 等直接一句话生成视频笔记。详见该目录下的 `SKILL.md`。
+> 🤖 **Agent Skill 已上线**：把仓库里的 `skills/video-to-note/` 目录复制到 agent 的技能目录（WorkBuddy 是 `C:/Users/用户名/.workbuddy-ai/skills/`，Claude Code / pi 见各自约定），即可一句话生成视频笔记。**Skill 只是遥控器，本机要先有 VideoToNo**（便携版 exe 即可，不用先打开）。WorkBuddy 还能直接接本机 MCP，两条路的装法见下方「MCP / AI 客户端」与「Agent Skill」。详见 `skills/video-to-note/SKILL.md`。
 
 ## 🆕 What's New（v1.4.6 → v1.4.7）
 
@@ -23,6 +23,7 @@ VideoToNo 把「视频 → 结构化笔记」这条链路做成了一个**本地
 - **选了没下载过的转写模型，不再只能干等**：点「开始生成」时会弹窗说明模型大小，推荐手动导入——直接打开要放文件的文件夹，列出该下哪些文件、下载页在哪；也可以选「自动下载」，弹窗里会显示当前文件已下载多少、共多少。下载失败时同样给出手动导入入口，不会让整条任务陪着失败
 - **修：B 站分 P 音频偶发「下载字节数不完整」直接判任务失败**：下载中途断流时会自动改走 B 站播放地址直连，带断点续传和重试，下载完整后才进入转写
 - **修：B 站旧登录态失效后没法重新扫码**：以前点「扫码登录导入」会直接从本机浏览器配置里恢复旧账号，旧 cookie 已失效时只能看着任务报「B 站拒绝了本次请求」。现在恢复前会先校验登录态，失效就自动换成干净窗口让你重新扫码；凭据区也新增「重新扫码（换账号）」，随时可以清掉旧登录再扫
+- **修：长音频转写偶发卡死**：`large-v3` 跑二十来分钟以上的音频时，进度条停住、日志不再增长、GPU 还在算，任务既不失败也不完成，只能手动取消。原因是工人把整段转录塞在一行 JSON 里回传，超过 asyncio 默认的 64 KB 行上限后读取协程静默退出，主程序再也等不到结果。现在行上限提到 16 MB，读取真失败时也会明确报错并收掉工人，不会再挂住
 - **修：长一点的视频笔记只写到一半就停**：笔记停在 36:35、转写一直到 01:03:15 这类情况，现在会识别出「真的丢了结尾」，并按小段把缺失部分补写完整；只是省略时间戳、内容其实写全了的笔记不会被强行重写
 
 <details>
@@ -145,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 <details>
 <summary>🤖 MCP / AI 客户端（进阶）</summary>
 
-VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio、Codex 等 AI 客户端里直接输入视频链接取字幕稿或生成笔记。**使用前请先启动 VideoToNo**：MCP 工具通过本地后端执行任务，会复用本机的 Whisper 模型缓存和任务目录，不会重复下载。
+VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 WorkBuddy、Cherry Studio、Codex 等 AI 客户端里直接输入视频链接取字幕稿或生成笔记。**使用前请先启动 VideoToNo**：MCP 工具通过本地后端执行任务，会复用本机的 Whisper 模型缓存和任务目录，不会重复下载。
 
 两条路线按需选：客户端**自己就有模型**时，用 `transcribe_video` + `get_transcript` 只取带时间轴的转录，**不需要给本机配 API Key**，笔记的结构与风格由客户端自己定；要一份现成成品笔记（或超长视频后台跑完）才用 `summarize_video`。
 
@@ -174,7 +175,52 @@ VideoToNo 内置 MCP（Model Context Protocol）服务，可以在 Cherry Studio
 | `list_llm_keys` | 查看本机已保存密钥的接口地址列表（只返回掩码与加密方式） |
 | `get_saved_config` | 查看已保存配置的状态，敏感信息会脱敏显示 |
 
-### Cherry Studio（推荐，无需本机 Python）
+### WorkBuddy（推荐）
+
+WorkBuddy 有两条接法：**装 Skill 最省事**（不用配 MCP、不用管端口），想让它在对话里像调工具一样直接调就用 MCP。
+
+> 两条路都**不是纯云端**：Skill 和 MCP 都只是「遥控器」，转写、字幕、出笔记全在这台机器上的 VideoToNo 里跑。所以本机得先有程序——没装过就先下 [便携版 exe](https://github.com/like-attract/video-to-note/releases/latest)，放哪个目录都行（**不用先双击打开**，脚本会自己在后台拉起）。
+
+#### 方式一：装 Skill（推荐）
+
+1. 把仓库里的 `skills/video-to-note/` 整个目录复制到 WorkBuddy 的用户技能目录：
+
+```text
+C:\Users\<用户名>\.workbuddy-ai\skills\video-to-note\
+```
+
+2. 回到 WorkBuddy 新开一个会话（技能在会话启动时加载），确认技能列表里出现 `video-to-note`；
+3. 一句话就行：
+
+```text
+帮我把这个 B 站视频做成笔记：https://www.bilibili.com/video/BV1xx
+```
+
+技能脚本会先扫本机 8000–8019 端口：有服务就直接用，没有就在后台拉一个无头实例（不开浏览器、不进托盘，闲置 15 分钟自动退出）。**第一次它会问便携版 exe 放在哪**，把完整路径给它一次就记住（存在 `%LOCALAPPDATA%\VideoToNo\skill-server-cmd.txt`），也可以事先设环境变量 `VIDEOTONOTES_SERVER_CMD`。技能目录还留在 VideoToNo 仓库里时，它直接用仓库的 `launcher.py` 起，连路径都不用给。
+
+#### 方式二：接 MCP（想在对话里直接调工具时用）
+
+编辑 `C:\Users\<用户名>\.workbuddy-ai\mcp.json`（旧版本可能在 `C:\Users\<用户名>\.workbuddy\mcp.json`；已有其他 server 就并进 `mcpServers`，别整段覆盖）：
+
+```json
+{
+  "mcpServers": {
+    "video-to-note": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8000/mcp/sse",
+      "description": "VideoToNo 本地视频笔记服务"
+    }
+  }
+}
+```
+
+保存后打开 WorkBuddy 的「连接器」页，右上角「自定义连接器」里会看到 `video-to-note`，点一次**「信任」**才会真正加载（不点信任不会生效）。之后直接说「用 video-to-note 把这个视频转成文字稿」即可。端口不是 8000 就填实际端口——界面「让 agent 接入（MCP）」卡片里的「复制 JSON 配置」按钮生成的就是这段，只是少了 `description`。
+
+> MCP 连的是「已经在跑的服务」，所以这条路要先把 VideoToNo 打开；Skill 那条路会自己把服务拉起来。两条路跑的任务都在本机，产物进同一个 `workspace/`。
+
+WorkBuddy 自带模型，所以最省事的用法和上面一致：让它走 `transcribe_video` / `--transcript-only` 只取带时间轴的转录，整理和成稿在对话里完成，**本机不需要配 API Key**。
+
+### Cherry Studio（备选，无需本机 Python）
 
 1. 启动 VideoToNo 后，打开 Cherry Studio「设置 → MCP 服务器 → 添加」；
 2. 类型选择 **Server-Sent Events (SSE)**，URL 填：
@@ -221,15 +267,16 @@ MCP server 会自动扫描 8000–8019 端口来找到已运行的 VideoToNo 服
 <details>
 <summary>🧩 Agent Skill（进阶）</summary>
 
-除了 MCP，VideoToNo 也提供 **Agent Skill**（`skills/video-to-note/`），供 Claude Code、pi 等支持技能的编码类 agent 使用：agent 读取 `SKILL.md` 后，会自动调用本仓库附带的脚本完成「提交任务 → 轮询进度 → 取回笔记」全流程。**本机服务没在跑时脚本会自己后台把它拉起来**（不开界面、不进托盘，闲置一刻钟自动退出），第一次只需告诉 agent 便携版 exe 放在哪；任务与 MCP 相同，都由本地后端执行。
+除了 MCP，VideoToNo 也提供 **Agent Skill**（`skills/video-to-note/`），供 WorkBuddy、Claude Code、pi 等支持技能的 agent 使用：agent 读取 `SKILL.md` 后，会自动调用本仓库附带的脚本完成「提交任务 → 轮询进度 → 取回笔记」全流程。**本机服务没在跑时脚本会自己后台把它拉起来**（不开界面、不进托盘，闲置一刻钟自动退出），第一次只需告诉 agent 便携版 exe 放在哪；任务与 MCP 相同，都由本地后端执行。
 
 ### 安装
 
-把仓库里的 `skills/video-to-note/` 整个目录复制到 agent 的技能目录，例如：
+Skill 本身不含转写引擎，只是个「遥控器」：**本机要先有 VideoToNo**（[便携版 exe](https://github.com/like-attract/video-to-note/releases/latest) 或这份源码仓库），但不用先启动它。然后把 `skills/video-to-note/` 整个目录复制到 agent 的技能目录，例如：
 
 ```text
-C:\Users\<用户名>\.agents\skills\video-to-note\        # pi / 通用约定
-~/.claude/skills/video-to-note/                         # Claude Code
+C:\Users\<用户名>\.workbuddy-ai\skills\video-to-note\   # WorkBuddy
+C:\Users\<用户名>\.agents\skills\video-to-note\          # pi / 通用约定
+~/.claude/skills/video-to-note/                          # Claude Code
 ```
 
 ### 使用
