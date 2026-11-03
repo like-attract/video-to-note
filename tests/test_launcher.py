@@ -77,9 +77,73 @@ def test_check_for_updates_opens_new_release_after_confirmation(monkeypatch) -> 
     monkeypatch.setattr(launcher, "show_update_message", lambda *args, **kwargs: 6)
     monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
 
-    launcher.check_for_updates()
+    launcher._check_for_updates_now()
 
     assert opened == ["https://github.com/example/release"]
+
+
+def test_check_for_updates_dispatches_to_worker_thread(monkeypatch) -> None:
+    """托盘回调不能在 pystray 的窗口过程线程里同步跑 MessageBox。"""
+    started: list[dict] = []
+
+    class FakeLock:
+        def __init__(self) -> None:
+            self.free = True
+
+        def acquire(self, blocking: bool = False) -> bool:
+            if not self.free:
+                return False
+            self.free = False
+            return True
+
+        def release(self) -> None:
+            self.free = True
+
+    class FakeThread:
+        def __init__(self, target, name, daemon):  # noqa: ANN001
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            started.append(
+                {"target": self.target, "name": self.name, "daemon": self.daemon}
+            )
+
+    monkeypatch.setattr(launcher.threading, "Thread", FakeThread)
+    monkeypatch.setattr(launcher, "_UPDATE_CHECK_LOCK", FakeLock())
+
+    launcher.check_for_updates()
+
+    assert len(started) == 1
+    assert started[0]["name"] == "VideoToNoUpdateCheck"
+    assert started[0]["daemon"] is True
+    assert callable(started[0]["target"])
+
+
+def test_check_for_updates_skips_when_already_running(monkeypatch) -> None:
+    started: list[object] = []
+
+    class BusyLock:
+        def acquire(self, blocking: bool = False) -> bool:
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("未取得锁时不应 release")
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def start(self) -> None:
+            started.append(object())
+
+    monkeypatch.setattr(launcher.threading, "Thread", FakeThread)
+    monkeypatch.setattr(launcher, "_UPDATE_CHECK_LOCK", BusyLock())
+
+    launcher.check_for_updates()
+
+    assert started == []
 
 
 class FakeServer:
