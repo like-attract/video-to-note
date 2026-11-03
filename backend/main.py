@@ -164,7 +164,7 @@ NOTE_IMAGE_REF_RE = re.compile(
     rf"(!\[[^\]]*\]\()\./(?:{FRAMES_DIR_NAME}|images)/([^)]+)\)"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.4.7")
+app = FastAPI(title="VideoToNo API", version="1.4.8")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -365,12 +365,17 @@ async def run_transcription_local(
 ) -> dict:
     """按所选模型路由转写引擎：paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。
 
-    progress_callback(已转写秒数, 总秒数) 仅 whisper 路径支持（paraformer
-    一次性出结果，且 RTF ≈ 0.05 本来就不需要心跳）。
+    progress_callback(已处理秒数, 总秒数)：两条引擎都支持。平台 AI 字幕路径不经过
+    这里，因此不需要额外心跳。
     """
     if model_name == "paraformer-zh":
         return await paraformer_transcriber.transcribe(
-            media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
+            media_path,
+            model_name,
+            use_gpu,
+            initial_prompt=title,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
     return await transcriber.transcribe(
         media_path,
@@ -397,9 +402,14 @@ def transcribe_progress_reporter(
 
     def report(position: float, duration: float) -> None:
         total = _clock(duration) if duration > 0 else "未知时长"
+        percent = (
+            f"（{max(0, min(100, round(position / duration * 100)))}%）"
+            if duration > 0
+            else ""
+        )
         message = (
             f"正在转写{page_label}音频（{model_name}）："
-            f"已推进到 {_clock(position)} / {total}"
+            f"已推进到 {_clock(position)} / {total}{percent}"
         )
         loop.call_soon_threadsafe(set_progress, task, 4, "语音转写", 38, message)
 

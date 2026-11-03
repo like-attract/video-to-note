@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 
 from .download import download_to_file
-from .whisper_asr import TranscriptionCancelledError
+from .whisper_asr import TRANSCRIBE_HEARTBEAT_SECONDS, TranscriptionCancelledError
 from .transcript import TranscriptSegment
 
 HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
@@ -78,10 +78,16 @@ class ParaformerTranscriber:
         use_gpu: bool = False,
         initial_prompt: str | None = None,
         cancel_event: threading.Event | None = None,
+        progress_callback: Any = None,
     ) -> dict:
         try:
             return await asyncio.to_thread(
-                self._transcribe_sync, media_path, model_name, use_gpu, cancel_event
+                self._transcribe_sync,
+                media_path,
+                model_name,
+                use_gpu,
+                cancel_event,
+                progress_callback,
             )
         except TranscriptionCancelledError as exc:
             raise asyncio.CancelledError("转写已被用户取消") from exc
@@ -278,6 +284,7 @@ class ParaformerTranscriber:
         model_name: str,
         use_gpu: bool,
         cancel_event: threading.Event | None,
+        progress_callback: Any = None,
     ) -> dict:
         if cancel_event is not None and cancel_event.is_set():
             raise TranscriptionCancelledError()
@@ -294,6 +301,7 @@ class ParaformerTranscriber:
 
         transcribe_started = time.monotonic()
         segments: list[TranscriptSegment] = []
+        last_beat = 0.0
         for piece_start_sample, piece in self._vad_pieces(
             audio, models["vad_config"], cancel_event
         ):
@@ -303,18 +311,29 @@ class ParaformerTranscriber:
             stream.accept_waveform(SAMPLE_RATE, piece)
             recognizer.decode_stream(stream)
             text = stream.result.text.strip()
-            if not text:
-                continue
-            if punct is not None:
-                text = punct.add_punctuation(text).strip()
             if text:
-                segments.append(
-                    TranscriptSegment(
-                        round(piece_start_sample / SAMPLE_RATE, 2),
-                        round((piece_start_sample + len(piece)) / SAMPLE_RATE, 2),
-                        text,
+                if punct is not None:
+                    text = punct.add_punctuation(text).strip()
+                if text:
+                    segments.append(
+                        TranscriptSegment(
+                            round(piece_start_sample / SAMPLE_RATE, 2),
+                            round((piece_start_sample + len(piece)) / SAMPLE_RATE, 2),
+                            text,
+                        )
                     )
-                )
+            if progress_callback is not None:
+                now = time.monotonic()
+                # 第一段解码完就回报一次，别让用户先等一个心跳周期。
+                if last_beat == 0.0 or now - last_beat >= TRANSCRIBE_HEARTBEAT_SECONDS:
+                    last_beat = now
+                    progress_callback(
+                        min(
+                            duration,
+                            (piece_start_sample + len(piece)) / SAMPLE_RATE,
+                        ),
+                        duration,
+                    )
 
         notes: list[str] = []
         if models.get("note"):
@@ -344,23 +363,39 @@ class ParaformerTranscriber:
         audio: np.ndarray,
         vad_config: Any,
         cancel_event: threading.Event | None,
-    ) -> list[tuple[int, np.ndarray]]:
-        """VAD 切段；超长段再按 MAX_PIECE_SECONDS 切小片。返回 (起始采样点, 音频片)。"""
+    ):
+        """VAD 切段；超长段再按 MAX_PIECE_SECONDS 切小片，边扫边产出。
+
+        逐段产出而不是先攒成列表：上层解码完一段就能回报一次“已处理到哪”，
+        不必等整段音频的 VAD 扫完才看到第一格进度。
+        """
         import sherpa_onnx
 
         detector = sherpa_onnx.VoiceActivityDetector(
             vad_config,
             buffer_size_in_seconds=120,
         )
-        raw_segments: list[tuple[int, np.ndarray]] = []
+        max_samples = MAX_PIECE_SECONDS * SAMPLE_RATE
+
+        def split(start: int, samples: np.ndarray):
+            if len(samples) <= max_samples:
+                yield start, samples
+                return
+            for offset in range(0, len(samples), max_samples):
+                piece = samples[offset : offset + max_samples]
+                if len(piece) >= SAMPLE_RATE // 2:  # 丢弃不足 0.5s 的尾巴碎片
+                    yield start + offset, piece
+
         for offset in range(0, len(audio), VAD_WINDOW):
             if cancel_event is not None and cancel_event.is_set():
                 raise TranscriptionCancelledError()
             detector.accept_waveform(audio[offset : offset + VAD_WINDOW])
             while not detector.empty():
                 segment = detector.front
-                raw_segments.append((int(segment.start), np.asarray(segment.samples)))
+                start = int(segment.start)
+                samples = np.asarray(segment.samples)
                 detector.pop()
+                yield from split(start, samples)
         if detector.is_speech_detected():
             # 收尾：补静音让最后一段闭合
             silence = np.zeros(VAD_WINDOW, dtype=np.float32)
@@ -370,17 +405,7 @@ class ParaformerTranscriber:
                     break
             while not detector.empty():
                 segment = detector.front
-                raw_segments.append((int(segment.start), np.asarray(segment.samples)))
+                start = int(segment.start)
+                samples = np.asarray(segment.samples)
                 detector.pop()
-
-        pieces: list[tuple[int, np.ndarray]] = []
-        max_samples = MAX_PIECE_SECONDS * SAMPLE_RATE
-        for start, samples in raw_segments:
-            if len(samples) <= max_samples:
-                pieces.append((start, samples))
-                continue
-            for offset in range(0, len(samples), max_samples):
-                piece = samples[offset : offset + max_samples]
-                if len(piece) >= SAMPLE_RATE // 2:  # 丢弃不足 0.5s 的尾巴碎片
-                    pieces.append((start + offset, piece))
-        return pieces
+                yield from split(start, samples)

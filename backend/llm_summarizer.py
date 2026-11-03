@@ -70,7 +70,13 @@ SUMMARY_CHUNK_CHARACTERS = 9_000
 MERGE_INPUT_CHARACTERS = 14_000
 LLM_TIMEOUT_SECONDS = 300
 LLM_MAX_RETRIES = 0
-DEEPSEEK_HIGH_TOKEN_BUDGET = 12_000
+# DeepSeek 兼容通道的输出额度：思考链与正文共用。兼容网关常见 8K/16K 上限，
+# 16K 是折中值；不接受时 _complete 会退回调用方额度或干脆不下发。
+DEEPSEEK_HIGH_TOKEN_BUDGET = 16_000
+# 官方 DeepSeek 的输出上限远高于兼容网关：deepseek-flash 官方文档给到 384K。
+# 32K 覆盖实测 high 档 18,955 字思考 + 8K 正文的最坏情况（约 20K token），
+# 同时避免把通道上限开到 384K 后拉长最坏等待。
+DEEPSEEK_OFFICIAL_HIGH_TOKEN_BUDGET = 32_000
 # max 档的输出额度按正文需求的倍数抬高：思考链与正文共用一个池子，额度只是油箱
 # 容量而不是油门——正常调用想停就停、用不满，抬高不影响成本；但太低会让长思考
 # 吃满后整条流被截断、正文为 0（实测 max 档思考 2.2 万字撞 1.38 万 token 上限，
@@ -120,6 +126,11 @@ TAIL_PATCH_TIMEOUT_SECONDS = 240.0
 TAIL_CONTENT_WINDOW_CHARACTERS = 6
 TAIL_CONTENT_SAMPLE_SEGMENTS = 40
 TAIL_CONTENT_COVERED_RATIO = 0.05
+# 单个 6 字窗口命中可能只是通用短语（实测“然后在适配层实现”在正文前文出现过），
+# 不足以证明这一段写到了。判定时要求同一段命中 2/3 个窗口，整体至少 2 段命中；
+# 宁可多补一次，也不能把真截断当成“只是省略时间戳”放过。
+TAIL_CONTENT_MIN_WINDOW_HITS = 2
+TAIL_CONTENT_MIN_COVERED_SEGMENTS = 2
 # 流式读取心跳间隔：把"模型仍在输出"反映到任务进度上，避免长时间同一句话看起来像死锁。
 # 与转写心跳同节奏（30s）：20s 时日志滚动太快，反而看不清进度。
 LLM_HEARTBEAT_SECONDS = 30.0
@@ -679,6 +690,14 @@ class LLMSummarizer:
         truncated_by_length = (
             getattr(self, "_last_finish_reason", None) == "length"
         )
+        if truncated_by_length:
+            stats = getattr(self, "_last_call_stats", {})
+            self._warn_once(
+                "成稿被输出额度截断："
+                f"实际下发 max_tokens={stats.get('max_tokens', '未知')}，"
+                f"思考 {stats.get('reasoning_characters', 0)} 字 / "
+                f"正文 {stats.get('content_characters', 0)} 字"
+            )
         return await self._ensure_tail_coverage(
             title,
             draft,
@@ -1278,6 +1297,7 @@ class LLMSummarizer:
         ]
         if not missing:
             return draft
+        claimed_end = note_end
         message = (
             "检测到笔记内容停在 "
             f"{format_timestamp(note_end)}，未覆盖转写结尾 {format_timestamp(coverage_end)}"
@@ -1294,6 +1314,30 @@ class LLMSummarizer:
                     message + "；笔记里能找到尾部内容，判断只是省略了时间戳，已跳过自动补写"
                 )
             return draft
+
+        # 标题里的区间终点是模型的“计划”，不是正文的实际进度：模型可能在
+        # `## 组装根 [09:24-10:02]` 下只写到 09:35 就被输出额度截断。补写必须从
+        # 最后一个真正出现在笔记里的转写段之后开始，否则 09:35–10:02 会落空。
+        actual_end = self._last_covered_end(draft, segments)
+        if actual_end is not None:
+            heading_start = self._last_heading_start(draft)
+            if heading_start is not None:
+                # 不往前越过最后一个小节：上一节已经写过，补得越早重复越多。
+                actual_end = max(actual_end, heading_start)
+            if actual_end < note_end:
+                note_end = actual_end
+                missing = [
+                    segment for segment in segments if segment.start >= note_end - 5
+                ]
+                if not missing:
+                    return draft
+                message = (
+                    "检测到笔记正文实际只写到 "
+                    f"{format_timestamp(note_end)}（标题区间标到 "
+                    f"{format_timestamp(claimed_end)}），未覆盖转写结尾 "
+                    f"{format_timestamp(coverage_end)}"
+                )
+                gap = coverage_end - note_end
 
         material_characters = sum(len(segment.text) + 33 for segment in missing)
         if (
@@ -1476,14 +1520,38 @@ class LLMSummarizer:
         return f"{draft.rstrip()}\n\n" + "\n\n".join(pieces)
 
     @classmethod
+    def _last_covered_end(
+        cls, draft: str, segments: Sequence[TranscriptSegment]
+    ) -> float | None:
+        """从结尾往前找最后一段真正出现在笔记里的转写，返回它的结束时间。
+
+        不能用标题里的区间终点：模型被额度截断时，标题可能已经写到了整段计划结束，
+        正文却停在中间。要求同一段命中 2/3 个窗口，避免被通用短语带到更靠后的段。
+        """
+        note = cls._overlap_text(draft)
+        if not note:
+            return None
+        for segment in reversed(segments):
+            text = cls._overlap_text(segment.text)
+            if len(text) < TAIL_CONTENT_WINDOW_CHARACTERS:
+                continue
+            if cls._segment_appears(
+                text, note, min_hits=TAIL_CONTENT_MIN_WINDOW_HITS
+            ):
+                return segment.end
+        return None
+
+    @classmethod
     def _tail_content_missing(
         cls, draft: str, missing: Sequence[TranscriptSegment]
     ) -> bool:
         """缺失区间的内容是否真的没进笔记（而不是只是没写时间戳）。
 
         抽样看缺失区间里的 6 字片段在笔记里出现过多少；同时单独看最后几段：
-        只要最后几段有内容出现在笔记里，就说明模型写到了结尾，不该补写。
-        6 字窗口是刻意选的：4 字太容易偶然命中，8 字在改写后几乎不可能命中。
+        最后几段有足够强的重合，就说明模型写到了结尾，不该补写。
+        6 字窗口是刻意选的：4 字太容易偶然命中，8 字在改写后几乎不可能命中；
+        但单个窗口仍可能撞上“然后在适配层实现”这类通用短语，所以同一段要求
+        2/3 个窗口命中，整体也至少要有 2 段命中。
         """
         note = cls._overlap_text(draft)
         if not note:
@@ -1501,14 +1569,20 @@ class LLMSummarizer:
                 candidates[min(len(candidates) - 1, round(index * step))]
                 for index in range(TAIL_CONTENT_SAMPLE_SEGMENTS)
             ]
+        min_hits = TAIL_CONTENT_MIN_WINDOW_HITS
         last_tail_covered = any(
-            cls._segment_appears(segment, note) for segment in candidates[-5:]
+            cls._segment_appears(segment, note, min_hits=min_hits)
+            for segment in candidates[-5:]
         )
         if last_tail_covered:
             return False
         covered = sum(
-            1 for segment in candidates if cls._segment_appears(segment, note)
+            1
+            for segment in candidates
+            if cls._segment_appears(segment, note, min_hits=min_hits)
         )
+        if covered < TAIL_CONTENT_MIN_COVERED_SEGMENTS:
+            return True
         return covered / len(candidates) < TAIL_CONTENT_COVERED_RATIO
 
     @staticmethod
@@ -1518,14 +1592,17 @@ class LLMSummarizer:
         return re.sub(r"[^\w\u4e00-\u9fff]+", "", text).lower()
 
     @classmethod
-    def _segment_appears(cls, segment: str, note: str) -> bool:
+    def _segment_appears(
+        cls, segment: str, note: str, min_hits: int = 1
+    ) -> bool:
         window = TAIL_CONTENT_WINDOW_CHARACTERS
         if len(segment) <= window:
             return segment in note
         positions = {0, (len(segment) - window) // 2, len(segment) - window}
-        return any(
-            segment[position : position + window] in note for position in positions
+        hits = sum(
+            1 for position in positions if segment[position : position + window] in note
         )
+        return hits >= min(min_hits, len(positions))
 
     @staticmethod
     def _tail_patch_material(
@@ -1562,6 +1639,18 @@ class LLMSummarizer:
             if match.group(2):
                 seconds.append(LLMSummarizer._parse_clock(match.group(2)))
         return max(seconds) if seconds else None
+
+    @staticmethod
+    def _last_heading_start(text: str) -> float | None:
+        """最后一个带时间戳的小标题的起点；用来给补写起点兜底。"""
+        start: float | None = None
+        for line in text.splitlines():
+            if not line.lstrip().startswith("#"):
+                continue
+            match = _NOTE_TIMESTAMP_RE.search(line)
+            if match:
+                start = LLMSummarizer._parse_clock(match.group(1))
+        return start
 
     @staticmethod
     def _tail_section_prompt(
@@ -1721,13 +1810,21 @@ class LLMSummarizer:
             if self.model_type == "openai" and str(self.model).startswith("gpt-5")
             else "max_tokens"
         )
-        thinking_budget = (
-            max(max_tokens * MAX_EFFORT_BUDGET_MULTIPLIER, DEEPSEEK_HIGH_TOKEN_BUDGET)
-            if self._uses_deepseek_compatibility() and effort == "max"
-            else DEEPSEEK_HIGH_TOKEN_BUDGET
-            if self._uses_deepseek_compatibility() and effort != "off"
-            else max_tokens
-        )
+        if self._uses_deepseek_compatibility():
+            deepseek_high_budget = (
+                DEEPSEEK_OFFICIAL_HIGH_TOKEN_BUDGET
+                if self._is_official_deepseek_endpoint()
+                else DEEPSEEK_HIGH_TOKEN_BUDGET
+            )
+            thinking_budget = (
+                max(max_tokens * MAX_EFFORT_BUDGET_MULTIPLIER, deepseek_high_budget)
+                if effort == "max"
+                else deepseek_high_budget
+                if effort != "off"
+                else max_tokens
+            )
+        else:
+            thinking_budget = max_tokens
         if self.thinking_seen and not self._uses_deepseek_compatibility():
             # 实测到这条通道在返回思考链，就把预留加在最终额度上，而不是去改各阶段传进来的
             # max_tokens——那个值表达的是"正文要写多长"，语义不该被通道行为污染。
@@ -1856,7 +1953,14 @@ class LLMSummarizer:
         self._last_finish_reason = finish_reason
         # 把"我们下发了什么"与"通道实际给了什么"并排记下来：静默忽略关思考请求、或把
         # max_tokens 悄悄砍小，都不会回 400，参数降级阶梯因此永远不触发，光看
-        # finish_reason=length 猜不到额度是谁缩的。
+        # finish_reason=length 猜不到额度是谁缩的。任务日志会带上这份统计。
+        self._last_call_stats = {
+            "stage": stage,
+            "max_tokens": self._sent_token_budget(request),
+            "finish_reason": finish_reason,
+            "reasoning_characters": reasoning_characters,
+            "content_characters": content_characters,
+        }
         if reasoning_characters:
             # 收到过思考增量就是实测证据：本进程内这条通道后续每次请求都自动补一份
             # 思考预留（见 _build_request）。第一次可能仍然不够，但不会一直不够。
@@ -2008,7 +2112,11 @@ class LLMSummarizer:
         """只有官方 DeepSeek API 认私有 thinking 参数。"""
         if str(getattr(self, "model_type", "")).lower() == "deepseek":
             return True
-        host = (urlparse(str(self.base_url)).hostname or "").lower()
+        return self._is_official_deepseek_endpoint()
+
+    def _is_official_deepseek_endpoint(self) -> bool:
+        """按 Base URL 判断是否官方端点；选了 DeepSeek 预设但填代理时不能算官方。"""
+        host = (urlparse(str(getattr(self, "base_url", ""))).hostname or "").lower()
         return host == "api.deepseek.com" or host.endswith(".deepseek.com")
 
     def _rejected_request_params(

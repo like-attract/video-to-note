@@ -31,7 +31,7 @@ from typing import Any, Callable
 from backend import update_check
 from backend.update_check import GITHUB_LATEST_RELEASE_API, version_tuple
 
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
