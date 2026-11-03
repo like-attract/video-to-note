@@ -335,11 +335,27 @@ def _check_for_updates_now() -> None:
     """同步检查一次更新并弹窗；调用方必须已经在工作线程里。"""
     try:
         release = latest_release_info()
-        if version_tuple(release["tag_name"]) <= version_tuple(VERSION):
-            show_update_message(f"当前已是最新版本（v{VERSION}）。", flags=0x40)
+        remote = str(release["tag_name"])
+        remote_version = version_tuple(remote)
+        local_version = version_tuple(VERSION)
+        if remote_version <= local_version:
+            if remote_version == local_version:
+                if remote.lstrip("vV") == VERSION:
+                    message = f"当前已是最新版本（v{VERSION}）。"
+                else:
+                    message = (
+                        f"当前版本 v{VERSION} 与 GitHub 最新发布 {remote} 版本号相同"
+                        "（本地测试版），无需更新。"
+                    )
+            else:
+                message = (
+                    f"当前版本 v{VERSION} 高于 GitHub 最新发布 {remote}。\n\n"
+                    "这通常是本地测试版或尚未发布的构建，无需更新。"
+                )
+            show_update_message(message, flags=0x40)
             return
         message = (
-            f"检测到新版本 {release['tag_name']}（当前 v{VERSION}）。\n\n"
+            f"检测到新版本 {remote}（当前 v{VERSION}）。\n\n"
             "是否打开 GitHub Release 页面查看并更新？"
         )
         result = show_update_message(message, title=f"{APP_NAME} 更新", flags=0x24)

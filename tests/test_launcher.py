@@ -82,6 +82,47 @@ def test_check_for_updates_opens_new_release_after_confirmation(monkeypatch) -> 
     assert opened == ["https://github.com/example/release"]
 
 
+def test_check_for_updates_reports_local_test_build_ahead_of_github(monkeypatch) -> None:
+    """本地测试版号高于线上时，不能说“已是最新版本”。"""
+    messages: list[str] = []
+    monkeypatch.setattr(
+        launcher,
+        "latest_release_info",
+        lambda: {"tag_name": "v1.4.7", "html_url": "https://github.com/example/release"},
+    )
+    monkeypatch.setattr(launcher, "VERSION", "1.4.8")
+    monkeypatch.setattr(
+        launcher,
+        "show_update_message",
+        lambda message, **kwargs: messages.append(message) or 1,
+    )
+
+    launcher._check_for_updates_now()
+
+    assert messages
+    assert "GitHub 最新发布 v1.4.7" in messages[0]
+    assert "本地测试版" in messages[0] or "尚未发布" in messages[0]
+
+
+def test_check_for_updates_reports_equal_version_as_current(monkeypatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        launcher,
+        "latest_release_info",
+        lambda: {"tag_name": "v1.4.8", "html_url": "https://github.com/example/release"},
+    )
+    monkeypatch.setattr(launcher, "VERSION", "1.4.8")
+    monkeypatch.setattr(
+        launcher,
+        "show_update_message",
+        lambda message, **kwargs: messages.append(message) or 1,
+    )
+
+    launcher._check_for_updates_now()
+
+    assert messages == ["当前已是最新版本（v1.4.8）。"]
+
+
 def test_check_for_updates_dispatches_to_worker_thread(monkeypatch) -> None:
     """托盘回调不能在 pystray 的窗口过程线程里同步跑 MessageBox。"""
     started: list[dict] = []
