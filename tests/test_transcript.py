@@ -145,3 +145,51 @@ def test_quality_gate_accepts_normal_spoken_video() -> None:
     segments = [TranscriptSegment(0, 500, "正常口播内容" * 200)]
     quality = transcript_quality(segments, duration=600)
     assert quality["insufficient"] is False
+    assert quality["suspicious"] is False
+
+
+def test_quality_gate_flags_whisper_repetition_loop_tail() -> None:
+    normal = [
+        TranscriptSegment(i * 30, (i + 1) * 30, "正常的中文口播内容，介绍检索增强生成的具体步骤。")
+        for i in range(7)
+    ]
+    garbage = [
+        TranscriptSegment(
+            210 + i * 30,
+            240 + i * 30,
+            "X, C, A, X, X. X.X, XC, XK, XS, XG, XA, Xs, XO, XI, XR, XT, XE",
+        )
+        for i in range(8)
+    ]
+
+    quality = transcript_quality(normal + garbage, duration=450)
+
+    assert quality["suspicious"] is True
+    assert "疑似重复或乱码" in str(quality["suspicion"])
+    assert quality["insufficient"] is False
+
+
+def test_quality_gate_does_not_flag_english_terms_in_chinese_video() -> None:
+    segments = [
+        TranscriptSegment(
+            i * 30,
+            (i + 1) * 30,
+            "这一节讲 trunky、GraphRAG、query transformation 和 hybrid search 的做法。",
+        )
+        for i in range(15)
+    ]
+    quality = transcript_quality(segments, duration=450)
+    assert quality["suspicious"] is False
+
+
+def test_quality_gate_does_not_flag_english_only_video() -> None:
+    segments = [
+        TranscriptSegment(
+            i * 30,
+            (i + 1) * 30,
+            "This section explains retrieval augmented generation, hybrid search and reranking.",
+        )
+        for i in range(15)
+    ]
+    quality = transcript_quality(segments, duration=450)
+    assert quality["suspicious"] is False

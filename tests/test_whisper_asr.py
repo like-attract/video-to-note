@@ -453,6 +453,8 @@ def test_run_model_beam_size_depends_on_device() -> None:
     WhisperTranscriber._run_model(FakeModel(), Path("a.mp3"), None, "cuda")
 
     assert [call["beam_size"] for call in calls] == [1, 5]
+    # Belle 的重复循环靠关掉段间条件打断（2026-11-03 实测）
+    assert all(call["condition_on_previous_text"] is False for call in calls)
 
 
 class _FakeSegment:

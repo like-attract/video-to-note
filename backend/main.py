@@ -2383,6 +2383,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             title = info["title"]
 
         raise_if_cancel_requested(task)
+        retry_media_path: Path | None = None
         if transcript_result is None or bili_pages_to_transcribe:
             set_progress(task, 3, "准备音频", 25, "正在准备音频")
             if bili_pages_to_transcribe:
@@ -2479,6 +2480,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         source_url or "", task_id, cookie, should_abort=should_abort,
                         notes=fallback_notes,
                     )
+                retry_media_path = media_path
                 raise_if_cancel_requested(task)
                 note_api_fallback()
                 set_progress(
@@ -2528,6 +2530,56 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         task["logs"].append(
             f"文字质量检查：{quality['characters']} 字，语音覆盖 {quality['speech_coverage']:.0%}"
         )
+        if quality.get("suspicious"):
+            suspicion = quality.get("suspicion") or "未通过内容检查"
+            task["logs"].append(f"转写内容异常：{suspicion}")
+            can_fallback = (
+                retry_media_path is not None
+                and request.whisper_model != "paraformer-zh"
+                and paraformer_transcriber.core_ready()
+            )
+            if can_fallback:
+                task["logs"].append(
+                    "转写内容疑似重复或乱码，已自动改用 paraformer-zh 重新转写"
+                )
+                set_progress(
+                    task, 4, "语音转写", 38, "转写内容异常，正在改用 paraformer-zh 重试"
+                )
+                whisper_result = await run_transcription(
+                    retry_media_path,
+                    "paraformer-zh",
+                    request.use_gpu,
+                    title,
+                    task.get("_cancel_event"),
+                    progress_callback=transcribe_progress_reporter(task, "paraformer-zh"),
+                )
+                raise_if_cancel_requested(task)
+                segments = whisper_result["segments"]
+                transcript_result = {
+                    "segments": segments,
+                    "language": whisper_result["language"],
+                    "source": "paraformer",
+                }
+                if not info.get("duration"):
+                    info["duration"] = whisper_result["duration"]
+                quality = transcript_quality(
+                    segments, float(info.get("duration") or 0)
+                )
+                transcript_result["quality"] = quality
+                task["logs"].append(
+                    f"paraformer 重转完成：{len(segments)} 段，"
+                    f"文字质量检查：{quality['characters']} 字，"
+                    f"语音覆盖 {quality['speech_coverage']:.0%}"
+                )
+                append_asr_notes(task, whisper_result)
+            if quality.get("suspicious"):
+                stage = "调用大模型" if request.output == "note" else "返回转录"
+                raise RuntimeError(
+                    "转写内容疑似重复或乱码"
+                    f"（{quality.get('suspicion') or '未通过内容检查'}），"
+                    f"已在{stage}前停止。建议改用 paraformer-zh 重新转写；"
+                    "如果已经使用 paraformer-zh，请检查音频或换一个转写模型。"
+                )
         await write_transcript_files(task_id, segments, transcript_result)
         if (
             transcript_result["source"] in {"faster_whisper", "paraformer"}
