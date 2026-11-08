@@ -527,6 +527,8 @@ class SummarizeRequest(BaseModel):
     upload_task_id: str | None = None
     resume_task_id: str | None = None
     processing_mode: Literal["reuse", "restart"] = "reuse"
+    # 换 ASR 模型继续任务时置 True：复用旧任务的视频信息/音频，但忽略旧转录重新转写
+    retranscribe: bool = False
     # transcript：只做「视频 → 带时间轴转录」，不调用大模型，产物到 transcript.json 为止
     output: Literal["note", "transcript"] = "note"
     summary_style: Literal["detailed", "faithful", "concise"] = "detailed"
@@ -850,6 +852,7 @@ def write_task_manifest(
         ),
         "uploaded_filename": uploaded_filename,
         "processing_mode": request.processing_mode,
+        "retranscribe": request.retranscribe,
         "output": request.output,
         # origin=agent 的纯转录任务不进网页端历史（见 list_recent_tasks）
         "origin": origin,
@@ -2282,12 +2285,17 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             video_processor.detect_source(source_url) if source_url else VideoSource.LOCAL
         )
         cookie = douyin_cookie if source_kind == VideoSource.DOUYIN else bili_cookie
-        transcript_result = load_transcript_result(transcript_dir) if transcript_dir else None
+        reused_transcript = load_transcript_result(transcript_dir) if transcript_dir else None
+        transcript_result = None if request.retranscribe else reused_transcript
         bili_pages_to_transcribe: list = []
 
-        if transcript_result:
+        if reused_transcript:
             set_progress(task, 1, "恢复任务信息", 8, "正在读取已有任务信息")
-            info = load_reused_video_info(transcript_dir, transcript_result, source_url)
+            info = load_reused_video_info(transcript_dir, reused_transcript, source_url)
+            if request.retranscribe:
+                task["logs"].append(
+                    "按本次选择重新转写：复用旧任务的视频信息与音频，忽略已有转录"
+                )
         else:
             media_input = uploaded_path or source_url or ""
             set_progress(task, 1, "读取视频信息", 8, "正在读取视频信息")

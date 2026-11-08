@@ -1569,6 +1569,97 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
 
 
 @pytest.mark.asyncio
+async def test_retranscribe_ignores_reused_transcript_but_reuses_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """换 ASR 模型继续时：旧转录必须忽略，但旧音频与视频信息要复用。"""
+    old_task_id = "old-asr-task"
+    new_task_id = "new-asr-task"
+    old_dir = tmp_path / old_task_id
+    old_dir.mkdir()
+    (tmp_path / new_task_id).mkdir()
+    (old_dir / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"旧的 base 转录"}]}',
+        encoding="utf-8",
+    )
+    (old_dir / "notes.md").write_text(
+        "# 视频笔记：《旧任务标题》\n\n正文\n", encoding="utf-8"
+    )
+    audio = old_dir / "audio.m4a"
+    audio.write_bytes(b"audio")
+
+    calls: dict = {}
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        @staticmethod
+        async def get_video_info(*args, **kwargs):
+            raise AssertionError("重新转写不应重读视频信息")
+
+        @staticmethod
+        async def fetch_subtitles(*args, **kwargs):
+            raise AssertionError("prefer_subtitles=False 时不应查字幕")
+
+        @staticmethod
+        async def download_audio(*args, **kwargs):
+            raise AssertionError("应复用旧任务的音频")
+
+    async def fake_transcribe(media_path, model_name, use_gpu, title, cancel_event, **kwargs):
+        calls["media"] = Path(media_path)
+        calls["model"] = model_name
+        return {
+            "segments": [TranscriptSegment(0, 1, "重新转写的内容")],
+            "language": "zh",
+            "source": "paraformer",
+            "device": "cpu",
+            "model": "paraformer-zh",
+            "requested_model": "paraformer-zh",
+            "duration": 12,
+        }
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(self, title, segments, metadata=None, **kwargs):
+            calls["segments"] = list(segments)
+            return "# 重新转写成功"
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "run_transcription", fake_transcribe)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks[new_task_id] = main.new_task()
+    main.tasks[new_task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        retranscribe=True,
+        prefer_subtitles=False,
+        whisper_model="paraformer-zh",
+        llm_config=main.LLMConfig(model_type="glm", api_key="test-key"),
+    )
+
+    await main.process_video_task(new_task_id, request)
+
+    task = main.tasks[new_task_id]
+    assert task["status"] == "completed"
+    assert calls["model"] == "paraformer-zh"
+    assert calls["media"] == audio
+    assert calls["segments"][0].text == "重新转写的内容"
+    assert any("按本次选择重新转写" in log for log in task["logs"])
+    assert (tmp_path / new_task_id / "notes.md").read_text(encoding="utf-8").startswith(
+        "# 重新转写成功"
+    )
+
+
+@pytest.mark.asyncio
 async def test_local_task_title_uses_uploaded_filename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

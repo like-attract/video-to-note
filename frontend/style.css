@@ -757,6 +757,40 @@ input[type="checkbox"] {
     flex-wrap: wrap;
     margin-top: 14px;
 }
+.asr-advice-card {
+    position: relative;
+    border-top: 3px solid var(--green);
+}
+#asrAdviceTitle { color: var(--green); }
+.asr-advice-close {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    width: 28px;
+    height: 28px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+.asr-advice-close:hover { background: var(--surface-soft); color: var(--text); }
+.asr-advice-highlight {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin: 12px 0 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--green);
+    border-radius: 8px;
+    background: var(--green-soft);
+    color: var(--text-soft);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.asr-advice-highlight strong { color: var(--green); }
 
 /* 转写模型下载弹窗：手动导入清单 + 自动下载进度 */
 .model-download-card {
