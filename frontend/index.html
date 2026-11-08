@@ -419,6 +419,18 @@
     </div>
 </div>
 
+<div id="asrAdviceModal" class="modal-backdrop" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="asrAdviceTitle">
+        <h3 id="asrAdviceTitle">建议换一个转写模型</h3>
+        <p id="asrAdviceBody" class="update-body"></p>
+        <div class="modal-actions">
+            <button id="asrAdviceParaformerBtn" class="button" type="button">改用 paraformer-zh</button>
+            <button id="asrAdviceBelleBtn" class="button ghost" type="button">改用 belle-turbo-zh</button>
+            <button id="asrAdviceContinueBtn" class="button ghost" type="button">继续用 base</button>
+        </div>
+    </div>
+</div>
+
 <div id="modelDownloadModal" class="modal-backdrop" hidden>
     <div class="modal-card model-download-card" role="dialog" aria-modal="true" aria-labelledby="modelDownloadTitle">
         <h3 id="modelDownloadTitle">转写模型尚未下载</h3>
@@ -441,6 +453,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261025-2"></script>
+<script src="script.js?v=20261103-1"></script>
 </body>
 </html>

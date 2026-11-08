@@ -314,6 +314,9 @@ function bindEvents() {
     bindListener('updateAcceptBtn', 'click', acceptUpdateOffer);
     bindListener('updateIgnoreBtn', 'click', ignoreUpdateOffer);
     bindListener('updateCancelBtn', 'click', dismissUpdateOffer);
+    bindListener('asrAdviceParaformerBtn', 'click', () => chooseAsrAdviceModel('paraformer-zh'));
+    bindListener('asrAdviceBelleBtn', 'click', () => chooseAsrAdviceModel('belle-turbo-zh'));
+    bindListener('asrAdviceContinueBtn', 'click', dismissAsrModelAdvice);
     bindListener('saveKeyBtn', 'click', saveApiKey);
     bindListener('clearKeyBtn', 'click', clearSavedKey);
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
@@ -562,6 +565,7 @@ async function openRecentTask(taskId) {
         setTranscriptTaskView(task.output === 'transcript');
         renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs)) updateLogs(task.logs);
+        maybeShowAsrModelAdvice(task);
 
         if (task.status === 'completed') {
             await completeTask(task.result, task.elapsed_seconds, task.download_name);
@@ -2609,6 +2613,7 @@ async function pollTask(taskId) {
         updateStep(task.step);
         renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs) && task.logs.length) updateLogs(task.logs);
+        maybeShowAsrModelAdvice(task);
 
         if (task.status === 'completed') {
             await completeTask(task.result, task.elapsed_seconds, task.download_name);
@@ -2726,6 +2731,7 @@ function setTranscriptTaskView(on) {
 }
 
 async function completeTask(result, elapsedSeconds = null, downloadName = '') {
+    dismissAsrModelAdvice();
     stopPolling();
     currentDownloadName = typeof downloadName === 'string' ? downloadName.trim() : '';
     stopElapsedTimer(elapsedSeconds ?? result?.processing_seconds ?? null);
@@ -2745,6 +2751,7 @@ async function completeTask(result, elapsedSeconds = null, downloadName = '') {
 }
 
 function failTask(message, elapsedSeconds = null) {
+    dismissAsrModelAdvice();
     stopPolling();
     stopElapsedTimer(elapsedSeconds);
     setTaskActive(false);
@@ -2793,6 +2800,7 @@ async function cancelCurrentTask() {
 }
 
 function markTaskCancelled(message, elapsedSeconds = null) {
+    dismissAsrModelAdvice();
     stopPolling();
     stopElapsedTimer(elapsedSeconds);
     setTaskActive(false);
@@ -2877,6 +2885,48 @@ function renderTaskAdvisory(message) {
     const advisory = byId('taskAdvisory');
     advisory.textContent = typeof message === 'string' ? message : '';
     advisory.hidden = !advisory.textContent;
+}
+
+let asrAdviceKey = '';
+
+function maybeShowAsrModelAdvice(task) {
+    const advice = task && task.model_advice;
+    if (!advice || advice.kind !== 'asr_model') return;
+    if (!['queued', 'processing', 'cancelling'].includes(task.status)) return;
+    const key = `${task.task_id || currentTaskId}:${advice.current_model}:${advice.duration}`;
+    if (asrAdviceKey === key) return;
+    asrAdviceKey = key;
+    byId('asrAdviceBody').textContent = `${advice.message}\n\n`
+        + '点下面的按钮会打开对应模型的手动导入/自动下载窗口；装好后取消当前任务，'
+        + '再重新点「开始生成」即可。也可以让这次 base 转写先跑完。';
+    byId('asrAdviceModal').hidden = false;
+}
+
+function dismissAsrModelAdvice() {
+    byId('asrAdviceModal').hidden = true;
+}
+
+async function chooseAsrAdviceModel(modelId) {
+    byId('asrAdviceModal').hidden = true;
+    if (modelDialogResolve) {
+        showToast('请先完成当前的模型弹窗', 'info');
+        return;
+    }
+    const select = byId('whisperModel');
+    select.value = modelId;
+    select.dispatchEvent(new Event('change'));
+    await refreshWhisperModelHints();
+    const option = select.selectedOptions[0];
+    const label = (option?.dataset.baseLabel || option?.textContent || modelId).split('（')[0];
+    if (option && option.dataset.status === 'cached') {
+        showToast(`${label} 已缓存；取消当前任务后重新生成即可`, 'success');
+        return;
+    }
+    const status = option ? option.dataset.status : 'missing';
+    const decision = await promptModelDownload(modelId, status);
+    if (decision === 'ready') {
+        showToast(`${label} 已就绪；取消当前任务后重新生成即可`, 'success');
+    }
 }
 
 function clearLogs() {

@@ -145,6 +145,26 @@ MAX_SUBTITLE_MB = int(os.getenv("MAX_SUBTITLE_MB", "20"))
 MAX_SUBTITLE_BYTES = MAX_SUBTITLE_MB * 1024 * 1024
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo", "belle-turbo-zh"}
 ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"}
+# base 是默认的小模型：短视频够用，20 分钟以上更容易又慢又不准，
+# 这时给一条换 paraformer / Belle 的建议（只在真的走语音转写时提示）。
+BASE_MODEL_ADVICE_SECONDS = 20 * 60
+
+
+def base_model_advice(whisper_model: str, duration: float) -> dict[str, Any] | None:
+    if whisper_model != "base" or duration < BASE_MODEL_ADVICE_SECONDS:
+        return None
+    minutes = BASE_MODEL_ADVICE_SECONDS // 60
+    return {
+        "kind": "asr_model",
+        "current_model": "base",
+        "duration": round(duration),
+        "suggested_models": ["paraformer-zh", "belle-turbo-zh"],
+        "message": (
+            f"这个视频超过 {minutes} 分钟，base 模型在长音频上速度和准确率都容易吃力。"
+            "建议改用 paraformer-zh（最快、中文更准）或 belle-turbo-zh"
+            "（精度更好但更慢）。"
+        ),
+    }
 DOUYIN_HINT = (
     "抖音链接解析失败。可以先点击“打开抖音浏览器”，在本机窗口完成登录/验证后重试；"
     "也可能是媒体地址已过期，请重新提交链接。"
@@ -2386,6 +2406,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         retry_media_path: Path | None = None
         if transcript_result is None or bili_pages_to_transcribe:
             set_progress(task, 3, "准备音频", 25, "正在准备音频")
+            advice = base_model_advice(
+                request.whisper_model, float(info.get("duration") or 0)
+            )
+            if advice:
+                task["model_advice"] = advice
+                task["logs"].append(advice["message"])
             if bili_pages_to_transcribe:
                 # 多分 P：对没有 AI 字幕的分 P 逐个下载音频并转写，再按顺序合并
                 whisper_by_page: dict[int, dict] = {}

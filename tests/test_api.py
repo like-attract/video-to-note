@@ -969,6 +969,16 @@ def test_download_word_document_embeds_note_and_images(
     main.tasks.pop(task_id, None)
 
 
+def test_base_model_advice_only_for_long_base_videos() -> None:
+    assert main.base_model_advice("base", main.BASE_MODEL_ADVICE_SECONDS - 1) is None
+    advice = main.base_model_advice("base", main.BASE_MODEL_ADVICE_SECONDS)
+    assert advice is not None
+    assert advice["suggested_models"] == ["paraformer-zh", "belle-turbo-zh"]
+    assert "20 分钟" in advice["message"]
+    assert main.base_model_advice("small", 3600) is None
+    assert main.base_model_advice("paraformer-zh", 3600) is None
+
+
 def test_model_download_job_exposes_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
