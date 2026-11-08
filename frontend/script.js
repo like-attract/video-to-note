@@ -317,7 +317,7 @@ function bindEvents() {
     bindListener('asrAdviceParaformerBtn', 'click', () => chooseAsrAdviceModel('paraformer-zh'));
     bindListener('asrAdviceBelleBtn', 'click', () => chooseAsrAdviceModel('belle-turbo-zh'));
     bindListener('asrAdviceContinueBtn', 'click', dismissAsrModelAdvice);
-    bindListener('asrAdviceCloseBtn', 'click', dismissAsrModelAdvice);
+    bindListener('asrAdviceCloseBtn', 'click', closeAsrAdviceAndCancel);
     bindListener('saveKeyBtn', 'click', saveApiKey);
     bindListener('clearKeyBtn', 'click', clearSavedKey);
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
@@ -2779,11 +2779,13 @@ async function cancelCurrentTask() {
     const button = byId('cancelTaskBtn');
     button.disabled = true;
     button.textContent = '正在取消';
+    let requestSent = false;
     try {
         const response = await fetch(`${API_BASE}/task/${encodeURIComponent(currentTaskId)}/cancel`, {
             method: 'POST'
         });
         const data = await readResponse(response, '取消任务失败');
+        requestSent = true;
         if (data.status === 'cancelled') {
             markTaskCancelled(
                 '任务已取消；已生成的中间文件仍保留在工作目录',
@@ -2800,7 +2802,7 @@ async function cancelCurrentTask() {
         button.disabled = false;
     } finally {
         isCancelling = false;
-        button.textContent = isTaskActive ? '取消请求已发送' : '取消任务';
+        button.textContent = requestSent && isTaskActive ? '取消请求已发送' : '取消任务';
     }
 }
 
@@ -2835,6 +2837,7 @@ function setTaskActive(active) {
     const cancelButton = byId('cancelTaskBtn');
     cancelButton.hidden = !active;
     cancelButton.disabled = !active || isCancelling;
+    cancelButton.textContent = '取消任务';
 }
 
 function setSourceControlsDisabled(disabled) {
@@ -2904,7 +2907,8 @@ function maybeShowAsrModelAdvice(task) {
     byId('asrAdviceBody').textContent = `${advice.message}\n\n`
         + '点下面的按钮会先停止这次 base 转写，并检查目标模型：'
         + '已缓存就直接用它重新转写；未缓存会打开模型弹窗，'
-        + '装好后自动继续这次任务。';
+        + '装好后自动继续这次任务。右上角 × 会取消本次任务；'
+        + '只想关闭提示请点「继续用 base」。';
     byId('asrAdviceModal').hidden = false;
 }
 
@@ -2924,8 +2928,10 @@ function stopTaskForModelSwitch(message, elapsedSeconds = null) {
     loadRecentTasks(true);
 }
 
-async function cancelTaskForModelSwitch(label) {
-    if (!currentTaskId || !isTaskActive) return true;
+async function cancelActiveTaskAndWait() {
+    if (!currentTaskId || !isTaskActive) {
+        return { ok: true, status: 'inactive', task: null };
+    }
     stopPolling();
     isCancelling = true;
     try {
@@ -2946,25 +2952,59 @@ async function cancelTaskForModelSwitch(label) {
                 continue;
             }
             if (['cancelled', 'failed', 'completed'].includes(task.status)) {
-                stopTaskForModelSwitch(
-                    task.status === 'cancelled'
-                        ? `已停止 base 转写，准备改用 ${label}`
-                        : `原任务已${task.status === 'completed' ? '完成' : '失败'}，准备改用 ${label}`,
-                    task.elapsed_seconds
-                );
-                return true;
+                return { ok: true, status: task.status, task };
             }
         }
         schedulePoll(currentTaskId, 0);
-        showToast('停止当前任务超时，请稍后再试', 'error');
-        return false;
+        return { ok: false, status: 'timeout', task: null };
     } catch (error) {
         schedulePoll(currentTaskId, 0);
-        showToast(`停止当前任务失败：${error.message}`, 'error');
-        return false;
+        return { ok: false, status: 'error', task: null, error };
     } finally {
         isCancelling = false;
     }
+}
+
+function cancelFailureMessage(result) {
+    return result.status === 'timeout'
+        ? '停止当前任务超时，请稍后再试'
+        : `停止当前任务失败：${result.error?.message || '未知错误'}`;
+}
+
+async function cancelTaskForModelSwitch(label) {
+    const result = await cancelActiveTaskAndWait();
+    if (!result.ok) {
+        showToast(cancelFailureMessage(result), 'error');
+        return false;
+    }
+    if (result.status === 'inactive') return true;
+    stopTaskForModelSwitch(
+        result.status === 'cancelled'
+            ? `已停止 base 转写，准备改用 ${label}`
+            : `原任务已${result.status === 'completed' ? '完成' : '失败'}，准备改用 ${label}`,
+        result.task.elapsed_seconds
+    );
+    return true;
+}
+
+async function closeAsrAdviceAndCancel() {
+    dismissAsrModelAdvice();
+    if (!currentTaskId || !isTaskActive) return;
+    const result = await cancelActiveTaskAndWait();
+    if (!result.ok) {
+        showToast(cancelFailureMessage(result), 'error');
+        return;
+    }
+    if (result.status === 'cancelled') {
+        markTaskCancelled('已取消本次任务；可改用 paraformer / Belle 后重新生成');
+        return;
+    }
+    // 取消晚了一步：让正常轮询把已完成/失败的结果渲染出来。
+    schedulePoll(currentTaskId, 0);
+    showToast(
+        result.status === 'completed' ? '任务已在取消前完成' : '任务已失败',
+        result.status === 'completed' ? 'info' : 'error'
+    );
 }
 
 async function chooseAsrAdviceModel(modelId) {

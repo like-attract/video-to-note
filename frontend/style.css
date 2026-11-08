@@ -759,9 +759,8 @@ input[type="checkbox"] {
 }
 .asr-advice-card {
     position: relative;
-    border-top: 3px solid var(--green);
+    border-top: 2px solid var(--green);
 }
-#asrAdviceTitle { color: var(--green); }
 .asr-advice-close {
     position: absolute;
     top: 8px;
@@ -783,9 +782,9 @@ input[type="checkbox"] {
     gap: 5px;
     margin: 12px 0 2px;
     padding: 10px 12px;
-    border: 1px solid var(--green);
+    border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--green-soft);
+    background: var(--surface-soft);
     color: var(--text-soft);
     font-size: 12px;
     line-height: 1.6;

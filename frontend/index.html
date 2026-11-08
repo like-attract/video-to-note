@@ -421,7 +421,7 @@
 
 <div id="asrAdviceModal" class="modal-backdrop" hidden>
     <div class="modal-card asr-advice-card" role="dialog" aria-modal="true" aria-labelledby="asrAdviceTitle">
-        <button id="asrAdviceCloseBtn" class="asr-advice-close" type="button" aria-label="关闭">×</button>
+        <button id="asrAdviceCloseBtn" class="asr-advice-close" type="button" aria-label="取消本次任务" title="取消本次任务">×</button>
         <h3 id="asrAdviceTitle">建议换一个转写模型</h3>
         <p id="asrAdviceBody" class="update-body"></p>
         <div class="asr-advice-highlight">
@@ -429,7 +429,7 @@
             <span><strong>belle-turbo-zh</strong> · 精度更好、速度较慢</span>
         </div>
         <div class="modal-actions">
-            <button id="asrAdviceParaformerBtn" class="button primary" type="button">改用 paraformer-zh</button>
+            <button id="asrAdviceParaformerBtn" class="button" type="button">改用 paraformer-zh</button>
             <button id="asrAdviceBelleBtn" class="button ghost" type="button">改用 belle-turbo-zh</button>
             <button id="asrAdviceContinueBtn" class="button ghost" type="button">继续用 base</button>
         </div>
@@ -458,6 +458,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261103-2"></script>
+<script src="script.js?v=20261103-3"></script>
 </body>
 </html>
