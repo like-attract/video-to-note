@@ -238,6 +238,10 @@ class WhisperTranscriber:
             repetition_penalty=1.1,
             no_repeat_ngram_size=3,
             hallucination_silence_threshold=2.0,
+            # 2026-11-03 实测：Belle 在 7.5 分钟 CPU 转写里 03:20 后进入
+            # X/XX 重复循环；关掉段间条件后同一音频 151s 完整出 21 段，
+            # 原先是 300s / 16 段且后 4 分钟乱码。
+            condition_on_previous_text=False,
             initial_prompt=initial_prompt,
             word_timestamps=False,
         )

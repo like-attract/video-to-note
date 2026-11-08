@@ -314,6 +314,10 @@ function bindEvents() {
     bindListener('updateAcceptBtn', 'click', acceptUpdateOffer);
     bindListener('updateIgnoreBtn', 'click', ignoreUpdateOffer);
     bindListener('updateCancelBtn', 'click', dismissUpdateOffer);
+    bindListener('asrAdviceParaformerBtn', 'click', () => chooseAsrAdviceModel('paraformer-zh'));
+    bindListener('asrAdviceBelleBtn', 'click', () => chooseAsrAdviceModel('belle-turbo-zh'));
+    bindListener('asrAdviceContinueBtn', 'click', dismissAsrModelAdvice);
+    bindListener('asrAdviceCloseBtn', 'click', closeAsrAdviceAndCancel);
     bindListener('saveKeyBtn', 'click', saveApiKey);
     bindListener('clearKeyBtn', 'click', clearSavedKey);
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
@@ -562,6 +566,7 @@ async function openRecentTask(taskId) {
         setTranscriptTaskView(task.output === 'transcript');
         renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs)) updateLogs(task.logs);
+        maybeShowAsrModelAdvice(task);
 
         if (task.status === 'completed') {
             await completeTask(task.result, task.elapsed_seconds, task.download_name);
@@ -2361,6 +2366,7 @@ async function startSummary(options = {}) {
     if (options.outputMode) setOutputMode(options.outputMode);
 
     const resumeTaskId = options.resumeCurrent ? currentTaskId : null;
+    const retranscribe = Boolean(options.retranscribe);
     const selectedMode = document.querySelector('input[name="processingMode"]:checked')?.value || 'restart';
     const forceRestart = Boolean(options.forceRestart || (!resumeTaskId && selectedMode === 'restart'));
     const request = validateAndBuildRequestBase(resumeTaskId);
@@ -2428,7 +2434,8 @@ async function startSummary(options = {}) {
         }
 
         const config = buildSummarizeConfig(
-            videoUrl, uploadTaskId, resumeTaskId, forceRestart, request.transcriptOnly
+            videoUrl, uploadTaskId, resumeTaskId, forceRestart, request.transcriptOnly,
+            retranscribe
         );
         addLog(request.transcriptOnly
             ? '正在提交转写任务（只到字幕稿为止，不调用大模型）'
@@ -2523,7 +2530,8 @@ function validationError(message) {
 }
 
 function buildSummarizeConfig(
-    videoUrl, uploadTaskId, resumeTaskId = null, forceRestart = false, transcriptOnly = false
+    videoUrl, uploadTaskId, resumeTaskId = null, forceRestart = false, transcriptOnly = false,
+    retranscribe = false
 ) {
     const config = {
         video_url: videoUrl,
@@ -2573,6 +2581,7 @@ function buildSummarizeConfig(
     }
     if (uploadTaskId) config.upload_task_id = uploadTaskId;
     if (resumeTaskId && !forceRestart) config.resume_task_id = resumeTaskId;
+    if (retranscribe) config.retranscribe = true;
     return config;
 }
 
@@ -2609,6 +2618,7 @@ async function pollTask(taskId) {
         updateStep(task.step);
         renderTaskAdvisory(task.advisory);
         if (Array.isArray(task.logs) && task.logs.length) updateLogs(task.logs);
+        maybeShowAsrModelAdvice(task);
 
         if (task.status === 'completed') {
             await completeTask(task.result, task.elapsed_seconds, task.download_name);
@@ -2726,6 +2736,7 @@ function setTranscriptTaskView(on) {
 }
 
 async function completeTask(result, elapsedSeconds = null, downloadName = '') {
+    dismissAsrModelAdvice();
     stopPolling();
     currentDownloadName = typeof downloadName === 'string' ? downloadName.trim() : '';
     stopElapsedTimer(elapsedSeconds ?? result?.processing_seconds ?? null);
@@ -2745,6 +2756,7 @@ async function completeTask(result, elapsedSeconds = null, downloadName = '') {
 }
 
 function failTask(message, elapsedSeconds = null) {
+    dismissAsrModelAdvice();
     stopPolling();
     stopElapsedTimer(elapsedSeconds);
     setTaskActive(false);
@@ -2767,11 +2779,13 @@ async function cancelCurrentTask() {
     const button = byId('cancelTaskBtn');
     button.disabled = true;
     button.textContent = '正在取消';
+    let requestSent = false;
     try {
         const response = await fetch(`${API_BASE}/task/${encodeURIComponent(currentTaskId)}/cancel`, {
             method: 'POST'
         });
         const data = await readResponse(response, '取消任务失败');
+        requestSent = true;
         if (data.status === 'cancelled') {
             markTaskCancelled(
                 '任务已取消；已生成的中间文件仍保留在工作目录',
@@ -2788,11 +2802,12 @@ async function cancelCurrentTask() {
         button.disabled = false;
     } finally {
         isCancelling = false;
-        button.textContent = isTaskActive ? '取消请求已发送' : '取消任务';
+        button.textContent = requestSent && isTaskActive ? '取消请求已发送' : '取消任务';
     }
 }
 
 function markTaskCancelled(message, elapsedSeconds = null) {
+    dismissAsrModelAdvice();
     stopPolling();
     stopElapsedTimer(elapsedSeconds);
     setTaskActive(false);
@@ -2822,6 +2837,7 @@ function setTaskActive(active) {
     const cancelButton = byId('cancelTaskBtn');
     cancelButton.hidden = !active;
     cancelButton.disabled = !active || isCancelling;
+    cancelButton.textContent = '取消任务';
 }
 
 function setSourceControlsDisabled(disabled) {
@@ -2877,6 +2893,146 @@ function renderTaskAdvisory(message) {
     const advisory = byId('taskAdvisory');
     advisory.textContent = typeof message === 'string' ? message : '';
     advisory.hidden = !advisory.textContent;
+}
+
+let asrAdviceKey = '';
+
+function maybeShowAsrModelAdvice(task) {
+    const advice = task && task.model_advice;
+    if (!advice || advice.kind !== 'asr_model') return;
+    if (!['queued', 'processing', 'cancelling'].includes(task.status)) return;
+    const key = `${task.task_id || currentTaskId}:${advice.current_model}:${advice.duration}`;
+    if (asrAdviceKey === key) return;
+    asrAdviceKey = key;
+    byId('asrAdviceBody').textContent = `${advice.message}\n\n`
+        + '点下面的按钮会先停止这次 base 转写，并检查目标模型：'
+        + '已缓存就直接用它重新转写；未缓存会打开模型弹窗，'
+        + '装好后自动继续这次任务。右上角 × 会取消本次任务；'
+        + '只想关闭提示请点「继续用 base」。';
+    byId('asrAdviceModal').hidden = false;
+}
+
+function dismissAsrModelAdvice() {
+    byId('asrAdviceModal').hidden = true;
+}
+
+function stopTaskForModelSwitch(message, elapsedSeconds = null) {
+    stopPolling();
+    stopElapsedTimer(elapsedSeconds);
+    setTaskActive(false);
+    setTaskState('cancelled', '已停止');
+    byId('taskError').hidden = true;
+    byId('networkState').textContent = message;
+    addLog(message, 'warning');
+    setSubmitButton(false, '重新开始');
+    loadRecentTasks(true);
+}
+
+async function cancelActiveTaskAndWait() {
+    if (!currentTaskId || !isTaskActive) {
+        return { ok: true, status: 'inactive', task: null };
+    }
+    stopPolling();
+    isCancelling = true;
+    try {
+        await fetch(
+            `${API_BASE}/task/${encodeURIComponent(currentTaskId)}/cancel`,
+            { method: 'POST' }
+        );
+        for (let tick = 0; tick < 40; tick += 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, 250));
+            let task;
+            try {
+                const response = await fetch(
+                    `${API_BASE}/task/${encodeURIComponent(currentTaskId)}`,
+                    { cache: 'no-store' }
+                );
+                task = await readResponse(response, '读取任务状态失败');
+            } catch {
+                continue;
+            }
+            if (['cancelled', 'failed', 'completed'].includes(task.status)) {
+                return { ok: true, status: task.status, task };
+            }
+        }
+        schedulePoll(currentTaskId, 0);
+        return { ok: false, status: 'timeout', task: null };
+    } catch (error) {
+        schedulePoll(currentTaskId, 0);
+        return { ok: false, status: 'error', task: null, error };
+    } finally {
+        isCancelling = false;
+    }
+}
+
+function cancelFailureMessage(result) {
+    return result.status === 'timeout'
+        ? '停止当前任务超时，请稍后再试'
+        : `停止当前任务失败：${result.error?.message || '未知错误'}`;
+}
+
+async function cancelTaskForModelSwitch(label) {
+    const result = await cancelActiveTaskAndWait();
+    if (!result.ok) {
+        showToast(cancelFailureMessage(result), 'error');
+        return false;
+    }
+    if (result.status === 'inactive') return true;
+    stopTaskForModelSwitch(
+        result.status === 'cancelled'
+            ? `已停止 base 转写，准备改用 ${label}`
+            : `原任务已${result.status === 'completed' ? '完成' : '失败'}，准备改用 ${label}`,
+        result.task.elapsed_seconds
+    );
+    return true;
+}
+
+async function closeAsrAdviceAndCancel() {
+    dismissAsrModelAdvice();
+    if (!currentTaskId || !isTaskActive) return;
+    const result = await cancelActiveTaskAndWait();
+    if (!result.ok) {
+        showToast(cancelFailureMessage(result), 'error');
+        return;
+    }
+    if (result.status === 'cancelled') {
+        markTaskCancelled('已取消本次任务；可改用 paraformer / Belle 后重新生成');
+        return;
+    }
+    // 取消晚了一步：让正常轮询把已完成/失败的结果渲染出来。
+    schedulePoll(currentTaskId, 0);
+    showToast(
+        result.status === 'completed' ? '任务已在取消前完成' : '任务已失败',
+        result.status === 'completed' ? 'info' : 'error'
+    );
+}
+
+async function chooseAsrAdviceModel(modelId) {
+    byId('asrAdviceModal').hidden = true;
+    if (modelDialogResolve) {
+        showToast('请先完成当前的模型弹窗', 'info');
+        return;
+    }
+    const select = byId('whisperModel');
+    select.value = modelId;
+    select.dispatchEvent(new Event('change'));
+    await refreshWhisperModelHints();
+    const option = select.selectedOptions[0];
+    const label = (option?.dataset.baseLabel || option?.textContent || modelId).split('（')[0];
+    const cached = Boolean(option && option.dataset.status === 'cached');
+    // 先停掉这次 base 任务；模型已缓存就直接用新模型重新转写，
+    // 未缓存则打开现有模型弹窗，等模型就绪后自动继续。
+    if (!await cancelTaskForModelSwitch(label)) return;
+    if (!cached) {
+        const status = option ? option.dataset.status : 'missing';
+        const decision = await promptModelDownload(modelId, status);
+        if (decision !== 'ready') {
+            showToast(`${label} 未就绪；base 任务已停止，可稍后重新生成`, 'info');
+            return;
+        }
+    }
+    showToast(`已改用 ${label}，正在继续任务`, 'success');
+    await startSummary({ resumeCurrent: true, retranscribe: true });
 }
 
 function clearLogs() {

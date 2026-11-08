@@ -2,7 +2,7 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.4.7</h1>
+<h1 align="center">VideoToNo v1.4.8</h1>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -18,18 +18,17 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 > 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (WorkBuddy uses `~/.workbuddy-ai/skills/`; Claude Code and pi follow their own conventions) and agents like WorkBuddy, Claude Code or pi can generate video notes from a single sentence. **The Skill is only a remote control — VideoToNo itself must exist on the machine first** (the portable exe is enough; no need to launch it). WorkBuddy can also attach to the local MCP server directly — see the **MCP / AI clients** and **Agent Skill** sections below. See `skills/video-to-note/SKILL.md` for details.
 
-## 🆕 What's New (v1.4.6 → v1.4.7)
+## 🆕 What's New (v1.4.7 → v1.4.8)
 
-- **New export format: Word `.docx`**: the export menu now has a "Word 文档 (.docx)" entry. Headings, lists, bold text, tables and the note's timed screenshots all come along; Word and WPS can edit the file directly
-- **Choosing a model that is not downloaded yet no longer means waiting blindly**: pressing Generate explains the model size and recommends manual import — it opens the folder, lists the files to download and where to get them. "Auto download" is still available, and the dialog shows how much of the current file has arrived. If a download fails, the same dialog offers the manual route instead of failing the whole task
-- **Fixed: Bilibili multi-part audio sometimes failed with an incomplete download** — if the connection drops mid-file, the app now switches to Bilibili's play URLs, resuming and retrying before transcription starts
-- **Fixed: an expired Bilibili session could not be re-scanned** — "Scan to log in" used to restore the old account from the local browser profile; when those cookies had expired, tasks kept failing with "Bilibili rejected this request". The app now validates the restored session and opens a clean QR window when it is no longer valid, and the credentials panel has a "重新扫码（换账号）" button to switch accounts at any time
-- **Fixed: long transcriptions sometimes froze for good** — with `large-v3` on a 20-minute-plus file the progress bar stalled, the log stopped growing, the GPU kept working, and the task neither failed nor finished. The worker returns the whole transcript as one JSON line, and anything past asyncio's default 64 KB line limit silently killed the reader coroutine, leaving the parent waiting forever. The line limit is now 16 MB, and a genuine read failure reports a clear error and stops the worker instead of hanging
-- **Fixed: longer notes could stop halfway** — a note ending at 36:35 while the transcript ran to 01:03:15 is now recognized as a genuinely missing tail and completed in bounded sections. Notes that only omit timestamps but do contain the content are left alone
+- **More reliable transcription, now with progress**: `paraformer-zh` shows the processed position and percentage as soon as the first segment is ready, refreshed every 30 seconds. The Belle long-audio gibberish issue is also fixed; repetitive garbage is caught before note generation with an automatic fallback to paraformer. Bilibili AI-caption tasks are unaffected.
+- **Long videos on `base` get a better-model suggestion**: for videos over 20 minutes the app suggests `paraformer-zh` or `belle-turbo-zh`; "Switch" stops the base run, restarts immediately if the model is cached, or opens the import/download dialog and continues automatically once ready.
+- **More complete notes, less likely to be cut off**: detailed-note tail patching now continues from where the body actually stopped; longer notes also get a higher output budget to reduce mid-generation cuts.
+- Other small fixes and polish.
 
 <details>
-<summary>Previous releases (v1.4.6 and earlier)</summary>
+<summary>Previous releases (v1.4.7 and earlier)</summary>
 
+- **v1.4.7**: Word `.docx` export; choose manual import or auto download (with progress) when submitting a model that is not cached; Bilibili multi-part download retries via play URLs and expired sessions can be re-scanned; fixed long-audio transcription hangs and notes that stopped halfway.
 - **v1.4.6**: subtitles export as `.srt` and `.srt` / `.vtt` files can be imported to write a note; Bilibili credentials are encrypted and stored after one QR scan; the skill starts a headless instance when the app is closed and lets it exit when idle; fixed machines whose registry broke script MIME types and left the whole page unresponsive.
 
 - **v1.4.5**: long videos and small local models finish in one run far more often (a rejected request no longer discards the whole task, and fragmented ASR lines are merged before chunking); a "token limit" error now names the model's context window and what to widen; txt / html / json / PNG exports are named after the video title, Bilibili parts carry their part number and "transcript only" archives as `title【转录】.md`; transcription runs in its own process so a faulty model library fails one task instead of the app; the connection test retries without a proxy, a self-check panel was added, and startup checks for a new release with a "skip this version" choice.
@@ -69,7 +68,7 @@ VideoToNo turns the **"video → structured notes" pipeline** into a local-first
 
 ## 🚀 Portable build (recommended)
 
-No Python or development setup is required. Download `VideoToNo-1.4.7-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+No Python or development setup is required. Download `VideoToNo-1.4.8-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
 
 1. Download and double-click the exe;
 2. Wait for the local page to open in your browser;

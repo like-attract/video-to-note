@@ -129,11 +129,83 @@ def chunk_segments(
     return chunks
 
 
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def _segment_looks_noisy(text: str) -> bool:
+    """单段是否像解码退化后的乱码/重复，而不是正常口播。
+
+    典型形状是 Whisper 系的重复循环：`X, C, A, X, X. X.X, XC, XK...`。
+    这里只认“几乎没有中文 + 大量单字母/X”的强噪声，避免把正常的英文术语段
+    误判成坏转录。
+    """
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) < 6:
+        return False
+    letters = _LATIN_LETTER_RE.findall(compact)
+    cjk = _CJK_RE.findall(compact)
+    tokens = _WORD_RE.findall(text)
+    cjk_ratio = len(cjk) / len(compact)
+    latin_ratio = len(letters) / len(compact)
+    x_ratio = sum(1 for letter in letters if letter.lower() == "x") / max(1, len(letters))
+    single_ratio = sum(1 for token in tokens if len(token) == 1) / max(1, len(tokens))
+    if cjk_ratio < 0.05 and latin_ratio >= 0.35 and (
+        x_ratio >= 0.15 or (single_ratio >= 0.35 and len(tokens) >= 6)
+    ):
+        return True
+    unique_ratio = len(set(compact)) / len(compact)
+    return len(compact) >= 40 and unique_ratio < 0.15
+
+
+def _suspicious_transcript(
+    segments: Sequence[TranscriptSegment], duration: float
+) -> tuple[bool, str | None]:
+    """找连续成片的噪声段；单段毛刺不判死，中文视频里的英文术语段也不判死。"""
+    if duration <= 0 or not segments:
+        return False, None
+    overall = "".join(segment.text for segment in segments)
+    if not overall:
+        return False, None
+    if len(_CJK_RE.findall(overall)) / len(overall) < 0.15:
+        # 整片不是以中文为主：英文视频里的英文段是正常内容，不能按“没有中文”判噪。
+        return False, None
+
+    runs: list[list[TranscriptSegment]] = []
+    current: list[TranscriptSegment] = []
+    for segment in segments:
+        if _segment_looks_noisy(segment.text):
+            current.append(segment)
+            continue
+        if current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+
+    for run in runs:
+        if len(run) < 3:
+            continue
+        span = run[-1].end - run[0].start
+        if span < max(20.0, duration * 0.08):
+            continue
+        start = format_timestamp(run[0].start)
+        end = format_timestamp(run[-1].end)
+        share = min(1.0, span / duration)
+        return True, (
+            f"{start}–{end} 连续 {len(run)} 段疑似重复或乱码，"
+            f"约占全片 {share:.0%}"
+        )
+    return False, None
+
+
 def transcript_quality(
     segments: Sequence[TranscriptSegment], duration: float
-) -> dict[str, float | int | bool]:
+) -> dict[str, float | int | bool | str | None]:
     characters = sum(len(segment.text) for segment in segments)
     speech_seconds = sum(max(0, segment.end - segment.start) for segment in segments)
+    suspicious, suspicion = _suspicious_transcript(segments, duration)
     if duration <= 0:
         return {
             "characters": characters,
@@ -141,6 +213,8 @@ def transcript_quality(
             "speech_coverage": 0.0,
             "characters_per_second": 0.0,
             "insufficient": False,
+            "suspicious": suspicious,
+            "suspicion": suspicion,
         }
     coverage = min(1.0, speech_seconds / duration)
     character_rate = characters / duration
@@ -151,6 +225,8 @@ def transcript_quality(
         "speech_coverage": round(coverage, 4),
         "characters_per_second": round(character_rate, 4),
         "insufficient": insufficient,
+        "suspicious": suspicious,
+        "suspicion": suspicion,
     }
 
 

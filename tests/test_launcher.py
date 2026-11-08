@@ -77,9 +77,114 @@ def test_check_for_updates_opens_new_release_after_confirmation(monkeypatch) -> 
     monkeypatch.setattr(launcher, "show_update_message", lambda *args, **kwargs: 6)
     monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
 
-    launcher.check_for_updates()
+    launcher._check_for_updates_now()
 
     assert opened == ["https://github.com/example/release"]
+
+
+def test_check_for_updates_reports_local_test_build_ahead_of_github(monkeypatch) -> None:
+    """本地测试版号高于线上时，不能说“已是最新版本”。"""
+    messages: list[str] = []
+    monkeypatch.setattr(
+        launcher,
+        "latest_release_info",
+        lambda: {"tag_name": "v1.4.7", "html_url": "https://github.com/example/release"},
+    )
+    monkeypatch.setattr(launcher, "VERSION", "1.4.8")
+    monkeypatch.setattr(
+        launcher,
+        "show_update_message",
+        lambda message, **kwargs: messages.append(message) or 1,
+    )
+
+    launcher._check_for_updates_now()
+
+    assert messages
+    assert "GitHub 最新发布 v1.4.7" in messages[0]
+    assert "本地测试版" in messages[0] or "尚未发布" in messages[0]
+
+
+def test_check_for_updates_reports_equal_version_as_current(monkeypatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        launcher,
+        "latest_release_info",
+        lambda: {"tag_name": "v1.4.8", "html_url": "https://github.com/example/release"},
+    )
+    monkeypatch.setattr(launcher, "VERSION", "1.4.8")
+    monkeypatch.setattr(
+        launcher,
+        "show_update_message",
+        lambda message, **kwargs: messages.append(message) or 1,
+    )
+
+    launcher._check_for_updates_now()
+
+    assert messages == ["当前已是最新版本（v1.4.8）。"]
+
+
+def test_check_for_updates_dispatches_to_worker_thread(monkeypatch) -> None:
+    """托盘回调不能在 pystray 的窗口过程线程里同步跑 MessageBox。"""
+    started: list[dict] = []
+
+    class FakeLock:
+        def __init__(self) -> None:
+            self.free = True
+
+        def acquire(self, blocking: bool = False) -> bool:
+            if not self.free:
+                return False
+            self.free = False
+            return True
+
+        def release(self) -> None:
+            self.free = True
+
+    class FakeThread:
+        def __init__(self, target, name, daemon):  # noqa: ANN001
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            started.append(
+                {"target": self.target, "name": self.name, "daemon": self.daemon}
+            )
+
+    monkeypatch.setattr(launcher.threading, "Thread", FakeThread)
+    monkeypatch.setattr(launcher, "_UPDATE_CHECK_LOCK", FakeLock())
+
+    launcher.check_for_updates()
+
+    assert len(started) == 1
+    assert started[0]["name"] == "VideoToNoUpdateCheck"
+    assert started[0]["daemon"] is True
+    assert callable(started[0]["target"])
+
+
+def test_check_for_updates_skips_when_already_running(monkeypatch) -> None:
+    started: list[object] = []
+
+    class BusyLock:
+        def acquire(self, blocking: bool = False) -> bool:
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("未取得锁时不应 release")
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def start(self) -> None:
+            started.append(object())
+
+    monkeypatch.setattr(launcher.threading, "Thread", FakeThread)
+    monkeypatch.setattr(launcher, "_UPDATE_CHECK_LOCK", BusyLock())
+
+    launcher.check_for_updates()
+
+    assert started == []
 
 
 class FakeServer:

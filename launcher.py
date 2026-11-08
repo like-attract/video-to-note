@@ -31,7 +31,7 @@ from typing import Any, Callable
 from backend import update_check
 from backend.update_check import GITHUB_LATEST_RELEASE_API, version_tuple
 
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
@@ -309,25 +309,53 @@ def latest_release_info() -> dict[str, str]:
     return {"tag_name": info["tag_name"], "html_url": info["html_url"]}
 
 
+# MessageBox 的置顶/前台标志：弹窗由独立线程创建，避免被其它窗口盖住后
+# 用户以为没反应。
+_MB_SETFOREGROUND = 0x00010000
+_MB_TOPMOST = 0x00040000
+
+_UPDATE_CHECK_LOCK = threading.Lock()
+
+
 def show_update_message(message: str, title: str = APP_NAME, flags: int = 0x40) -> int:
     """显示更新提示；开发模式/非 Windows 下退回日志，便于测试。"""
     if sys.platform == "win32":
         import ctypes
 
-        return int(ctypes.windll.user32.MessageBoxW(None, message, title, flags))
+        return int(
+            ctypes.windll.user32.MessageBoxW(
+                None, message, title, flags | _MB_SETFOREGROUND | _MB_TOPMOST
+            )
+        )
     print(f"{title}: {message}", file=sys.stderr, flush=True)
     return 0
 
 
-def check_for_updates(_icon: Any = None, _item: Any = None) -> None:
-    """手动检查 GitHub Release，不阻塞启动，也不在启动时联网。"""
+def _check_for_updates_now() -> None:
+    """同步检查一次更新并弹窗；调用方必须已经在工作线程里。"""
     try:
         release = latest_release_info()
-        if version_tuple(release["tag_name"]) <= version_tuple(VERSION):
-            show_update_message(f"当前已是最新版本（v{VERSION}）。", flags=0x40)
+        remote = str(release["tag_name"])
+        remote_version = version_tuple(remote)
+        local_version = version_tuple(VERSION)
+        if remote_version <= local_version:
+            if remote_version == local_version:
+                if remote.lstrip("vV") == VERSION:
+                    message = f"当前已是最新版本（v{VERSION}）。"
+                else:
+                    message = (
+                        f"当前版本 v{VERSION} 与 GitHub 最新发布 {remote} 版本号相同"
+                        "（本地测试版），无需更新。"
+                    )
+            else:
+                message = (
+                    f"当前版本 v{VERSION} 高于 GitHub 最新发布 {remote}。\n\n"
+                    "这通常是本地测试版或尚未发布的构建，无需更新。"
+                )
+            show_update_message(message, flags=0x40)
             return
         message = (
-            f"检测到新版本 {release['tag_name']}（当前 v{VERSION}）。\n\n"
+            f"检测到新版本 {remote}（当前 v{VERSION}）。\n\n"
             "是否打开 GitHub Release 页面查看并更新？"
         )
         result = show_update_message(message, title=f"{APP_NAME} 更新", flags=0x24)
@@ -335,6 +363,27 @@ def check_for_updates(_icon: Any = None, _item: Any = None) -> None:
             webbrowser.open(release["html_url"])
     except Exception as error:
         show_update_message(f"检查更新失败：{error}\n请稍后重试。", title=f"{APP_NAME} 更新", flags=0x10)
+
+
+def check_for_updates(_icon: Any = None, _item: Any = None) -> None:
+    """托盘菜单回调：网络请求和 MessageBox 都不能在托盘消息循环线程里做。
+
+    pystray 的菜单回调是在窗口过程里同步执行的；在那里直接调 MessageBoxW，
+    Windows 上会出现弹窗无法用“确定”或右上角叉关闭的模态死结。把整段检查
+    放到 daemon 线程，菜单回调立即返回。
+    """
+    if not _UPDATE_CHECK_LOCK.acquire(blocking=False):
+        return
+
+    def worker() -> None:
+        try:
+            _check_for_updates_now()
+        finally:
+            _UPDATE_CHECK_LOCK.release()
+
+    threading.Thread(
+        target=worker, name="VideoToNoUpdateCheck", daemon=True
+    ).start()
 
 
 def tray_icon_image() -> Any:

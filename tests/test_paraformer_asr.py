@@ -151,6 +151,68 @@ def test_transcribe_sync_assembles_segments(
     assert result["model"] == "paraformer-zh"
 
 
+def test_transcribe_sync_reports_first_progress_without_waiting_for_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第一段解码完就回报，不能先干等一个 30 秒心跳周期。"""
+    transcriber = ParaformerTranscriber(tmp_path / "cache")
+    monkeypatch.setattr(
+        transcriber,
+        "_ensure_models",
+        lambda cancel_event: _fake_models(_FakeRecognizer(["第一句", "第二句"])),
+    )
+    audio = _fake_audio(3.0)
+    _patch_audio(monkeypatch, audio)
+    rate = paraformer_asr.SAMPLE_RATE
+    pieces = [
+        (0, audio[:rate]),
+        (int(rate * 1.5), audio[int(rate * 1.5) : int(rate * 2.5)]),
+    ]
+    monkeypatch.setattr(transcriber, "_vad_pieces", lambda *_args, **_kw: pieces)
+    progress: list[tuple[float, float]] = []
+
+    transcriber._transcribe_sync(
+        Path("a.m4a"),
+        "paraformer-zh",
+        False,
+        None,
+        lambda done, total: progress.append((done, total)),
+    )
+
+    assert progress == [(1.0, 3.0)]
+
+
+def test_transcribe_sync_reports_progress_each_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcriber = ParaformerTranscriber(tmp_path / "cache")
+    monkeypatch.setattr(
+        transcriber,
+        "_ensure_models",
+        lambda cancel_event: _fake_models(_FakeRecognizer(["第一句", "第二句"])),
+    )
+    audio = _fake_audio(3.0)
+    _patch_audio(monkeypatch, audio)
+    rate = paraformer_asr.SAMPLE_RATE
+    pieces = [
+        (0, audio[:rate]),
+        (int(rate * 1.5), audio[int(rate * 1.5) : int(rate * 2.5)]),
+    ]
+    monkeypatch.setattr(transcriber, "_vad_pieces", lambda *_args, **_kw: pieces)
+    monkeypatch.setattr(paraformer_asr, "TRANSCRIBE_HEARTBEAT_SECONDS", 0.0)
+    progress: list[tuple[float, float]] = []
+
+    transcriber._transcribe_sync(
+        Path("a.m4a"),
+        "paraformer-zh",
+        False,
+        None,
+        lambda done, total: progress.append((done, total)),
+    )
+
+    assert progress == [(1.0, 3.0), (2.5, 3.0)]
+
+
 def test_transcribe_sync_reports_punc_and_gpu_notes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

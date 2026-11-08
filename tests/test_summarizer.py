@@ -451,6 +451,117 @@ async def test_truncation_by_output_limit_is_continued_for_detailed_style() -> N
     assert any("按段补写" in warning for warning in summarizer.warnings)
 
 
+@pytest.mark.asyncio
+async def test_tail_patch_starts_after_last_covered_content_not_heading_end() -> None:
+    """标题写到 10:02、正文只写到 09:34 时，必须从 09:35 补，而不是从 10:02 补。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    prompts: list[str] = []
+
+    async def complete(prompt, **kwargs):
+        prompts.append(prompt)
+        return "## 补写 [09:35-11:12]\n\n[11:12] 补写内容"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(0, 300, "开场介绍和第一部分的完整内容。"),
+        TranscriptSegment(300, 564.52, "中间几层的内容。"),
+        TranscriptSegment(
+            564.52,
+            574.94,
+            "写完了，这三层还差最后一步把它们组装起来。现在各层还只通过抽象打交道，"
+            "agent service只认识model client和session store，不知道有anthropic client。",
+        ),
+        TranscriptSegment(
+            575.08,
+            579.24,
+            "和jsonl session store需要有一个地方，把具体的类创建起来接到一起。",
+        ),
+        TranscriptSegment(
+            579.97,
+            590.40,
+            "这个地方就叫组装根，也是启动服务的地方，它是整个系统里唯一知道所有具体类的地方，"
+            "以后换模型换存储、换入口，换任何具体实现。",
+        ),
+        TranscriptSegment(
+            590.63,
+            602.04,
+            "都只要改这一个文件。比如说我们想从claude模型换成gpt模型，就只需要修改这一行。"
+            "最后的目录差不多长这样，于是我们就完成了设计。",
+        ),
+        TranscriptSegment(
+            602.34,
+            620.0,
+            "都放进和ai的对话框里，让他帮你实现。别忘了加上之前提过的tdd的策略，"
+            "让他写好测试再实现。",
+        ),
+        TranscriptSegment(
+            620.0,
+            672.7,
+            "看完这个视频，你应该学会了一套设计思路。感谢您的观看，我们下次再见。",
+        ),
+    ]
+    draft = (
+        "# 视频笔记：《Agent 架构》\n\n"
+        "## 组装根：唯一知道具体类的地方 [09:24-10:02]\n\n"
+        "写完了，这三层还差最后一步把它们组装起来。现在各层还只通过抽象打交道，"
+        "`AgentService` 只认识 `ModelClient` 和 `SessionStore`，不知道有 `An"
+    )
+
+    result = await summarizer._ensure_tail_coverage(
+        "Agent 架构", draft, segments, "detailed", "high", None,
+        truncated_by_length=True,
+    )
+
+    assert prompts
+    assert "缺失部分的转录（09:35 – 11:12）" in prompts[0]
+    assert "这个地方就叫组装根" in prompts[0]
+    assert "### 补遗（09:35 之后）" in result
+    assert any("正文实际只写到 09:34" in warning for warning in summarizer.warnings)
+
+
+@pytest.mark.asyncio
+async def test_common_phrase_in_body_does_not_hide_missing_tail() -> None:
+    """通用短语在前文出现过，不能据此判定尾部已覆盖；没有 finish_reason 也要补。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    prompts: list[str] = []
+
+    async def complete(prompt, **kwargs):
+        prompts.append(prompt)
+        return "## 补写 [10:02-11:12]\n\n[11:12] 补写的结尾"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(0, 300, "前面介绍应用层定义接口，然后在适配层实现。"),
+        TranscriptSegment(564.52, 574.94, "组装根之前的内容。"),
+        TranscriptSegment(
+            602.34,
+            612.60,
+            "都放进和ai的对话框里，让他帮你实现。别忘了加上之前提过的tdd的策略，"
+            "让他写好测试再实现。",
+        ),
+        TranscriptSegment(
+            612.68,
+            672.70,
+            "看完这个视频，你应该学会了一套设计思路，然后在适配层实现。",
+        ),
+    ]
+    draft = (
+        "# 视频笔记：《Agent 架构》\n\n"
+        "## 架构 [09:24-10:02]\n\n"
+        "前面提过在应用层定义接口，然后在适配层实现。"
+    )
+
+    result = await summarizer._ensure_tail_coverage(
+        "Agent 架构", draft, segments, "detailed", "high", None
+    )
+
+    assert prompts, "通用短语不能把真截断判成已覆盖"
+    assert "补写的结尾" in result
+    assert any("正在自动补写" in warning for warning in summarizer.warnings)
+
+
 def test_final_note_budget_grows_with_material_and_has_a_ceiling() -> None:
     assert LLMSummarizer._final_note_max_tokens("字" * 1_000, "faithful") == 4_600
     assert LLMSummarizer._final_note_max_tokens("字" * 1_000, "concise") == 2_400
@@ -475,6 +586,13 @@ async def test_complete_records_finish_reason_for_tail_detection() -> None:
 
     assert await summarizer._complete("测试", 800) == "短正文"
     assert summarizer._last_finish_reason == "length"
+    assert summarizer._last_call_stats == {
+        "stage": "模型调用",
+        "max_tokens": 800,
+        "finish_reason": "length",
+        "reasoning_characters": 0,
+        "content_characters": 3,
+    }
 
 
 @pytest.mark.asyncio
@@ -496,6 +614,13 @@ async def test_condensed_pipeline_recovers_a_length_truncated_draft() -> None:
         if "写一份翔实、自然的 Markdown 视频笔记" in prompt:
             final_tokens.append(max_tokens)
             summarizer._last_finish_reason = "length"
+            summarizer._last_call_stats = {
+                "stage": "正在生成完整笔记",
+                "max_tokens": 8000,
+                "finish_reason": "length",
+                "reasoning_characters": 1234,
+                "content_characters": 567,
+            }
             return (
                 "# 视频笔记：《长视频》\n\n"
                 "## 前半段 [00:00-36:35]\n\n"
@@ -517,6 +642,10 @@ async def test_condensed_pipeline_recovers_a_length_truncated_draft() -> None:
     assert final_tokens and final_tokens[0] > 4_600, "成稿额度没有随材料放大"
     assert "第62分钟的结尾内容" in result
     assert any("按段补写" in warning for warning in summarizer.warnings)
+    assert any(
+        "成稿被输出额度截断" in warning and "max_tokens=8000" in warning
+        for warning in summarizer.warnings
+    )
     assert all(warning.find("已跳过自动补写") == -1 for warning in summarizer.warnings)
 
 
@@ -1292,7 +1421,7 @@ async def test_custom_deepseek_uses_standard_param_with_safe_output_budget() -> 
     )
 
     assert await summarizer._complete("测试", 800, "high") == "摘要"
-    assert captured["max_tokens"] == 12_000
+    assert captured["max_tokens"] == 16_000
     assert "temperature" not in captured
     # 非官方通道不得收到私有 thinking 字段
     assert captured["reasoning_effort"] == "high"
@@ -1318,6 +1447,27 @@ def test_is_official_deepseek_only_matches_deepseek_endpoints() -> None:
     assert not summarizer._is_official_deepseek()
     summarizer.base_url = "https://notdeepseek.example.com/v1"
     assert not summarizer._is_official_deepseek()
+
+
+def test_official_deepseek_gets_32k_high_budget_while_compat_gets_16k() -> None:
+    official = object.__new__(LLMSummarizer)
+    official.model_type = "deepseek"
+    official.model = "deepseek-flash"
+    official.base_url = "https://api.deepseek.com"
+    official.warnings = []
+    assert official._build_request("测试", 4_600, "high")["max_tokens"] == 32_000
+    assert official._build_request("测试", 4_600, "off")["max_tokens"] == 4_600
+    # max 档取 max(正文×5, 官方高额度)，23K 小于 32K
+    assert official._build_request("测试", 4_600, "max")["max_tokens"] == 32_000
+
+    compat = object.__new__(LLMSummarizer)
+    compat.model_type = "custom"
+    compat.model = "DeepSeek-V4-Flash"
+    compat.base_url = "https://gateway.example/v1"
+    compat.warnings = []
+    assert compat._build_request("测试", 4_600, "high")["max_tokens"] == 16_000
+    # 兼容通道的 max 仍按正文×5 抬高，16K 不参与放大
+    assert compat._build_request("测试", 4_600, "max")["max_tokens"] == 23_000
 
 
 def test_env_declared_rejected_params_skip_injection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1444,7 +1594,7 @@ async def test_rejected_reasoning_effort_falls_back_to_model_default(
     # 后续阶段不再重复下发 flat 参数
     request = summarizer._build_request("测试", 800, "high")
     assert "reasoning_effort" not in request
-    assert request["max_tokens"] == 12_000
+    assert request["max_tokens"] == 16_000
     # 同一配置的新实例也从缓存里读到该结论
     fresh = object.__new__(LLMSummarizer)
     fresh.model_type = "custom"
@@ -1612,7 +1762,7 @@ async def test_unsupported_max_tokens_degrades_budget(
     )
     summarizer.warnings = []
     assert await summarizer._complete("测试", 4_600, "high") == "摘要"
-    assert [a.get("max_tokens") for a in attempts] == [12_000, 4_600, None]
+    assert [a.get("max_tokens") for a in attempts] == [16_000, 4_600, None]
     assert any("已不再下发输出额度上限" in warning for warning in summarizer.warnings)
 
 

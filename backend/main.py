@@ -145,6 +145,26 @@ MAX_SUBTITLE_MB = int(os.getenv("MAX_SUBTITLE_MB", "20"))
 MAX_SUBTITLE_BYTES = MAX_SUBTITLE_MB * 1024 * 1024
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo", "belle-turbo-zh"}
 ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"}
+# base 是默认的小模型：短视频够用，20 分钟以上更容易又慢又不准，
+# 这时给一条换 paraformer / Belle 的建议（只在真的走语音转写时提示）。
+BASE_MODEL_ADVICE_SECONDS = 20 * 60
+
+
+def base_model_advice(whisper_model: str, duration: float) -> dict[str, Any] | None:
+    if whisper_model != "base" or duration < BASE_MODEL_ADVICE_SECONDS:
+        return None
+    minutes = BASE_MODEL_ADVICE_SECONDS // 60
+    return {
+        "kind": "asr_model",
+        "current_model": "base",
+        "duration": round(duration),
+        "suggested_models": ["paraformer-zh", "belle-turbo-zh"],
+        "message": (
+            f"这个视频超过 {minutes} 分钟，base 模型在长音频上速度和准确率都容易吃力。"
+            "建议改用 paraformer-zh（最快、中文更准）或 belle-turbo-zh"
+            "（精度更好但更慢）。"
+        ),
+    }
 DOUYIN_HINT = (
     "抖音链接解析失败。可以先点击“打开抖音浏览器”，在本机窗口完成登录/验证后重试；"
     "也可能是媒体地址已过期，请重新提交链接。"
@@ -164,7 +184,7 @@ NOTE_IMAGE_REF_RE = re.compile(
     rf"(!\[[^\]]*\]\()\./(?:{FRAMES_DIR_NAME}|images)/([^)]+)\)"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.4.7")
+app = FastAPI(title="VideoToNo API", version="1.4.8")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -365,12 +385,17 @@ async def run_transcription_local(
 ) -> dict:
     """按所选模型路由转写引擎：paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。
 
-    progress_callback(已转写秒数, 总秒数) 仅 whisper 路径支持（paraformer
-    一次性出结果，且 RTF ≈ 0.05 本来就不需要心跳）。
+    progress_callback(已处理秒数, 总秒数)：两条引擎都支持。平台 AI 字幕路径不经过
+    这里，因此不需要额外心跳。
     """
     if model_name == "paraformer-zh":
         return await paraformer_transcriber.transcribe(
-            media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
+            media_path,
+            model_name,
+            use_gpu,
+            initial_prompt=title,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
     return await transcriber.transcribe(
         media_path,
@@ -397,9 +422,14 @@ def transcribe_progress_reporter(
 
     def report(position: float, duration: float) -> None:
         total = _clock(duration) if duration > 0 else "未知时长"
+        percent = (
+            f"（{max(0, min(100, round(position / duration * 100)))}%）"
+            if duration > 0
+            else ""
+        )
         message = (
             f"正在转写{page_label}音频（{model_name}）："
-            f"已推进到 {_clock(position)} / {total}"
+            f"已推进到 {_clock(position)} / {total}{percent}"
         )
         loop.call_soon_threadsafe(set_progress, task, 4, "语音转写", 38, message)
 
@@ -497,6 +527,8 @@ class SummarizeRequest(BaseModel):
     upload_task_id: str | None = None
     resume_task_id: str | None = None
     processing_mode: Literal["reuse", "restart"] = "reuse"
+    # 换 ASR 模型继续任务时置 True：复用旧任务的视频信息/音频，但忽略旧转录重新转写
+    retranscribe: bool = False
     # transcript：只做「视频 → 带时间轴转录」，不调用大模型，产物到 transcript.json 为止
     output: Literal["note", "transcript"] = "note"
     summary_style: Literal["detailed", "faithful", "concise"] = "detailed"
@@ -820,6 +852,7 @@ def write_task_manifest(
         ),
         "uploaded_filename": uploaded_filename,
         "processing_mode": request.processing_mode,
+        "retranscribe": request.retranscribe,
         "output": request.output,
         # origin=agent 的纯转录任务不进网页端历史（见 list_recent_tasks）
         "origin": origin,
@@ -2252,12 +2285,17 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             video_processor.detect_source(source_url) if source_url else VideoSource.LOCAL
         )
         cookie = douyin_cookie if source_kind == VideoSource.DOUYIN else bili_cookie
-        transcript_result = load_transcript_result(transcript_dir) if transcript_dir else None
+        reused_transcript = load_transcript_result(transcript_dir) if transcript_dir else None
+        transcript_result = None if request.retranscribe else reused_transcript
         bili_pages_to_transcribe: list = []
 
-        if transcript_result:
+        if reused_transcript:
             set_progress(task, 1, "恢复任务信息", 8, "正在读取已有任务信息")
-            info = load_reused_video_info(transcript_dir, transcript_result, source_url)
+            info = load_reused_video_info(transcript_dir, reused_transcript, source_url)
+            if request.retranscribe:
+                task["logs"].append(
+                    "按本次选择重新转写：复用旧任务的视频信息与音频，忽略已有转录"
+                )
         else:
             media_input = uploaded_path or source_url or ""
             set_progress(task, 1, "读取视频信息", 8, "正在读取视频信息")
@@ -2373,8 +2411,15 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             title = info["title"]
 
         raise_if_cancel_requested(task)
+        retry_media_path: Path | None = None
         if transcript_result is None or bili_pages_to_transcribe:
             set_progress(task, 3, "准备音频", 25, "正在准备音频")
+            advice = base_model_advice(
+                request.whisper_model, float(info.get("duration") or 0)
+            )
+            if advice:
+                task["model_advice"] = advice
+                task["logs"].append(advice["message"])
             if bili_pages_to_transcribe:
                 # 多分 P：对没有 AI 字幕的分 P 逐个下载音频并转写，再按顺序合并
                 whisper_by_page: dict[int, dict] = {}
@@ -2469,6 +2514,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                         source_url or "", task_id, cookie, should_abort=should_abort,
                         notes=fallback_notes,
                     )
+                retry_media_path = media_path
                 raise_if_cancel_requested(task)
                 note_api_fallback()
                 set_progress(
@@ -2518,6 +2564,56 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         task["logs"].append(
             f"文字质量检查：{quality['characters']} 字，语音覆盖 {quality['speech_coverage']:.0%}"
         )
+        if quality.get("suspicious"):
+            suspicion = quality.get("suspicion") or "未通过内容检查"
+            task["logs"].append(f"转写内容异常：{suspicion}")
+            can_fallback = (
+                retry_media_path is not None
+                and request.whisper_model != "paraformer-zh"
+                and paraformer_transcriber.core_ready()
+            )
+            if can_fallback:
+                task["logs"].append(
+                    "转写内容疑似重复或乱码，已自动改用 paraformer-zh 重新转写"
+                )
+                set_progress(
+                    task, 4, "语音转写", 38, "转写内容异常，正在改用 paraformer-zh 重试"
+                )
+                whisper_result = await run_transcription(
+                    retry_media_path,
+                    "paraformer-zh",
+                    request.use_gpu,
+                    title,
+                    task.get("_cancel_event"),
+                    progress_callback=transcribe_progress_reporter(task, "paraformer-zh"),
+                )
+                raise_if_cancel_requested(task)
+                segments = whisper_result["segments"]
+                transcript_result = {
+                    "segments": segments,
+                    "language": whisper_result["language"],
+                    "source": "paraformer",
+                }
+                if not info.get("duration"):
+                    info["duration"] = whisper_result["duration"]
+                quality = transcript_quality(
+                    segments, float(info.get("duration") or 0)
+                )
+                transcript_result["quality"] = quality
+                task["logs"].append(
+                    f"paraformer 重转完成：{len(segments)} 段，"
+                    f"文字质量检查：{quality['characters']} 字，"
+                    f"语音覆盖 {quality['speech_coverage']:.0%}"
+                )
+                append_asr_notes(task, whisper_result)
+            if quality.get("suspicious"):
+                stage = "调用大模型" if request.output == "note" else "返回转录"
+                raise RuntimeError(
+                    "转写内容疑似重复或乱码"
+                    f"（{quality.get('suspicion') or '未通过内容检查'}），"
+                    f"已在{stage}前停止。建议改用 paraformer-zh 重新转写；"
+                    "如果已经使用 paraformer-zh，请检查音频或换一个转写模型。"
+                )
         await write_transcript_files(task_id, segments, transcript_result)
         if (
             transcript_result["source"] in {"faster_whisper", "paraformer"}

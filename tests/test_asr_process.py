@@ -10,6 +10,7 @@ import io
 import json
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -67,6 +68,26 @@ WAIT_SECONDS = 30.0
 
 def fake_child(script: str):
     return lambda: [sys.executable, "-c", script]
+
+
+@pytest.mark.asyncio
+async def test_run_transcription_local_forwards_progress_to_paraformer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    async def fake_transcribe(*args, **kwargs):
+        captured.update(kwargs)
+        return {"segments": []}
+
+    monkeypatch.setattr(main.paraformer_transcriber, "transcribe", fake_transcribe)
+    reporter = lambda done, total: None  # noqa: E731
+
+    await main.run_transcription_local(
+        Path("a.m4a"), "paraformer-zh", False, None, None, reporter
+    )
+
+    assert captured["progress_callback"] is reporter
 
 
 @pytest.mark.asyncio
